@@ -12,17 +12,16 @@
 package tui
 
 import (
-	"bufio"
 	"encoding/base64"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/secretbridge/secretbridge/internal/ipc"
+	"golang.org/x/term"
 )
 
 // Config for the TUI session.
@@ -63,11 +62,12 @@ func RunOnFile(cfg Config, tty *os.File) error {
 		cfg.PollInterval = 2 * time.Second
 	}
 
-	saved, err := sttyMode(tty)
+	fd := int(tty.Fd())
+	saved, err := term.GetState(fd)
 	if err != nil {
 		return fmt.Errorf("terminal does not support raw input: %w", err)
 	}
-	restore := func() { _ = restoreMode(tty, saved) }
+	restore := func() { _ = term.Restore(fd, saved) }
 	defer restore()
 
 	// F06: terminal restoration must survive signals, not just returns.
@@ -86,13 +86,17 @@ func RunOnFile(cfg Config, tty *os.File) error {
 		os.Exit(130)
 	}()
 
-	if err := setRaw(tty); err != nil {
+	raw, err := term.MakeRaw(fd)
+	if err != nil {
 		return err
 	}
-	defer func() { _ = showCursor(tty) }()
+	defer func() {
+		_ = term.Restore(fd, raw)
+		_ = showCursor(tty)
+	}()
 
 	ui := &session{tty: tty, cfg: cfg, sel: 0, winch: winch}
-	return ui.loop(saved)
+	return ui.loop()
 }
 
 type session struct {
@@ -103,48 +107,81 @@ type session struct {
 	status   string
 	lastPoll time.Time
 	winch    <-chan os.Signal
+	input    <-chan byte
+	inputEnd <-chan struct{}
 }
 
-func (s *session) loop(saved string) error {
-	_ = saved
+// startInput reads raw terminal bytes in the background so the UI loop
+// can always select on refresh ticks. Closing the channel or ending the
+// reader signals terminal loss; buffered capacity one is enough because
+// a keypress is a single byte in this input model.
+func startInput(tty *os.File) (<-chan byte, <-chan struct{}) {
+	in := make(chan byte, 64)
+	end := make(chan struct{})
+	go func() {
+		defer close(end)
+		defer close(in)
+		var buf [1]byte
+		for {
+			n, err := tty.Read(buf[:])
+			if err != nil || n == 0 {
+				return
+			}
+			select {
+			case in <- buf[0]:
+			case <-end:
+				return
+			}
+		}
+	}()
+	return in, end
+}
+
+func (s *session) loop() error {
+	s.input, s.inputEnd = startInput(s.tty)
 	s.refresh()
-	reader := bufio.NewReader(s.tty)
 	tick := time.NewTicker(500 * time.Millisecond)
 	defer tick.Stop()
-	// A dead terminal (EOF/EIO on every read) exits instead of spinning:
-	// read deadlines are routine timeouts, but consecutive REAL input
-	// errors mean the operator's terminal is gone (F06 EOF semantics).
-	deadReads := 0
 	for {
 		s.render()
 		if time.Since(s.lastPoll) >= s.cfg.PollInterval {
 			s.refresh()
 		}
+		var b byte
+		var ok bool
 		select {
 		case <-tick.C:
+			continue
 		case <-s.winch:
-		default:
-		}
-		_ = s.tty.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-		b, err := reader.ReadByte()
-		_ = s.tty.SetReadDeadline(time.Time{})
-		if err != nil {
-			if os.IsTimeout(err) {
-				continue // routine tick: re-render / re-poll
-			}
-			deadReads++
-			if deadReads >= 5 {
+			continue
+		case b, ok = <-s.input:
+			if !ok {
 				return fmt.Errorf("terminal input lost")
 			}
-			continue
 		}
-		deadReads = 0
 		// Handle escape sequences (arrows) minimally.
 		if b == 0x1b {
-			_ = s.tty.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
-			c1, e1 := reader.ReadByte()
-			c2, e2 := reader.ReadByte()
-			_ = s.tty.SetReadDeadline(time.Time{})
+			var seq [2]byte
+			select {
+			case c, ok := <-s.input:
+				seq[0] = c
+				if !ok {
+					return fmt.Errorf("terminal input lost")
+				}
+			case <-s.inputEnd:
+				return fmt.Errorf("terminal input lost")
+			}
+			select {
+			case c, ok := <-s.input:
+				seq[1] = c
+				if !ok {
+					return fmt.Errorf("terminal input lost")
+				}
+			case <-s.inputEnd:
+				return fmt.Errorf("terminal input lost")
+			}
+			e1, e2 := error(nil), error(nil)
+			c1, c2 := seq[0], seq[1]
 			if e1 == nil && e2 == nil && c1 == '[' {
 				switch c2 {
 				case 'A':
@@ -286,6 +323,9 @@ func (s *session) doFulfill() {
 	}
 	m, _ := res.(map[string]interface{})
 	s.status = fmt.Sprintf("authorized %s op=%v — watch status view", it.id, m["op_id"])
+	// Render the success message before refreshing so it is visible
+	// in the terminal transcript before the next poll overwrites it.
+	s.render()
 	s.refresh()
 }
 
@@ -317,41 +357,50 @@ func (s *session) renderDetail(it item) {
 	fmt.Fprintf(s.tty, "\r\nREQUEST REVIEW (broker-verified — approve only what is shown)\r\n  Requester: %s\r\n  Recipient: %s (registered destination)\r\n  Action:    supply %s\r\n  Usage:     %s\r\n  Expires:   %s\r\n  Agent note (UNTRUSTED): %s\r\n", it.agent, it.dest, it.kind, usage(it), it.expires, it.purpose)
 }
 
-// confirm reads a y/N answer in cooked-restore mode on /dev/tty.
+// confirm reads a y/N answer through the shared input channel, so no
+// bytes are stranded in a second reader between prompts.
 func (s *session) confirm(prompt string) bool {
-	_ = setCooked(s.tty)
 	fmt.Fprint(s.tty, "\r\n"+prompt)
-	rd := bufio.NewReader(s.tty)
-	line, _ := rd.ReadString('\n')
-	_ = setRaw(s.tty)
-	line = strings.TrimSpace(strings.ToLower(line))
-	return line == "y" || line == "yes"
+	var line []byte
+	for {
+		var c byte
+		var ok bool
+		select {
+		case <-s.inputEnd:
+			return false
+		case c, ok = <-s.input:
+			if !ok {
+				return false
+			}
+		}
+		if c == '\n' || c == '\r' {
+			break
+		}
+		line = append(line, c)
+	}
+	text := strings.TrimSpace(strings.ToLower(string(line)))
+	return text == "y" || text == "yes"
 }
 
-// readMasked collects one hidden field with '*' echo. Ctrl+C / EOF aborts
-// with no partial submission; the buffer is owned by the caller.
+// readMasked collects one hidden field with '*' echo from the shared
+// input channel. Ctrl+C / EOF aborts with no partial submission; the
+// buffer is owned by the caller. Using the same channel as the main
+// loop prevents one reader from consuming bytes intended for another.
 func (s *session) readMasked(prompt string) ([]byte, error) {
-	_ = setCooked(s.tty)
-	defer setRaw(s.tty)
 	fmt.Fprint(s.tty, "\r\n"+prompt)
-	// Disable echo for the secret line, restore right after.
-	saved, err := sttyMode(s.tty)
-	if err != nil {
-		return nil, err
-	}
-	off := exec.Command("stty", "-echo")
-	off.Stdin = s.tty
-	if err := off.Run(); err != nil {
-		return nil, fmt.Errorf("cannot disable echo")
-	}
-	defer restoreMode(s.tty, saved)
-	rd := bufio.NewReader(s.tty)
 	var buf []byte
 	for {
-		c, err := rd.ReadByte()
-		if err != nil {
+		var c byte
+		var ok bool
+		select {
+		case <-s.inputEnd:
 			clearBytes(buf)
 			return nil, fmt.Errorf("input cancelled")
+		case c, ok = <-s.input:
+			if !ok {
+				clearBytes(buf)
+				return nil, fmt.Errorf("input cancelled")
+			}
 		}
 		if c == '\n' || c == '\r' {
 			fmt.Fprint(s.tty, "\r\n")
@@ -441,36 +490,6 @@ func clearBytes(b []byte) {
 	for i := range b {
 		b[i] = 0
 	}
-}
-
-// --- terminal modes (library-free, no external stty dependency for the
-// steady state; stty is used only for one-shot save/restore/echo toggles).
-func sttyMode(tty *os.File) (string, error) {
-	cmd := exec.Command("stty", "-g")
-	cmd.Stdin = tty
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-func restoreMode(tty *os.File, saved string) error {
-	cmd := exec.Command("stty", saved)
-	cmd.Stdin = tty
-	return cmd.Run()
-}
-
-func setRaw(tty *os.File) error {
-	cmd := exec.Command("stty", "-echo", "-icanon", "min", "1", "time", "0")
-	cmd.Stdin = tty
-	return cmd.Run()
-}
-
-func setCooked(tty *os.File) error {
-	cmd := exec.Command("stty", "echo", "icanon")
-	cmd.Stdin = tty
-	return cmd.Run()
 }
 
 func showCursor(tty *os.File) error {

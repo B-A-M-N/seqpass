@@ -20,6 +20,9 @@ import (
 func testBroker(t *testing.T) (*service.Service, string) {
 	t.Helper()
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
 	svc, err := service.New(service.Config{
 		DBPath: filepath.Join(dir, "meta.db"), VaultType: "memory-test",
 	})

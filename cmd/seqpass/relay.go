@@ -6,13 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/secretbridge/secretbridge/internal/ipc"
+	"golang.org/x/term"
 )
 
 // Trusted human handoff CLI (QR-02). This is the user-side intake
@@ -384,10 +384,8 @@ func relayRequestCmd(args []string) {
 
 // readSecretTTY collects one hidden field from the user's own terminal
 // (QR-02). It drives /dev/tty directly (never stdin, which may be a
-// pipe the agent controls), disables echo via stty, restores the
-// terminal on every path, and keeps the value out of history, argv and
-// environment. Cancellation (EOF/interrupt state) aborts, never submits
-// a partial value.
+// pipe the agent controls), keeps the value out of history, argv and
+// environment, and restores the terminal on every path.
 func readSecretTTY(prompt string) ([]byte, error) {
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
@@ -399,27 +397,19 @@ func readSecretTTY(prompt string) ([]byte, error) {
 
 // readSecretFromTTY collects one hidden field on an already-open terminal
 // handle (F06 testability: PTY regression tests drive this without a
-// human). Fail-closed on every path: any read error — Ctrl+C, EOF,
-// signal, paste truncation — zeroes the partial line and submits nothing.
+// human). Library-backed no-echo mode avoids external stty processes and
+// is restored on every path. EOF with a partial line is refused: unlike
+// x/term's password helper, a truncated value must never be submitted.
 func readSecretFromTTY(tty *os.File, prompt string) ([]byte, error) {
-	stty := func(args ...string) (string, error) {
-		cmd := exec.Command("stty", args...)
-		cmd.Stdin = tty
-		out, err := cmd.Output()
-		return strings.TrimSpace(string(out)), err
-	}
-	saved, err := stty("-g")
+	fd := int(tty.Fd())
+	saved, err := term.GetState(fd)
 	if err != nil {
 		return nil, fmt.Errorf("terminal does not support no-echo input (use --file)")
 	}
 	// Restore the terminal on every path, including signals: a killed
 	// process must not leave echo disabled (F06). SIGKILL cannot be
 	// trapped; all catchable signals restore before re-raising.
-	restore := func() {
-		rc := exec.Command("stty", saved)
-		rc.Stdin = tty
-		_ = rc.Run()
-	}
+	restore := func() { _ = term.Restore(fd, saved) }
 	defer restore()
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
@@ -437,29 +427,57 @@ func readSecretFromTTY(tty *os.File, prompt string) ([]byte, error) {
 		case <-quit:
 		}
 	}()
-	off := exec.Command("stty", "-echo")
-	off.Stdin = tty
-	if err := off.Run(); err != nil {
+	old, err := term.MakeRaw(fd)
+	if err != nil {
 		return nil, fmt.Errorf("cannot disable terminal echo (use --file)")
 	}
+	defer term.Restore(fd, old)
 	fmt.Fprint(tty, prompt)
-	rd := bufio.NewReader(tty)
-	line, err := rd.ReadBytes('\n')
-	fmt.Fprintln(tty)
-	// F06: never accept a partial line. Any read error (Ctrl+C, EOF,
-	// signal, paste truncation) aborts with nothing submitted — the
-	// bytes are zeroed, not returned.
-	if err != nil {
-		for i := range line {
-			line[i] = 0
+	var line []byte
+	buf := make([]byte, 1)
+	for {
+		n, readErr := tty.Read(buf)
+		if n > 0 {
+			switch buf[0] {
+			case '\n', '\r':
+				fmt.Fprint(tty, "\r\n")
+				if len(line) == 0 {
+					return nil, fmt.Errorf("empty value refused")
+				}
+				return line, nil
+			case 0x03, 0x04: // explicit Ctrl+C / Ctrl+D cancellation
+				fmt.Fprint(tty, "\r\n")
+				for i := range line {
+					line[i] = 0
+				}
+				return nil, fmt.Errorf("input cancelled")
+			case 0x7f, 0x08:
+				if len(line) > 0 {
+					line = line[:len(line)-1]
+				}
+			default:
+				if buf[0] < 32 {
+					continue
+				}
+				if len(line) >= maxRelayCLIPayload {
+					for i := range line {
+						line[i] = 0
+					}
+					return nil, fmt.Errorf("value too large")
+				}
+				line = append(line, buf[0])
+			}
+			continue
 		}
-		return nil, fmt.Errorf("input cancelled")
+		if readErr != nil || n == 0 {
+			// EOF with a partial line is deliberately refused; unlike
+			// x/term's password helper it must not be treated as input.
+			for i := range line {
+				line[i] = 0
+			}
+			return nil, fmt.Errorf("input cancelled")
+		}
 	}
-	line = []byte(strings.TrimRight(string(line), "\r\n"))
-	if len(line) == 0 {
-		return nil, fmt.Errorf("empty value refused")
-	}
-	return line, nil
 }
 
 // readSecretFile loads a payload file defensively (QR-02): no symlink
