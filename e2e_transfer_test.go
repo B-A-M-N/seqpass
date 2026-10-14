@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	secretbridge "github.com/secretbridge/secretbridge"
@@ -14,6 +15,12 @@ import (
 // Fail-closed over real Unix sockets: with no policy, the harness client is
 // denied and no secret material appears in any agent-visible output.
 func TestE2EBlindTransfer(t *testing.T) {
+	// Sandboxed environments may expose /home as nobody:nogroup even when
+	// the test runtime directory itself is correctly owned. The broker
+	// refuses such ancestors by design; skip these socket tests there.
+	if fi, err := os.Lstat("/home"); err != nil || fi.Sys().(*syscall.Stat_t).Uid != 0 && fi.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
+		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
+	}
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Fatal(err)

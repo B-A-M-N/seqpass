@@ -1,0 +1,4 @@
+./github.go
+./registry.go
+./testdriver.go
+./verify.go

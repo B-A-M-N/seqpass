@@ -1,0 +1,17 @@
+./consts.go
+./discover.go
+./errors.go
+./headers.go
+./meta.go
+./mrtr.go
+./prompts.go
+./resources.go
+./result.go
+./schema_cache.go
+./struct_schema.go
+./tasks.go
+./tools.go
+./typed_tools.go
+./types.go
+./utils.go
+./version.go

@@ -140,9 +140,14 @@ type workerJob struct {
 // per listed operation (QR-08).
 const workerQueueBound = 256
 
+const workerPageSize = 128
+
 func (s *Service) runWorkerOnce(ctx context.Context) {
 	_ = s.ExpireStaleRequests()
-	uses, transfers, err := s.db.ListAuthorizedOps()
+	// C12: page authorized work from the database instead of materializing
+	// every pending operation in memory. Each pass admits one bounded page
+	// per op type; subsequent pages run on the next tick.
+	uses, transfers, err := s.db.ListAuthorizedOpsPage(workerPageSize)
 	if err != nil {
 		return
 	}

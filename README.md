@@ -300,3 +300,29 @@ Rules:
   executable-level separation, ship distinct `seqpass-broker` / `seqpass-mcp`
   binaries or prevent agent UIDs from executing the privileged binary as the
   service user (no sudo, no setuid).
+
+## Sandbox note
+
+Some sandboxed environments expose `/home` as `nobody:nogroup` even when the
+test runtime directory itself is correctly owned. The broker refuses such
+ancestors by design. In those environments, socket-based tests will skip
+automatically; use a normal host or container where `/home` is broker-owned
+to exercise the full Unix-socket coverage.
+
+## Relay request contract
+
+`relay_request` returns:
+
+```json
+{
+  "request_id": "req-...",
+  "status": "awaiting_user",
+  "input_required": true,
+  "input_kind": "api_key",
+  "next_action": "secure_input"
+}
+```
+
+`input_kind` mirrors the requested data kind (for example `api_key` or
+`password`). The harness should display a pending-input notice; the actual
+value is never collected by the MCP form, the chat surface, or the agent.

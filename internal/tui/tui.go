@@ -335,6 +335,8 @@ func (s *session) render() {
 	var b strings.Builder
 	b.WriteString("\x1b[H\x1b[2J") // home + clear (fullscreen, no scrollback growth)
 	b.WriteString("SeqPass trusted intake — j/k move, Enter fulfill, r reject, R refresh, q quit\r\n")
+	b.WriteString("Input route: external TTY. Protection depends on broker topology;\r\n")
+	b.WriteString("same-UID best-effort deployments are NOT protected from the agent.\r\n")
 	b.WriteString("Agent purpose lines below are UNTRUSTED agent text (sanitized).\r\n")
 	b.WriteString("──────────────────────────────────────────────\r\n")
 	if len(s.items) == 0 {

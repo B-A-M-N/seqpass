@@ -323,19 +323,33 @@ func New(cfg Config) (*Daemon, error) {
 	// relay queue executes ONLY relay-backed transfers; the lifecycle
 	// loop expires requests and purges payloads even with no worker.
 	// Both share the daemon worker group for supervised shutdown.
+	// F12/C04: lifecycle maintenance runs unconditionally, independent of
+	// relay delivery or general auto-execution, so expiry and payload
+	// cleanup never depend on an execution switch.
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
+	prevLifecycle := d.worker
+	d.worker = func() {
+		lifecycleCancel()
+		if prevLifecycle != nil {
+			prevLifecycle()
+		}
+	}
+	d.workerWg.Add(1)
+	go func() {
+		defer d.workerWg.Done()
+		svc.RunLifecycleLoop(lifecycleCtx, 0)
+	}()
 	if !cfg.NoRelayAutoDeliver {
-		ctx, cancel := context.WithCancel(context.Background())
-		prev := d.worker
+		relayCtx, relayCancel := context.WithCancel(context.Background())
+		prevRelay := d.worker
 		d.worker = func() {
-			cancel()
-			if prev != nil {
-				prev()
-			}
+			relayCancel()
+			prevRelay()
 		}
 		d.workerWg.Add(1)
 		go func() {
 			defer d.workerWg.Done()
-			svc.RunRelayWorker(ctx, 0)
+			svc.RunRelayWorker(relayCtx, 0)
 		}()
 	}
 	return d, nil

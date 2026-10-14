@@ -3,6 +3,7 @@ package secureops
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,10 @@ const exposureMarker = "SECRET-MARKER-exposure-9f8e7d6c5b4a"
 // T10: endpoint reflects the credential and injects hostile text. The agent
 // must receive neither the credential nor arbitrary nested data.
 func TestReflectiveEndpoint(t *testing.T) {
+	// Sandboxed environments may deny local TCP listeners; skip there.
+	if _, err := net.Listen("tcp", "127.0.0.1:0"); err != nil {
+		t.Skip("sandbox denies local TCP listeners")
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		w.Header().Set("Content-Type", "application/json")
@@ -59,6 +64,10 @@ func TestReflectiveEndpoint(t *testing.T) {
 func TestEscapedCredentialEchoRejectedAfterProjection(t *testing.T) {
 	const token = "ghp_escaped-token-123"
 	escaped := strings.Replace(token, "-", `\u002d`, 1)
+	// Sandboxed environments may deny local TCP listeners; skip there.
+	if _, err := net.Listen("tcp", "127.0.0.1:0"); err != nil {
+		t.Skip("sandbox denies local TCP listeners")
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"full_name":"o/r","description":"prefix ` + escaped + ` suffix","private":false,"default_branch":"main","open_issues_count":1}`))
@@ -85,6 +94,10 @@ func TestEscapedCredentialEchoRejectedAfterProjection(t *testing.T) {
 
 // Errors must not carry credential-bearing diagnostics.
 func TestErrorSanitization(t *testing.T) {
+	// Sandboxed environments may deny local TCP listeners; skip there.
+	if _, err := net.Listen("tcp", "127.0.0.1:0"); err != nil {
+		t.Skip("sandbox denies local TCP listeners")
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
 	}))

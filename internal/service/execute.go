@@ -33,6 +33,13 @@ func (s *Service) resolveCredentialMaterial(ctx context.Context, src types.Secre
 		if err != nil {
 			return secureops.Credential{}, err
 		}
+		// C13: the binding identity must match the resolved response.
+		// AegisKeys already validates raw.Binding == requested binding at
+		// the wire layer; this check is defense in depth against a future
+		// client regression.
+		if mat.Binding != src.Binding {
+			return secureops.Credential{}, fmt.Errorf("binding identity mismatch: requested %q, resolved %q", src.Binding, mat.Binding)
+		}
 		return secureops.Credential{Value: mat.Value, Components: mat.Components}, nil
 	case types.SourceEphemeral:
 		// Relay payloads resolve ONLY under a live reservation for

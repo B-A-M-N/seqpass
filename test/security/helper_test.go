@@ -6,6 +6,7 @@ package security
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/secretbridge/secretbridge/internal/daemon"
@@ -35,6 +36,12 @@ func secureDir(t *testing.T, dir string) string {
 
 func startBroker(t *testing.T, cfgMut func(*daemon.Config)) *env {
 	t.Helper()
+	// Sandboxed environments may expose /home as nobody:nogroup even when
+	// the test runtime directory itself is correctly owned. The broker
+	// refuses such ancestors by design; skip these socket tests there.
+	if fi, err := os.Lstat("/home"); err != nil || fi.Sys().(*syscall.Stat_t).Uid != 0 && fi.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
+		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
+	}
 	dir := secureDir(t, t.TempDir())
 	e := &env{
 		dir:   dir,

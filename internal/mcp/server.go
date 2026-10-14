@@ -195,10 +195,13 @@ func (s *Server) handleRelayRequest(ctx context.Context, req mcp.CallToolRequest
 	if reqID == "" {
 		return mcp.NewToolResultError("broker did not return a request ID"), nil
 	}
-	raw, _ := json.Marshal(map[string]string{
-		"request_id": reqID,
-		"state":      "awaiting_user",
-		"next_step":  "A trusted operator must fulfill this request with `seqpass relay fulfill " + reqID + "`.",
+	raw, _ := json.Marshal(map[string]interface{}{
+		"request_id":     reqID,
+		"status":         "awaiting_user",
+		"input_required": true,
+		"input_kind":     args["data_kind"],
+		"next_action":    "secure_input",
+		"next_step":      "A trusted operator must fulfill this request with `seqpass relay fulfill " + reqID + "`.",
 	})
 	return mcp.NewToolResultText(string(raw)), nil
 }

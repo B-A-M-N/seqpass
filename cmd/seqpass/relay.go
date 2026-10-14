@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/signal"
 	"strings"
 	"syscall"
 	"time"
@@ -197,6 +196,8 @@ func relayFulfill(args []string) {
 		fatal(fmt.Sprintf("request is %s, not awaiting input", st))
 	}
 	fmt.Println("REQUEST REVIEW (verified by broker — approve only what is shown here)")
+	fmt.Println("Input route: this trusted terminal. Protection depends on broker topology;")
+	fmt.Println("same-UID best-effort deployments are NOT protected from the agent.")
 	fmt.Printf("  Requester:  %v\n", m["agent_principal"])
 	fmt.Printf("  Recipient:  %v (registered destination)\n", m["destination_id"])
 	fmt.Printf("  Action:     supply %v\n", m["data_kind"])
@@ -406,27 +407,9 @@ func readSecretFromTTY(tty *os.File, prompt string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("terminal does not support no-echo input (use --file)")
 	}
-	// Restore the terminal on every path, including signals: a killed
-	// process must not leave echo disabled (F06). SIGKILL cannot be
-	// trapped; all catchable signals restore before re-raising.
-	restore := func() { _ = term.Restore(fd, saved) }
-	defer restore()
-	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	defer signal.Stop(sigc)
-	quit := make(chan struct{})
-	defer close(quit)
-	go func() {
-		select {
-		case <-sigc:
-			restore()
-			fmt.Fprintln(tty)
-			signal.Stop(sigc)
-			_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
-			os.Exit(130)
-		case <-quit:
-		}
-	}()
+	// Restore the terminal on every path (C09). MakeRaw's own restore
+	// handles normal exits; this handles early returns and interrupts.
+	defer func() { _ = term.Restore(fd, saved) }()
 	old, err := term.MakeRaw(fd)
 	if err != nil {
 		return nil, fmt.Errorf("cannot disable terminal echo (use --file)")
@@ -437,6 +420,14 @@ func readSecretFromTTY(tty *os.File, prompt string) ([]byte, error) {
 	buf := make([]byte, 1)
 	for {
 		n, readErr := tty.Read(buf)
+		// C09: partial read on interruption must never submit a truncated
+		// value. Cancel and clear the partial bytes.
+		if readErr != nil {
+			for i := range line {
+				line[i] = 0
+			}
+			return nil, fmt.Errorf("input interrupted: %w", readErr)
+		}
 		if n > 0 {
 			switch buf[0] {
 			case '\n', '\r':

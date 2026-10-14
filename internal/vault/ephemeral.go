@@ -97,7 +97,10 @@ func (e *EphemeralStore) Reserve(key, opID string, now time.Time) error {
 		return ErrNotFound
 	}
 	if !now.Before(ent.expires) {
+		// P0-05: zero backing bytes when marking expired here too.
 		ent.expired = true
+		clearBytes(ent.buf)
+		ent.buf = nil
 		return ErrNotFound
 	}
 	ent.holders[opID] = true
@@ -129,7 +132,10 @@ func (e *EphemeralStore) GetFor(key, opID string) ([]byte, error) {
 		return nil, ErrNotFound
 	}
 	if !time.Now().Before(ent.expires) {
+		// P0-05: zero backing bytes when marking expired here too.
 		ent.expired = true
+		clearBytes(ent.buf)
+		ent.buf = nil
 		return nil, ErrNotFound
 	}
 	if !ent.holders[opID] {
@@ -163,7 +169,12 @@ func (e *EphemeralStore) Delete(key string) bool {
 	if !ok {
 		return false
 	}
+	// P0-05: zero backing bytes immediately on delete. Holders already
+	// own their copies from GetFor; the store buffer is never needed
+	// again and must not retain plaintext for the last-release path.
 	ent.revoked = true
+	clearBytes(ent.buf)
+	ent.buf = nil
 	e.maybeClear(key, ent)
 	return true
 }
@@ -199,7 +210,10 @@ func (e *EphemeralStore) Sweep(now time.Time) int {
 			continue
 		}
 		if !now.Before(ent.expires) {
+			// P0-05: zero backing bytes immediately when marking expired.
 			ent.expired = true
+			clearBytes(ent.buf)
+			ent.buf = nil
 			e.maybeClear(k, ent)
 			n++
 		}
@@ -257,10 +271,10 @@ func (e *EphemeralStore) maybeClear(key string, ent *ephemeralEntry) {
 	if len(ent.holders) > 0 && !ent.revoked && !ent.expired {
 		return
 	}
-	if len(ent.holders) > 0 {
-		// Dead entry with in-flight holders: fail future reads now,
-		// zero on the last release. Reads already check revoked/expired.
-		ent.revoked = true
+	if len(ent.holders) > 0 && (ent.revoked || ent.expired) {
+		// Dead entry with in-flight holders: backing bytes were already
+		// zeroed by Delete/Reserve/GetFor/Sweep. Keep the map entry so
+		// the last Release removes it.
 		return
 	}
 	if ent.retain && !ent.revoked && !ent.expired {

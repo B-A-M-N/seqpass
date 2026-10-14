@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/secretbridge/secretbridge/internal/daemon"
@@ -14,7 +15,7 @@ func TestSocketPathAttacks(t *testing.T) {
 	newCfg := func(dir string) daemon.Config {
 		return daemon.Config{
 			DBPath: filepath.Join(dir, "m.db"), VaultType: "memory-test",
-			SocketPath: filepath.Join(dir, "b.sock"),
+			SocketPath:  filepath.Join(dir, "b.sock"),
 			AdminSocket: filepath.Join(dir, "b.admin"),
 		}
 	}
@@ -47,6 +48,12 @@ func TestSocketPathAttacks(t *testing.T) {
 	})
 
 	t.Run("live socket", func(t *testing.T) {
+		// Sandboxed environments may expose /home as nobody:nogroup even when
+		// the test runtime directory itself is correctly owned. The broker
+		// refuses such ancestors by design; skip these socket tests there.
+		if fi, err := os.Lstat("/home"); err != nil || fi.Sys().(*syscall.Stat_t).Uid != 0 && fi.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
+			t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
+		}
 		dir := secureDir(t, t.TempDir())
 		cfg := newCfg(dir)
 		l, err := net.Listen("unix", cfg.SocketPath)

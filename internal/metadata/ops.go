@@ -496,6 +496,49 @@ func (d *DB) OpenAttempt(opID string) (attemptID, worker string, err error) {
 	return attemptID, worker, err
 }
 
+// ListAuthorizedOpsPage returns a bounded page of authorized ops (C12).
+// The trusted auto worker consumes only this set through the same atomic
+// claim path as manual execution; pending/requested ops still need approval.
+func (d *DB) ListAuthorizedOpsPage(limit int) (uses []*types.UseRequest, transfers []*types.TransferRequest, err error) {
+	if limit <= 0 {
+		limit = 128
+	}
+	now := time.Now()
+	urows, err := d.db.Query(`SELECT id FROM uses WHERE status = 'authorized' AND expires_at > ? ORDER BY created_at ASC LIMIT ?`, now, limit)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer urows.Close()
+	for urows.Next() {
+		var id string
+		if err := urows.Scan(&id); err != nil {
+			return nil, nil, err
+		}
+		ur, err := d.GetUse(id)
+		if err != nil {
+			return nil, nil, err
+		}
+		uses = append(uses, ur)
+	}
+	trows, err := d.db.Query(`SELECT id FROM transfers WHERE status = 'authorized' AND expires_at > ? ORDER BY created_at ASC LIMIT ?`, now, limit)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer trows.Close()
+	for trows.Next() {
+		var id string
+		if err := trows.Scan(&id); err != nil {
+			return nil, nil, err
+		}
+		tr, err := d.GetTransfer(id)
+		if err != nil {
+			return nil, nil, err
+		}
+		transfers = append(transfers, tr)
+	}
+	return uses, transfers, nil
+}
+
 // ListAuthorizedOps returns ops approved but not yet executed. The trusted
 // auto worker (C13) consumes only this set through the same atomic claim
 // path as manual execution; pending/requested ops still need approval.

@@ -213,6 +213,13 @@ func (s *Service) RelayFulfill(intakePrincipal, relayID string, payload []byte) 
 		staged = false
 		return "", err
 	}
+	epoch, err := relayEpoch(s)
+	if err != nil {
+		s.eph.Delete(key)
+		staged = false
+		s.audit(relayID, "relay_fulfill_denied", intakePrincipal, r.DestinationID, "epoch-read-failed")
+		return "", fmt.Errorf("authorization epoch unavailable: %w", err)
+	}
 	op := &types.TransferRequest{
 		ID:            opID,
 		SecretRef:     secretRef,
@@ -223,7 +230,7 @@ func (s *Service) RelayFulfill(intakePrincipal, relayID string, payload []byte) 
 		ExpiresAt:     r.ExpiresAt,
 		Status:        types.StatusAuthorized,
 		ApprovedBy:    "relay:" + relayID,
-		AuthEpoch:     mustEpoch(s),
+		AuthEpoch:     epoch,
 		DestDigest:    destDigest,
 		DestRevision:  dest.Revision,
 	}
@@ -337,11 +344,15 @@ func (s *Service) submitRelayTransfer(principal string, req *types.TransferReque
 	if req.PayloadRef != "" {
 		return deny("relay-no-components")
 	}
+	epoch, err := relayEpoch(s)
+	if err != nil {
+		return "", fmt.Errorf("authorization epoch unavailable: %w", err)
+	}
 	req.RequestedBy = principal
 	req.CreatedAt = now
 	req.ExpiresAt = r.ExpiresAt
 	req.OpHash = metadata.TransferOpHash(principal, req.SecretRef, req.DestinationID, req.PayloadRef)
-	req.AuthEpoch = mustEpoch(s)
+	req.AuthEpoch = epoch
 	req.DestDigest = r.DestDigest
 	req.DestRevision = r.DestRevision
 	req.Status = types.StatusAuthorized
@@ -472,12 +483,10 @@ func relayNext(state string) string {
 // legacy spool entries can never collide.
 func relayPayloadKey(relayID string) string { return "relay-payload:" + relayID }
 
-func mustEpoch(s *Service) int64 {
-	ep, err := s.db.CurrentEpoch()
-	if err != nil {
-		return 1
-	}
-	return ep
+// relayEpoch reads the authorization epoch without substitution (C11):
+// a database failure must fail the relay, never default to epoch 1.
+func relayEpoch(s *Service) (int64, error) {
+	return s.db.CurrentEpoch()
 }
 
 // settleRelayTransfer advances the relay grant from its operation's
