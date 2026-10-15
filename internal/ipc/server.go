@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/secretbridge/secretbridge/internal/intake"
 	"github.com/secretbridge/secretbridge/internal/service"
 	"github.com/secretbridge/secretbridge/internal/types"
 )
@@ -125,6 +126,11 @@ type Server struct {
 	// broker UID can connect (F04). Peer-credential authorization still
 	// applies; the group must never be the agent group. Set before Start.
 	IntakeGID *uint32
+	// IntakeGroup, when non-empty, is the intake group name used to
+	// classify assurance (SP-03): an isolated topology with a separate
+	// intake group is classified verified; anything else stays
+	// unverified or prohibited based on actual socket topology.
+	IntakeGroup string
 }
 
 func NewServer(svc *service.Service, socket, adminSock string, mapper PrincipalMapper, auth Authorizer) *Server {
@@ -791,6 +797,21 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 		if err != nil {
 			return Response{OK: false, Error: err.Error()}
 		}
+		// SP-02/SP-03: attach the broker-verified secure-input notice so
+		// any harness adapter can render it without the agent fabricating
+		// security claims. The assurance is derived from actual topology,
+		// never from agent arguments.
+		mode := "best-effort"
+		if s.AssuranceMode != "" {
+			mode = s.AssuranceMode
+		}
+		assurance := intake.Classify(mode, false, false)
+		if rm := st; rm != nil {
+			rm["input_mode"] = assurance.Mode
+			rm["input_assurance"] = assurance.Assurance
+			rm["input_protected"] = assurance.Protected
+			rm["input_reason"] = assurance.Reason
+		}
 		return Response{OK: true, Data: st}
 	case MethodRelayCancel:
 		if err := s.svc.RelayCancel(principal, strParam(p, "request_id"), role != RoleAgent); err != nil {
@@ -798,7 +819,7 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 		}
 		return Response{OK: true, Data: map[string]string{"status": "cancelled"}}
 	case MethodIntakeInspect:
-		v, err := s.svc.RelayInspect(strParam(p, "request_id"), 50)
+		v, err := s.svc.RelayInspect(principal, strParam(p, "request_id"), 50)
 		if err != nil {
 			return Response{OK: false, Error: err.Error()}
 		}

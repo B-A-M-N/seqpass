@@ -4,23 +4,40 @@ package intake
 
 import "time"
 
-// InputMode names the verified class of a secure-input surface. A mode is
-// earned by actual process/topology configuration, never by a boolean flag
-// or a reassuring label.
+// InputMode names the verified class of a secure-input surface. A mode
+// is earned by actual process/topology configuration, never by a
+// boolean flag or a reassuring label.
 type InputMode string
 
 const (
-	// InputHostNative means a separately audited host adapter carries the
-	// credential directly to the broker without model or MCP form data.
-	InputHostNative InputMode = "host_native_verified"
 	// InputExternalTTY means a separate trusted SeqPass terminal process
 	// receives the bytes; the harness only displays request status.
 	InputExternalTTY InputMode = "external_tty"
-	// InputURLSecure means a detected URL-mode elicitation surface with
-	// its own authenticated secure-input page. Must be feature-detected.
-	InputURLSecure InputMode = "url_secure"
+	// InputHostNative means a separately audited host adapter carries
+	// the credential directly to the broker without model or MCP data.
+	InputHostNative InputMode = "host_native_verified"
+	// InputURL means a URL-mode elicitation surface (MCP July 2026
+	// spec), which keeps the submitted value outside the MCP client.
+	InputURL InputMode = "url"
 	// InputUnavailable means no verified protected input path exists.
 	InputUnavailable InputMode = "unavailable"
+)
+
+// InputAssurance is the closed set of honest classifications for the
+// protected-input surface (SP-03). Verified requires independently
+// qualified host topology — never just a masked field.
+type InputAssurance string
+
+const (
+	// AssuranceVerified means the submitting process identity, intake
+	// permissions, and agent isolation are all independently verified.
+	AssuranceVerified InputAssurance = "verified"
+	// AssuranceUnverified means the path exists but topology has not
+	// been independently qualified (e.g. same-UID best-effort mode).
+	AssuranceUnverified InputAssurance = "unverified"
+	// AssuranceProhibited means the agent can observe the intake socket
+	// or terminal — the path must not be used for credential entry.
+	AssuranceProhibited InputAssurance = "prohibited"
 )
 
 // InputRequestNotice is the plaintext-free presentation contract for
@@ -35,28 +52,51 @@ type InputRequestNotice struct {
 
 // Assurance is the truthful classification shown before the user types.
 type Assurance struct {
-	Mode           InputMode `json:"mode"`
-	Protected      bool      `json:"protected"`
-	Reason         string    `json:"reason"`
-	SameUID        bool      `json:"same_uid"`
-	TerminalShared bool      `json:"terminal_shared"`
+	Mode             InputMode      `json:"mode"`
+	Assurance        InputAssurance `json:"assurance"`
+	Protected        bool           `json:"protected"`
+	Reason           string         `json:"reason"`
+	SameUID          bool           `json:"same_uid"`
+	TerminalShared   bool           `json:"terminal_shared"`
+	IntakeAccessible bool           `json:"intake_accessible"`
 }
 
-// Classify maps actual deployment topology to an honest assurance result.
-// best-effort/same-UID topologies can never claim protected input.
-func Classify(assuranceMode string, terminalShared bool) Assurance {
+// Classify maps actual deployment topology to an honest assurance
+// result. It evaluates: assurance mode, terminal sharing, intake
+// socket reachability from the agent identity, and peer identity.
+// best-effort/same-UID topologies can never claim verified protection.
+func Classify(assuranceMode string, terminalShared bool, intakeAccessible bool) Assurance {
+	// SP-03: if the agent can reach the intake socket, protection is
+	// actively prohibited — not merely unverified.
+	if intakeAccessible {
+		return Assurance{
+			Mode:             InputUnavailable,
+			Assurance:        AssuranceProhibited,
+			Protected:        false,
+			SameUID:          assuranceMode != "isolated",
+			TerminalShared:   terminalShared,
+			IntakeAccessible: true,
+			Reason:           "agent can access the intake socket: credential entry must not proceed",
+		}
+	}
 	if assuranceMode == "isolated" && !terminalShared {
 		return Assurance{
-			Mode:      InputExternalTTY,
-			Protected: true,
-			Reason:    "dedicated broker UID and separate trusted terminal verified",
+			Mode:             InputExternalTTY,
+			Assurance:        AssuranceVerified,
+			Protected:        true,
+			SameUID:          false,
+			TerminalShared:   false,
+			IntakeAccessible: false,
+			Reason:           "dedicated broker UID, separate intake domain and trusted terminal verified",
 		}
 	}
 	return Assurance{
-		Mode:           InputUnavailable,
-		Protected:      false,
-		SameUID:        assuranceMode != "isolated",
-		TerminalShared: terminalShared,
-		Reason:         "isolation not verified: use a dedicated broker UID and a separate trusted terminal",
+		Mode:             InputUnavailable,
+		Assurance:        AssuranceUnverified,
+		Protected:        false,
+		SameUID:          assuranceMode != "isolated",
+		TerminalShared:   terminalShared,
+		IntakeAccessible: false,
+		Reason:           "isolation not verified: use a dedicated broker UID and a separate trusted terminal",
 	}
 }

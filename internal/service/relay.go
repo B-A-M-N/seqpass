@@ -165,6 +165,14 @@ func (s *Service) RelayFulfill(intakePrincipal, relayID string, payload []byte) 
 	if err != nil || r == nil {
 		return "", errors.New("unknown relay request")
 	}
+	// SP-10: once an intake owner has claimed this request, only that
+	// owner can fulfill it. A pre-claim request is fulfillable by any
+	// trusted intake identity (claiming assigns ownership in the same
+	// CAS inside FulfillRelay).
+	if r.IntakeOwner != "" && r.IntakeOwner != intakePrincipal {
+		s.audit(relayID, "relay_fulfill_denied", intakePrincipal, r.DestinationID, "foreign-intake-owner")
+		return "", errors.New("access denied")
+	}
 	if r.State != types.RelayAwaitingUser {
 		return "", fmt.Errorf("relay is not awaiting input (state=%s)", r.State)
 	}
@@ -273,6 +281,10 @@ func (s *Service) RelayReject(intakePrincipal, relayID string) error {
 	if err != nil || r == nil {
 		return errors.New("unknown relay request")
 	}
+	// SP-10: claimed requests are locked to their intake owner.
+	if r.IntakeOwner != "" && r.IntakeOwner != intakePrincipal {
+		return errors.New("access denied")
+	}
 	if err := s.db.RejectRelay(relayID, intakePrincipal, r.Revision, time.Now()); err != nil {
 		return err
 	}
@@ -367,15 +379,25 @@ func (s *Service) submitRelayTransfer(principal string, req *types.TransferReque
 // RelayInspect serves the trusted intake inbox (QR-02/SP-TUI-03): the
 // pending queue or one request's reviewed envelope. Rows carry no
 // payload by construction — inspection can never leak the value.
-func (s *Service) RelayInspect(relayID string, limit int) (interface{}, error) {
+func (s *Service) RelayInspect(intakePrincipal, relayID string, limit int) (interface{}, error) {
 	if relayID != "" {
 		r, err := s.db.GetRelay(relayID)
 		if err != nil || r == nil {
 			return nil, errors.New("unknown relay request")
 		}
+		// SP-10: once an intake owner has claimed a request, only that
+		// owner (or a pre-claim unclaimed request) is inspectable by
+		// this intake identity. Unclaimed rows are visible to any
+		// trusted intake UID; owned rows are locked to their owner.
+		if r.IntakeOwner != "" && r.IntakeOwner != intakePrincipal {
+			return nil, errors.New("access denied")
+		}
 		return r, nil
 	}
-	return s.db.ListPendingRelays(limit)
+	// SP-10: the inbox only shows unclaimed rows plus the caller's
+	// own claimed rows — another intake identity's claimed requests
+	// are never visible.
+	return s.db.ListPendingRelaysForIntake(intakePrincipal, limit)
 }
 
 // RelayStatus is the agent-visible handshake (SP-TUI-07): the

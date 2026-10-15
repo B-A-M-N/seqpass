@@ -122,6 +122,36 @@ func (d *DB) ListPendingRelays(limit int) ([]*types.RelayRecord, error) {
 	return out, rows.Err()
 }
 
+
+// ListPendingRelaysForIntake is the trusted intake inbox scoped to a
+// verified human owner (SP-10). Rows with no intake owner are visible
+// to every trusted intake identity (pre-claim: any human can claim);
+// rows with an owner are visible only to that owner. Oldest first.
+func (d *DB) ListPendingRelaysForIntake(intakePrincipal string, limit int) ([]*types.RelayRecord, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	rows, err := d.db.Query(`
+		SELECT ` + relayColumns + ` FROM relay_requests
+		WHERE state = ? AND expires_at > ?
+		  AND (intake_owner = '' OR intake_owner = ?)
+		ORDER BY created_at ASC LIMIT ?
+	`, types.RelayAwaitingUser, time.Now(), intakePrincipal, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*types.RelayRecord
+	for rows.Next() {
+		r, err := scanRelay(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // CountPendingRelaysForAgent bounds admission per principal (F17).
 func (d *DB) CountPendingRelaysForAgent(agent string) (int, error) {
 	var n int
