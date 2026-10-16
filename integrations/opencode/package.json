@@ -1,0 +1,16 @@
+{
+  "name": "@seqpass/opencode",
+  "version": "0.1.0",
+  "description": "SeqPass protected-input adapter for OpenCode V2 CLI",
+  "type": "module",
+  "main": "index.ts",
+  "dependencies": {
+    "@opencode-ai/plugin": "^2.0.0"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^2.0.0"
+  }
+}

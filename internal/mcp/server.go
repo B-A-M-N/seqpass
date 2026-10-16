@@ -65,7 +65,7 @@ func (s *Server) registerTools() {
 	s.mcp.AddTool(statusTool, s.handleStatus)
 
 	relayReqTool := mcp.NewTool("relay_request",
-		mcp.WithDescription("Request protected user input for a registered recipient. Returns an opaque request ID only. A trusted operator must fulfill it from their own terminal with `seqpass relay fulfill <request-id>`; this untrusted MCP adapter never collects or handles the value."),
+		mcp.WithDescription("Request protected user input for a registered recipient. Returns an opaque request ID only; a qualified native host or trusted out-of-band operator surface handles protected entry. This untrusted MCP adapter never collects or handles the value."),
 		mcp.WithString("destination_id", mcp.Required(), mcp.Description("Registered recipient ID (must already exist; arbitrary endpoints are refused)")),
 		mcp.WithString("data_kind", mcp.Required(), mcp.Description("What is needed: password | one_time_code | api_key | token | pin | text")),
 		mcp.WithString("purpose", mcp.Description("Short human-readable reason shown to the user")),
@@ -195,13 +195,15 @@ func (s *Server) handleRelayRequest(ctx context.Context, req mcp.CallToolRequest
 	if reqID == "" {
 		return mcp.NewToolResultError("broker did not return a request ID"), nil
 	}
+	// HI-06: the agent context receives only the public control-plane
+	// status. No secret field, hint, placeholder, or host input session
+	// token is included. Native host presentation is separate.
 	raw, _ := json.Marshal(map[string]interface{}{
 		"request_id":     reqID,
 		"status":         "awaiting_user",
 		"input_required": true,
 		"input_kind":     args["data_kind"],
-		"next_action":    "secure_input",
-		"next_step":      "A trusted operator must fulfill this request with `seqpass relay fulfill " + reqID + "`.",
+		"next_action":    "protected_input",
 	})
 	return mcp.NewToolResultText(string(raw)), nil
 }

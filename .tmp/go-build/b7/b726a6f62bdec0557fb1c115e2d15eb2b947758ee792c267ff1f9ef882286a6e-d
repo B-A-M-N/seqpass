@@ -1,7 +1,0 @@
-./execute.go
-./ops.go
-./recipient.go
-./relay.go
-./service.go
-./verify.go
-./worker.go

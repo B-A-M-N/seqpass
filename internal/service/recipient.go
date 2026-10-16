@@ -58,7 +58,7 @@ func (s *Service) RecipientStatus(ctx context.Context, principal, opID string, o
 	}
 	dest := &types.Destination{
 		ID: tr.DestinationID, Name: rec.DestID, Type: "recipient-socket",
-		Endpoint: rec.DestEndpoint,
+		Endpoint:    rec.DestEndpoint,
 		ExpectedUID: rec.DestExpectedUID, ExpectedGID: rec.DestExpectedGID,
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)

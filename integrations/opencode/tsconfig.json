@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "jsx": "preserve",
+    "strict": true,
+    "skipLibCheck": true,
+    "types": [],
+    "lib": ["ES2022", "DOM"],
+    "typeRoots": ["/home/bamn/.bun/install/cache/@types/node/22.20.5@@@1/node_modules/@types/node"]
+  },
+  "include": ["index.ts", "lib/**/*.ts", "components/**/*.tsx", "types.ts", "tests/**/*.ts", "smoke.ts"]
+}

@@ -3,16 +3,16 @@ package service
 import (
 	"context"
 	"crypto/sha256"
-	"fmt"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
-	"sync"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -77,29 +77,30 @@ func TestRecordDispatchGuarded(t *testing.T) {
 // P2-9 end to end: a broad preauthorization grant added alongside a
 // narrower review rule must not flip new submissions to preauthorized.
 // The operation stays pending for a human despite the broad grant.
-func TestOverlappingSubmitRequiresHuman(t *testing.T) {	svc := testService(t)
+func TestOverlappingSubmitRequiresHuman(t *testing.T) {
+	svc := testService(t)
 	approved := setupTransferFixture(t, svc)
 	tr, _ := svc.DB().GetTransfer(approved)
 	if tr.Status != types.StatusAuthorized || tr.ApprovedBy != "operator" {
 		t.Fatalf("fixture not human-approved (sanity): %+v", tr)
 	}
-		broad := &types.Policy{Name: "broad-preauth", Priority: 100, Enabled: true, Rules: []types.PolicyRule{{
-			Principal: "uid:1000", SecretRefs: []string{"cert1"}, Ops: []string{"transfer"},
-			DestIDs: []string{"*"}, Resources: []string{"*"}, NoApproval: true,
-		}}}
-		if err := svc.DB().CreatePolicy(broad); err != nil {
-			t.Fatal(err)
-		}
-		second, err := svc.SubmitTransfer("uid:1000", &types.TransferRequest{
-			SecretRef: "cert1", DestinationID: "d1",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		tr2, _ := svc.DB().GetTransfer(second)
-		if tr2.Status == types.StatusAuthorized {
-			t.Fatal("broad grant bypassed the narrower mandatory-review rule at submit")
-		}
+	broad := &types.Policy{Name: "broad-preauth", Priority: 100, Enabled: true, Rules: []types.PolicyRule{{
+		Principal: "uid:1000", SecretRefs: []string{"cert1"}, Ops: []string{"transfer"},
+		DestIDs: []string{"*"}, Resources: []string{"*"}, NoApproval: true,
+	}}}
+	if err := svc.DB().CreatePolicy(broad); err != nil {
+		t.Fatal(err)
+	}
+	second, err := svc.SubmitTransfer("uid:1000", &types.TransferRequest{
+		SecretRef: "cert1", DestinationID: "d1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr2, _ := svc.DB().GetTransfer(second)
+	if tr2.Status == types.StatusAuthorized {
+		t.Fatal("broad grant bypassed the narrower mandatory-review rule at submit")
+	}
 }
 
 func shaHex(s string) string {
@@ -168,20 +169,20 @@ func (r *storeRecipient) handle(c net.Conn) {
 			Digest string `json:"digest"`
 		}
 		_ = json.Unmarshal(buf, &q)
-	status, dgst, nb := "unknown", q.Digest, 0
-	r.mu.Lock()
-	if q.Digest != "" {
-		if p, ok := r.store[q.OpID+"/"+q.Digest]; ok {
-			status, dgst, nb = "durably_accepted", q.Digest, len(p)
-		}
-	} else {
-		for k, p := range r.store {
-			if strings.HasPrefix(k, q.OpID+"/") {
-				status, dgst, nb = "durably_accepted", strings.TrimPrefix(k, q.OpID+"/"), len(p)
+		status, dgst, nb := "unknown", q.Digest, 0
+		r.mu.Lock()
+		if q.Digest != "" {
+			if p, ok := r.store[q.OpID+"/"+q.Digest]; ok {
+				status, dgst, nb = "durably_accepted", q.Digest, len(p)
+			}
+		} else {
+			for k, p := range r.store {
+				if strings.HasPrefix(k, q.OpID+"/") {
+					status, dgst, nb = "durably_accepted", strings.TrimPrefix(k, q.OpID+"/"), len(p)
+				}
 			}
 		}
-	}
-	r.mu.Unlock()
+		r.mu.Unlock()
 		raw, _ := json.Marshal(map[string]interface{}{"op_id": q.OpID, "digest": dgst, "status": status, "bytes": nb})
 		binary.BigEndian.PutUint32(lb[:], uint32(len(raw)))
 		_, _ = c.Write(lb[:])

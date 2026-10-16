@@ -24,7 +24,7 @@ var (
 
 type blockingDriver struct{}
 
-func (blockingDriver) Name() string               { return "test.block" }
+func (blockingDriver) Name() string { return "test.block" }
 func (blockingDriver) Completion() secureops.CompletionMode {
 	return secureops.ResponseValidated
 }

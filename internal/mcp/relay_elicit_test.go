@@ -180,3 +180,22 @@ func TestRelayToolHasNoSecretParam(t *testing.T) {
 		}
 	}
 }
+
+// HI-06: even with synthetic credentials in play, the adapter response is
+// a public control-plane envelope. There is no placeholder, secret field,
+// token, or fulfillment instruction that can accidentally serialize a
+// value into model context.
+func TestRelayResultHasNoSecretBearingContext(t *testing.T) {
+	s, _ := elicitFixture(t)
+	out := relayCall(t, s, context.Background(), map[string]interface{}{
+		"destination_id": "rd1", "data_kind": "api_key",
+	})
+	if !strings.Contains(out, `"next_action":"protected_input"`) {
+		t.Fatalf("non-universal next action: %s", out)
+	}
+	for _, forbidden := range []string{"secret_value", "password", "payload", "session_token", "fulfill"} {
+		if strings.Contains(strings.ToLower(out), forbidden) {
+			t.Fatalf("agent result contains secret-bearing control field %q: %s", forbidden, out)
+		}
+	}
+}

@@ -1,0 +1,10 @@
+{
+  "name": "@seqpass/pi",
+  "version": "0.1.0",
+  "description": "SeqPass protected-input adapter for Pi",
+  "type": "module",
+  "main": "seqpass.ts",
+  "scripts": {
+    "test": "echo 'run with Pi extension harness; unit tests in tests/'"
+  }
+}
