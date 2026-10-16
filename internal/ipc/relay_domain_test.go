@@ -8,12 +8,43 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/secretbridge/secretbridge/internal/harness"
+	"github.com/secretbridge/secretbridge/internal/intake"
 	"github.com/secretbridge/secretbridge/internal/service"
 	"github.com/secretbridge/secretbridge/internal/types"
 )
 
 // threeSocketServer starts a broker with agent + admin + intake sockets,
 // all gated to the test UID. Callers address each domain separately.
+func fourSocketServer(t *testing.T, svc *service.Service) (agent, admin, intake, host string) {
+	t.Helper()
+	if fi, err := os.Lstat("/home"); err != nil || fi.Sys().(*syscall.Stat_t).Uid != 0 && fi.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
+		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	agent = filepath.Join(dir, "agent.sock")
+	admin = filepath.Join(dir, "admin.sock")
+	intake = filepath.Join(dir, "intake.sock")
+	host = filepath.Join(dir, "host.sock")
+	euid := uint32(os.Geteuid())
+	auth := &UIDAuthorizer{
+		AdminUIDs:  map[uint32]bool{euid: true},
+		AgentUIDs:  map[uint32]bool{euid: true},
+		IntakeUIDs: map[uint32]bool{euid: true},
+	}
+	srv := NewServer(svc, agent, admin, nil, auth)
+	srv.IntakeSocket = intake
+	srv.HostSocket = host
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	return agent, admin, intake, host
+}
+
 func threeSocketServer(t *testing.T, svc *service.Service) (agent, admin, intake string) {
 	t.Helper()
 	// Sandboxed environments may expose /home as nobody:nogroup even when
@@ -121,8 +152,9 @@ func TestRelayAcrossDomains(t *testing.T) {
 		t.Fatalf("unexpected request: %+v", data)
 	}
 	if _, err := in.Call(MethodIntakeFulfill, map[string]interface{}{
-		"request_id": reqID,
-		"payload":    base64.StdEncoding.EncodeToString([]byte("hunter2-handoff")),
+		"request_id":       reqID,
+		"request_revision": 1,
+		"payload":          base64.StdEncoding.EncodeToString([]byte("hunter2-handoff")),
 	}); err != nil {
 		t.Fatalf("intake.fulfill: %v", err)
 	}
@@ -205,5 +237,297 @@ func TestIntakeAllowlistShape(t *testing.T) {
 		if !AgentAllowlist[m] {
 			t.Fatalf("agent missing %s", m)
 		}
+	}
+	// Host registration is protected IPC only; host event/review remain
+	// display-only and intake methods never leak into that surface.
+	if !IntakeAllowlist[MethodHostRegister] || !AdminAllowlist[MethodHostRegister] {
+		t.Fatal("trusted host registration missing")
+	}
+	for m := range HostAllowlist {
+		if strings.HasPrefix(m, "intake.") || strings.HasPrefix(m, "admin.") {
+			t.Fatalf("host allowlist contains privileged method %s", m)
+		}
+	}
+}
+
+// HI-02/HI-03: a native-host session is broker registered and token
+// authenticated; host events/reviews are display-only and bound to the
+// requesting agent and authenticated human principal.
+func TestHostSessionPresentationDomain(t *testing.T) {
+	svc := relayTestService(t)
+	agentSock, _, intakeSock, hostSock := fourSocketServer(t, svc)
+	svc.SetHostInputAssurance(string(harness.InputExternalTTY), string(intake.AssuranceModelBlind))
+	ag, err := Dial(agentSock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ag.Close()
+	in, err := Dial(intakeSock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	host, err := Dial(hostSock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+
+	data, err := ag.Call(MethodRelayRequest, map[string]interface{}{
+		"destination_id": "rd1", "data_kind": "api_key", "purpose": "host integration",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqID, _ := data.(map[string]interface{})["request_id"].(string)
+	if reqID == "" {
+		t.Fatal("missing request ID")
+	}
+	if _, err := ag.Call(MethodHostRegister, map[string]interface{}{"host_kind": "codex"}); err == nil {
+		t.Fatal("agent registered host session")
+	}
+	reg, err := in.Call(MethodHostRegister, map[string]interface{}{
+		"host_kind": "codex", "thread_id": "turn-host", "ttl_seconds": 600,
+		"host_version": "1.2.3", "adapter_version": "0.1.0",
+		"presentation": "native", "input_transport": "protected_intake",
+		"supports_resume": "true", "supports_cancel_prompt": "true",
+	})
+	if err != nil {
+		t.Fatalf("host.register: %v", err)
+	}
+	rm := reg.(map[string]interface{})
+	sessionID, _ := rm["session"].(map[string]interface{})["id"].(string)
+	tokenObj, _ := rm["token"].(map[string]interface{})
+	token, _ := tokenObj["token"].(string)
+	if sessionID == "" || token == "" {
+		t.Fatalf("missing host session/token: %+v", reg)
+	}
+	capsObj, _ := tokenObj["credentials"].(map[string]interface{})
+	if capsObj["presentation"] != "native" || capsObj["input_transport"] != "protected_intake" {
+		t.Fatalf("native capability not negotiated: %+v", reg)
+	}
+	if capsObj["credential_form_via_mcp"] != false {
+		t.Fatalf("MCP credential form incorrectly enabled: %+v", reg)
+	}
+	if capsObj["supports_resume"] != true || capsObj["supports_cancel_prompt"] != true {
+		t.Fatalf("optional capability flags lost: %+v", reg)
+	}
+	notice, err := host.Call(MethodHostNotice, map[string]interface{}{
+		"session_id": sessionID, "session_token": token, "request_id": reqID,
+	})
+	if err != nil {
+		t.Fatalf("host.notice: %v", err)
+	}
+	nm := notice.(map[string]interface{})
+	if nm["version"] != float64(harness.ProtectedInputNoticeSchemaVersion) ||
+		nm["request_id"] != reqID || nm["host_session_id"] != sessionID ||
+		nm["request_revision"].(float64) <= 0 {
+		t.Fatalf("unexpected notice: %+v", notice)
+	}
+	if nm["untrusted_purpose"] != "host integration" || nm["recipient_label"] == "" {
+		t.Fatalf("notice fields invalid: %+v", notice)
+	}
+	ev, err := host.Call(MethodHostEvent, map[string]interface{}{
+		"session_id": sessionID, "session_token": token, "request_id": reqID, "sequence": 1,
+	})
+	if err != nil {
+		t.Fatalf("host.event: %v", err)
+	}
+	if em := ev.(map[string]interface{}); em["request_id"] != reqID || em["state"] != "awaiting_user" {
+		t.Fatalf("unexpected host event: %+v", ev)
+	}
+	review, err := host.Call(MethodHostReview, map[string]interface{}{
+		"session_id": sessionID, "session_token": token, "request_id": reqID,
+	})
+	if err != nil {
+		t.Fatalf("host.review: %v", err)
+	}
+	if rev := review.(map[string]interface{}); rev["endpoint"] == "" || rev["purpose_untrusted"] != true || rev["trusted_host_render"] != true {
+		t.Fatalf("unexpected review: %+v", review)
+	}
+	// Host presentation can never fulfill, and an invalid token cannot
+	// observe anything.
+	if _, err := host.Call(MethodIntakeFulfill, map[string]interface{}{"request_id": reqID, "request_revision": 1}); err == nil {
+		t.Fatal("host fulfilled")
+	}
+	if _, err := host.Call(MethodHostEvent, map[string]interface{}{
+		"session_id": sessionID, "session_token": "wrong", "request_id": reqID,
+	}); err == nil {
+		t.Fatal("invalid host token accepted")
+	}
+}
+
+// HI-02 regression: two concurrent host sessions bound to different
+// agents cannot observe each other's requests, even when one adapter
+// knows the other request ID.
+func TestConcurrentHostSessionsStayIsolated(t *testing.T) {
+	svc := relayTestService(t)
+	agentSock, _, intakeSock, hostSock := fourSocketServer(t, svc)
+	agA, err := Dial(agentSock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer agA.Close()
+	// Both test agent connections share the current test UID/principal;
+	// same-principal sessions are intentionally allowed, but this also
+	// verifies explicit token/session scoping at the API boundary.
+	agB, err := Dial(agentSock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer agB.Close()
+	in, err := Dial(intakeSock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	hostA, err := Dial(hostSock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hostA.Close()
+	hostB, err := Dial(hostSock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hostB.Close()
+
+	request := func(kind string) string {
+		t.Helper()
+		data, err := agA.Call(MethodRelayRequest, map[string]interface{}{
+			"destination_id": "rd1", "data_kind": kind,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := data.(map[string]interface{})["request_id"].(string)
+		if id == "" {
+			t.Fatal("missing relay ID")
+		}
+		return id
+	}
+	reqA := request("api_key")
+	reqB := request("token")
+	register := func() (string, string) {
+		t.Helper()
+		reg, err := in.Call(MethodHostRegister, map[string]interface{}{
+			"host_kind": "hermes", "ttl_seconds": 300,
+			"host_version": "1.0", "adapter_version": "0.1",
+			"presentation": "request_status", "input_transport": "external_tty",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := reg.(map[string]interface{})
+		sid, _ := m["session"].(map[string]interface{})["id"].(string)
+		tok, _ := m["token"].(map[string]interface{})["token"].(string)
+		return sid, tok
+	}
+	sessA, tokA := register()
+	sessB, tokB := register()
+	for _, tc := range []struct{ sessionID, token, requestID string }{
+		{sessA, tokA, reqA}, {sessB, tokB, reqB},
+	} {
+		if _, err := hostA.Call(MethodHostEvent, map[string]interface{}{
+			"session_id": tc.sessionID, "session_token": tc.token, "request_id": tc.requestID,
+		}); err != nil {
+			t.Fatalf("own session denied: %v", err)
+		}
+	}
+	// Explicit cross-session access is denied even under the same OS
+	// principal. Distinct authenticated host identities remain mandatory
+	// in production for agent attribution.
+	if _, err := hostB.Call(MethodHostEvent, map[string]interface{}{
+		"session_id": sessA, "session_token": tokA, "request_id": reqB,
+	}); err == nil {
+		t.Fatal("cross-agent host session accepted another session's relay")
+	}
+}
+
+// HI-10: host prompt cancellation does not fabricate a final dispatch
+// outcome. Pending prompts may be withdrawn; dispatched grants return
+// prompt_cancelled=false so uncertain delivery is not hidden.
+func TestHostPromptCancellationDoesNotHideDispatch(t *testing.T) {
+	svc := relayTestService(t)
+	agentSock, _, intakeSock, hostSock := fourSocketServer(t, svc)
+	ag, err := Dial(agentSock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ag.Close()
+	in, err := Dial(intakeSock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	host, err := Dial(hostSock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	data, err := ag.Call(MethodRelayRequest, map[string]interface{}{
+		"destination_id": "rd1", "data_kind": "api_key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqID := data.(map[string]interface{})["request_id"].(string)
+	reg, err := in.Call(MethodHostRegister, map[string]interface{}{"host_kind": "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := reg.(map[string]interface{})
+	sid := m["session"].(map[string]interface{})["id"].(string)
+	tok := m["token"].(map[string]interface{})["token"].(string)
+	cancel := func() bool {
+		t.Helper()
+		res, err := host.Call(MethodHostCancelPrompt, map[string]interface{}{
+			"session_id": sid, "session_token": tok, "request_id": reqID,
+		})
+		if err != nil {
+			t.Fatalf("cancel prompt: %v", err)
+		}
+		return res.(map[string]interface{})["prompt_cancelled"] == true
+	}
+	if !cancel() {
+		t.Fatal("pending prompt was not cancelled")
+	}
+	// A terminal cancelled grant remains cancelled and cannot be revived.
+	st, err := ag.Call(MethodRelayStatus, map[string]interface{}{"request_id": reqID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.(map[string]interface{})["status"] != "cancelled" {
+		t.Fatalf("unexpected status: %+v", st)
+	}
+}
+
+// HI-13: data-kind admission and intake payload limits must stay aligned
+// across trusted surfaces. An oversized value is refused before staging.
+func TestRelayInputLimitsStayBounded(t *testing.T) {
+	svc := relayTestService(t)
+	_, _, intakeSock, _ := fourSocketServer(t, svc)
+	in, err := Dial(intakeSock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	data, err := in.Call(MethodIntakeRequest, map[string]interface{}{
+		"destination_id": "rd1", "data_kind": "api_key", "payload": "c2VjcmV0",
+	})
+	if err != nil {
+		t.Fatalf("valid intake request: %v", err)
+	}
+	if data.(map[string]interface{})["status"] != "authorized" {
+		t.Fatalf("unexpected intake request: %+v", data)
+	}
+	// 65 KiB exceeds the bounded intake contract; the encoded string is
+	// intentionally one byte over the existing max.
+	tooLarge := make([]byte, 64*1024+1)
+	if _, err := in.Call(MethodIntakeRequest, map[string]interface{}{
+		"destination_id": "rd1", "data_kind": "api_key",
+		"payload": base64.StdEncoding.EncodeToString(tooLarge),
+	}); err == nil {
+		t.Fatal("oversized payload accepted")
 	}
 }

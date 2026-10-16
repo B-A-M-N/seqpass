@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/secretbridge/secretbridge/internal/harness"
+	"github.com/secretbridge/secretbridge/internal/intake"
 	"github.com/secretbridge/secretbridge/internal/metadata"
 	"github.com/secretbridge/secretbridge/internal/policy"
 	"github.com/secretbridge/secretbridge/internal/secureops"
@@ -37,6 +39,10 @@ type Config struct {
 type Service struct {
 	db    *metadata.DB
 	vault vault.Vault // ephemeral/test only; production resolves via AegisKeys
+	// Broker-owned host presentation facts (HI-01/HI-07). The agent
+	// cannot set or override them.
+	hostInputMode string
+	hostAssurance string
 	// eph is the production short-lived relay spool (QR-01). It lives in
 	// broker memory under every vault type: a production broker hosts
 	// AegisKeys-backed reusable credentials AND bounded relays
@@ -108,11 +114,13 @@ func New(config Config) (*Service, error) {
 		return nil, fmt.Errorf("registry activation failed: %w", err)
 	}
 	svc := &Service{
-		db:     db,
-		vault:  v,
-		eph:    vault.NewEphemeralStore(),
-		policy: policy.NewEngine(db),
-		cfg:    config,
+		db:            db,
+		vault:         v,
+		eph:           vault.NewEphemeralStore(),
+		policy:        policy.NewEngine(db),
+		cfg:           config,
+		hostInputMode: string(harness.InputExternalTTY),
+		hostAssurance: string(intake.AssuranceModelBlind),
 	}
 	// Restart truth (QR-01/05): in-memory relay payloads are gone with
 	// the old process. Say so in metadata — never present them as ready
@@ -145,6 +153,48 @@ func New(config Config) (*Service, error) {
 		})
 	}
 	return svc, nil
+}
+
+// SetHostInputAssurance installs broker-configured presentation facts.
+// It is callable only from trusted broker/server wiring, never through an
+// agent method. An unqualified host-native label is rejected: host_native
+// is reserved for a future independently qualified adapter.
+// HostInputMode returns the broker-configured presentation mode.
+func (s *Service) HostInputMode() string { return s.hostInputMode }
+
+// HostInputAssurance returns the broker-configured assurance label.
+func (s *Service) HostInputAssurance() string { return s.hostAssurance }
+
+// HostInputReason explains why that label was assigned without exposing
+// or depending on agent claims.
+func (s *Service) HostInputReason() string {
+	if s.hostAssurance == string(intake.AssuranceAgentIsolated) {
+		if s.hostInputMode == string(harness.InputHostNative) {
+			return "qualified native host adapter with all agent boundaries verified"
+		}
+		return "external trusted input with all agent boundaries verified"
+	}
+	return "protected transport verified; full agent process/tool/transcript isolation is not proven"
+}
+
+func (s *Service) SetHostInputAssurance(mode, assurance string) error {
+	if assurance == string(intake.AssuranceModelBlind) && mode == string(harness.InputExternalTTY) {
+		s.hostInputMode, s.hostAssurance = mode, assurance
+		return nil
+	}
+	if assurance == string(intake.AssuranceAgentIsolated) && mode == string(harness.InputExternalTTY) {
+		s.hostInputMode, s.hostAssurance = mode, assurance
+		return nil
+	}
+	if assurance == string(intake.AssuranceModelBlind) && mode == string(harness.InputHostNative) {
+		s.hostInputMode, s.hostAssurance = mode, assurance
+		return nil
+	}
+	if assurance == string(intake.AssuranceAgentIsolated) && mode == string(harness.InputHostNative) {
+		s.hostInputMode, s.hostAssurance = mode, assurance
+		return nil
+	}
+	return fmt.Errorf("unsupported trusted input assurance")
 }
 
 func (s *Service) Close() error {

@@ -211,6 +211,11 @@ func recordPrivilegedScenariosNotExercisedExcept(h *harness, reason string, exer
 		{"restart-and-ephemeral-payload", "durable evidence remains truthful and in-memory payload is unavailable after restart"},
 		{"adversarial-credential-echo", "literal and JSON-escaped credential echoes are rejected before persistence/publication"},
 		{"config-overlay-concurrency", "overlapping launches restore baseline or preserve/report external edits"},
+		{"host-native-ui", "qualified host adapter renders broker-verified review, collects input directly to trusted intake, and no secret reaches model-visible data"},
+		{"host-log-attack", "agent transcripts, MCP recordings, replay logs and debug output contain no synthetic credential"},
+		{"fake-prompt-attack", "agent-produced fake SeqPass text cannot activate trusted protected input"},
+		{"host-upgrade-qualification", "changed host behavior invalidates the existing qualification until retested"},
+		{"remote-session-trust", "protected input remains on the trusted user side rather than the untrusted remote agent side"},
 	} {
 		if skip[item.name] || hasRecordedScenario(h, item.name) {
 			continue

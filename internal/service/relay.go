@@ -153,17 +153,24 @@ func (s *Service) RelayRequest(agent, destID, dataKind, purpose string, ttl time
 // the relay deadline. The authorized transfer operation commits in the
 // SAME transaction as the grant (QR-04), so the worker (or manual
 // execute) delivers through the normal path.
-func (s *Service) RelayFulfill(intakePrincipal, relayID string, payload []byte) (string, error) {
+func (s *Service) RelayFulfill(intakePrincipal, relayID string, expectedRevision uint64, payload []byte) (string, error) {
 	if intakePrincipal == "" || relayID == "" {
 		return "", errors.New("missing intake identity or request")
 	}
 	if len(payload) == 0 {
 		return "", errors.New("empty payload refused")
 	}
+	if expectedRevision == 0 {
+		return "", errors.New("missing reviewed request revision")
+	}
 	now := time.Now()
 	r, err := s.db.GetRelay(relayID)
 	if err != nil || r == nil {
 		return "", errors.New("unknown relay request")
+	}
+	if expectedRevision != r.Revision {
+		s.audit(relayID, "relay_fulfill_denied", intakePrincipal, r.DestinationID, "review-revision-stale")
+		return "", errors.New("request changed since review: fulfill refused")
 	}
 	// SP-10: once an intake owner has claimed this request, only that
 	// owner can fulfill it. A pre-claim request is fulfillable by any
@@ -267,7 +274,11 @@ func (s *Service) RelayUserInitWithConsumption(caller, destID, dataKind, purpose
 	if err != nil {
 		return "", "", err
 	}
-	opID, err := s.RelayFulfill(caller, reqID, payload)
+	r, err := s.db.GetRelay(reqID)
+	if err != nil || r == nil {
+		return "", "", errors.New("created relay unavailable")
+	}
+	opID, err := s.RelayFulfill(caller, reqID, r.Revision, payload)
 	if err != nil {
 		return "", "", err
 	}
@@ -276,10 +287,16 @@ func (s *Service) RelayUserInitWithConsumption(caller, destID, dataKind, purpose
 
 // RelayReject refuses a pending request (intake only). No payload has
 // been staged at this point by construction.
-func (s *Service) RelayReject(intakePrincipal, relayID string) error {
+func (s *Service) RelayReject(intakePrincipal, relayID string, expectedRevision uint64) error {
 	r, err := s.db.GetRelay(relayID)
 	if err != nil || r == nil {
 		return errors.New("unknown relay request")
+	}
+	if expectedRevision == 0 {
+		return errors.New("missing reviewed request revision")
+	}
+	if expectedRevision != r.Revision {
+		return errors.New("request changed since review: reject refused")
 	}
 	// SP-10: claimed requests are locked to their intake owner.
 	if r.IntakeOwner != "" && r.IntakeOwner != intakePrincipal {
@@ -318,6 +335,29 @@ func (s *Service) RelayCancel(caller string, relayID string, asIntake bool) erro
 	s.eph.Delete(relayPayloadKey(relayID))
 	s.audit(relayID, "relay_cancelled", caller, r.DestinationID, r.State)
 	return nil
+}
+
+// RelayCancelPrompt cancels a host presentation prompt without forcing a
+// dispatch cancellation (HI-10). Returns false when the relay is not in
+// a cancellable-prompt state; the caller then treats the action as
+// ambiguous rather than reporting a definitive rejection.
+func (s *Service) RelayCancelPrompt(agent, relayID string) (bool, error) {
+	r, err := s.db.GetRelay(relayID)
+	if err != nil || r == nil {
+		return false, errors.New("unknown relay request")
+	}
+	if r.AgentPrincipal != agent {
+		return false, errors.New("access denied")
+	}
+	if r.State != types.RelayAwaitingUser {
+		return false, nil
+	}
+	if err := s.db.CancelRelay(relayID, r.Revision, time.Now()); err != nil {
+		return false, err
+	}
+	s.eph.Delete(relayPayloadKey(relayID))
+	s.audit(relayID, "relay_prompt_cancelled", agent, r.DestinationID, r.State)
+	return true, nil
 }
 
 // submitRelayTransfer binds one more operation to a live grant (QR-05

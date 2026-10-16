@@ -58,7 +58,7 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, "seqpass - native secret broker for coding harnesses")
 	fmt.Fprintln(os.Stderr, "Usage:")
-	fmt.Fprintln(os.Stderr, "  seqpass broker --vault aegiskeys [--assurance best-effort|isolated] [--db PATH] [--socket PATH] [--admin-uid UID,...] [--agent-uid UID,...] [--intake-uid UID,...] [--intake-group GROUP] [--auto-execute]")
+	fmt.Fprintln(os.Stderr, "  seqpass broker --vault aegiskeys [--assurance best-effort|isolated] [--db PATH] [--socket PATH] [--admin-uid UID,...] [--agent-uid UID,...] [--intake-uid UID,...] [--intake-group GROUP] [--host-socket PATH] [--auto-execute]")
 	fmt.Fprintln(os.Stderr, "  seqpass broker --vault memory-test --dev  # development only, never production")
 	fmt.Fprintln(os.Stderr, "  seqpass mcp [--socket PATH]   # stdio adapter; register in Codex/Claude/Hermes")
 	fmt.Fprintln(os.Stderr, "  seqpass admin <catalog|pending|show|approve|reject|add-secret|add-dest|add-policy|set-policy|update-dest|execute> ...")
@@ -80,6 +80,7 @@ func brokerCmd(args []string) {
 	intakeF := fs.String("intake-socket", intake, "Trusted human intake socket (owner-only unless --intake-group is set)")
 	intakeUIDs := fs.String("intake-uid", "", "comma-separated human intake UIDs (default: admin UIDs; list agent UIDs here only for same-user best-effort mode)")
 	intakeGroup := fs.String("intake-group", "", "optional trusted intake socket group; must differ from agent group and exclude agent UIDs")
+	hostF := fs.String("host-socket", "", "optional display-only native-host adapter socket; owner-only, separate directory required")
 	vaultF := fs.String("vault", "", "required: aegiskeys|memory-test")
 	devF := fs.Bool("dev", false, "allow memory-test ephemeral vault (development only, never production)")
 	autoF := fs.Bool("auto-execute", false, "run trusted worker executing authorized ops without manual admin execute")
@@ -115,6 +116,7 @@ func brokerCmd(args []string) {
 		SocketPath:    *sockF,
 		AdminSocket:   *adminF,
 		IntakeSocket:  *intakeF,
+		HostSocket:    *hostF,
 		IntakeUIDs:    parseUIDs(*intakeUIDs),
 		AdminUIDs:     parseUIDs(*adminUIDs),
 		AgentUIDs:     parseUIDs(*agentUIDs), SocketGroup: *sockGroup, AegisKeysSocket: *aegisSock,

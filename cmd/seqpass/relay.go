@@ -219,9 +219,14 @@ func relayFulfill(args []string) {
 		fmt.Println("Declined: no payload sent.")
 		return
 	}
+	revision, _ := m["revision"].(float64)
+	if revision <= 0 {
+		fatal("request revision unavailable; refusing stale fulfill")
+	}
 	res, err := cli.Call(ipc.MethodIntakeFulfill, map[string]interface{}{
-		"request_id": reqID,
-		"payload":    base64.StdEncoding.EncodeToString(payload),
+		"request_id":       reqID,
+		"request_revision": uint64(revision),
+		"payload":          base64.StdEncoding.EncodeToString(payload),
 	})
 	must(err)
 	rm, _ := res.(map[string]interface{})

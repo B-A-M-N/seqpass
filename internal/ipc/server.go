@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/secretbridge/secretbridge/internal/harness"
 	"github.com/secretbridge/secretbridge/internal/intake"
 	"github.com/secretbridge/secretbridge/internal/service"
 	"github.com/secretbridge/secretbridge/internal/types"
@@ -101,13 +102,18 @@ type Server struct {
 	// intake domain on its own owner-only socket (QR-02/SP-TUI-04).
 	// Set before Start, like AgentGID.
 	IntakeSocket string
-	mapper       PrincipalMapper
-	auth         Authorizer
-	listener     net.Listener
-	adminLis     net.Listener
-	intakeLis    net.Listener
-	created      []string          // sockets created by this process (removed on close)
-	createdID    map[string]fileID // device+inode at bind time (C09)
+	// HostSocket, when non-empty, serves the display-only native-host
+	// presentation domain (HI-02/HI-03). Empty keeps the domain disabled;
+	// Start never creates it implicitly.
+	HostSocket string
+	mapper     PrincipalMapper
+	auth       Authorizer
+	listener   net.Listener
+	adminLis   net.Listener
+	intakeLis  net.Listener
+	hostLis    net.Listener
+	created    []string          // sockets created by this process (removed on close)
+	createdID  map[string]fileID // device+inode at bind time (C09)
 
 	mu         sync.Mutex
 	conns      map[net.Conn]struct{}
@@ -339,6 +345,12 @@ func (s *Server) Start() error {
 		s.wg.Add(1)
 		go s.serve(al, RoleAdmin)
 	}
+	if s.HostSocket != "" && (s.HostSocket == s.socket || s.HostSocket == s.adminSock || s.HostSocket == s.IntakeSocket) {
+		_ = l.Close()
+		s.closedOnce.Do(func() { close(s.closed) })
+		s.created = nil
+		return fmt.Errorf("host socket must be separate from agent, admin and intake sockets")
+	}
 	if s.IntakeSocket != "" && s.IntakeSocket != s.socket && s.IntakeSocket != s.adminSock {
 		intakeMode, intakeDirMode := os.FileMode(0600), os.FileMode(0700)
 		if s.IntakeGID != nil {
@@ -362,6 +374,29 @@ func (s *Server) Start() error {
 		}
 		s.wg.Add(1)
 		go s.serve(il, RoleIntake)
+	}
+	if s.HostSocket != "" {
+		hl, err := listenUnix(s.HostSocket, 0600, 0700, nil)
+		if err != nil {
+			s.closedOnce.Do(func() { close(s.closed) })
+			_ = l.Close()
+			if s.adminLis != nil {
+				_ = s.adminLis.Close()
+			}
+			if s.intakeLis != nil {
+				_ = s.intakeLis.Close()
+			}
+			s.wg.Wait()
+			s.created = nil
+			return fmt.Errorf("host socket: %w", err)
+		}
+		s.hostLis = hl
+		s.created = append(s.created, s.HostSocket)
+		if fi, err := os.Stat(s.HostSocket); err == nil {
+			s.createdID[s.HostSocket] = statID(fi)
+		}
+		s.wg.Add(1)
+		go s.serve(hl, RoleHost)
 	}
 	return nil
 }
@@ -420,6 +455,9 @@ func (s *Server) Close() error {
 	if s.intakeLis != nil {
 		_ = s.intakeLis.Close()
 	}
+	if s.hostLis != nil {
+		_ = s.hostLis.Close()
+	}
 	// Unblock idle scanners so shutdown cannot wait on silent clients (F09).
 	s.mu.Lock()
 	for c := range s.conns {
@@ -464,7 +502,7 @@ func (s *Server) handleConn(conn net.Conn, role Role) {
 			_ = writeDenied(conn)
 			return
 		}
-	case RoleIntake:
+	case RoleIntake, RoleHost:
 		if !s.auth.CanConnectIntake(ap) {
 			_ = writeDenied(conn)
 			return
@@ -518,6 +556,8 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 		allow = AdminAllowlist
 	case RoleIntake:
 		allow = IntakeAllowlist
+	case RoleHost:
+		allow = HostAllowlist
 	}
 	if !allow[req.Method] {
 		return Response{OK: false, Error: "access denied"}
@@ -790,27 +830,21 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 		}
 		return Response{OK: true, Data: map[string]interface{}{
 			"request_id": reqID, "status": "awaiting_user",
-			"next": "Fulfill through the trusted intake (relay fulfill) before expiry",
+			"next_action": "protected_input",
 		}}
 	case MethodRelayStatus:
 		st, err := s.svc.RelayStatus(principal, strParam(p, "request_id"))
 		if err != nil {
 			return Response{OK: false, Error: err.Error()}
 		}
-		// SP-02/SP-03: attach the broker-verified secure-input notice so
-		// any harness adapter can render it without the agent fabricating
-		// security claims. The assurance is derived from actual topology,
-		// never from agent arguments.
-		mode := "best-effort"
-		if s.AssuranceMode != "" {
-			mode = s.AssuranceMode
-		}
-		assurance := intake.Classify(mode, false, false)
+		// SP-02/HI-01/HI-06: return the broker-configured assurance facts,
+		// never a caller-controlled topology assertion. The agent remains
+		// a control-plane consumer and cannot claim host-native isolation.
 		if rm := st; rm != nil {
-			rm["input_mode"] = assurance.Mode
-			rm["input_assurance"] = assurance.Assurance
-			rm["input_protected"] = assurance.Protected
-			rm["input_reason"] = assurance.Reason
+			rm["input_mode"] = harness.SecureInputMode(s.svc.HostInputMode())
+			rm["input_assurance"] = s.svc.HostInputAssurance()
+			rm["input_protected"] = s.svc.HostInputAssurance() != string(intake.AssuranceUnverified)
+			rm["input_reason"] = s.svc.HostInputReason()
 		}
 		return Response{OK: true, Data: st}
 	case MethodRelayCancel:
@@ -829,7 +863,8 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 		if err != nil {
 			return Response{OK: false, Error: err.Error()}
 		}
-		opID, err := s.svc.RelayFulfill(principal, strParam(p, "request_id"), raw)
+		expectedRevision := uint64(uintParamOr(p, "request_revision"))
+		opID, err := s.svc.RelayFulfill(principal, strParam(p, "request_id"), expectedRevision, raw)
 		if err != nil {
 			return Response{OK: false, Error: err.Error()}
 		}
@@ -838,7 +873,7 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 			"next": "Authorized: the trusted worker delivers; poll relay.status for the outcome",
 		}}
 	case MethodIntakeReject:
-		if err := s.svc.RelayReject(principal, strParam(p, "request_id")); err != nil {
+		if err := s.svc.RelayReject(principal, strParam(p, "request_id"), uint64(uintParamOr(p, "request_revision"))); err != nil {
 			return Response{OK: false, Error: err.Error()}
 		}
 		return Response{OK: true, Data: map[string]string{"status": "rejected"}}
@@ -847,6 +882,87 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 			return Response{OK: false, Error: err.Error()}
 		}
 		return Response{OK: true, Data: map[string]string{"status": "cancelled"}}
+	case MethodHostRegister:
+		// Registration is trusted-side only. HumanPrincipal arrives from
+		// the same authenticated IPC connection that would otherwise use
+		// intake; the broker rejects the agent-supplied aliases.
+		caps := harness.HostCapabilities{
+			Presentation:            strParam(p, "presentation"),
+			InputTransport:          strParam(p, "input_transport"),
+			CredentialFormViaMCP:    false,
+			SupportsResume:          strParam(p, "supports_resume") == "true",
+			SupportsCancelPrompt:    strParam(p, "supports_cancel_prompt") == "true",
+			SupportsMultiplePending: strParam(p, "supports_multiple_pending") == "true",
+		}
+		reg := harness.HostRegistration{
+			HostKind:       harness.HostSessionKind(strParam(p, "host_kind")),
+			ThreadID:       strParam(p, "thread_id"),
+			HostVersion:    strParam(p, "host_version"),
+			AdapterVersion: strParam(p, "adapter_version"),
+			Credentials:    caps,
+		}
+		if ttl, ok := uintParam(p, "ttl_seconds"); ok {
+			reg.TTLOfSession = time.Duration(ttl) * time.Second
+		}
+		session, token, err := s.svc.RegisterHostSession(principal, principal, reg)
+		if err != nil {
+			return Response{OK: false, Error: err.Error()}
+		}
+		return Response{OK: true, Data: map[string]interface{}{"session": session, "token": token}}
+	case MethodHostEvent, MethodHostNotice, MethodHostStatus, MethodHostReview, MethodHostCancelPrompt:
+		var sess *types.HostSession
+		if sid := strParam(p, "session_id"); sid != "" {
+			tok := strParam(p, "session_token")
+			authSession, authErr := s.svc.HostSessionAuth(sid, tok)
+			if authErr != nil {
+				return Response{OK: false, Error: "host session invalid"}
+			}
+			sess = authSession
+		} else {
+			return Response{OK: false, Error: "missing host session"}
+		}
+		if req.Method == MethodHostEvent {
+			// A monotonically increasing host-supplied counter lets reconnects
+			// order replayed state while revision remains broker truth.
+			sequence := uint64(uintParamOr(p, "sequence"))
+			ev, err := s.svc.HostRelayEvent(principal, strParam(p, "request_id"), sess, sequence)
+			if err != nil {
+				return Response{OK: false, Error: err.Error()}
+			}
+			return Response{OK: true, Data: ev}
+		}
+		if req.Method == MethodHostStatus {
+			st, err := s.svc.HostRelayStatus(principal, strParam(p, "request_id"), sess)
+			if err != nil {
+				return Response{OK: false, Error: err.Error()}
+			}
+			return Response{OK: true, Data: st}
+		}
+		if req.Method == MethodHostNotice {
+			notice, err := s.svc.HostRelayNotice(principal, strParam(p, "request_id"), sess)
+			if err != nil {
+				return Response{OK: false, Error: err.Error()}
+			}
+			return Response{OK: true, Data: notice}
+		}
+		if req.Method == MethodHostCancelPrompt {
+			// Display-only prompt cancellation (HI-10): only awaiting-user
+			// prompts are withdrawn. If the operation has already dispatched,
+			// the broker returns not-cancelled so the host never reports a
+			// false final outcome.
+			cancelled, err := s.svc.RelayCancelPrompt(principal, strParam(p, "request_id"))
+			if err != nil {
+				return Response{OK: false, Error: err.Error()}
+			}
+			return Response{OK: true, Data: map[string]interface{}{
+				"request_id": strParam(p, "request_id"), "prompt_cancelled": cancelled,
+			}}
+		}
+		review, err := s.svc.HostRelayReview(principal, strParam(p, "request_id"), sess)
+		if err != nil {
+			return Response{OK: false, Error: err.Error()}
+		}
+		return Response{OK: true, Data: review}
 	case MethodIntakeRequest:
 		// F13: trusted user-initiated creation-plus-fulfillment that
 		// operates without agent IPC privileges. The trusted caller

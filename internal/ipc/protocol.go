@@ -42,6 +42,16 @@ const (
 	MethodIntakeReject  = "intake.reject"
 	MethodIntakeCancel  = "intake.cancel"
 	MethodIntakeRequest = "intake.request"
+	// Native host adapter surfaces (HI-02/HI-03). Registration and token
+	// validation require the protected intake trust boundary. Agent-facing
+	// request events are deliberately not here: notifications are scoped
+	// to the already authenticated native host, not to model control.
+	MethodHostRegister     = "host.register"
+	MethodHostEvent        = "host.event"
+	MethodHostReview       = "host.review"
+	MethodHostNotice       = "host.notice"
+	MethodHostStatus       = "host.status"
+	MethodHostCancelPrompt = "host.cancel_prompt"
 )
 
 // Role is the explicit IPC security domain (SP-TUI-04). It replaces the
@@ -53,12 +63,26 @@ const (
 	RoleAgent Role = iota
 	RoleIntake
 	RoleAdmin
+	RoleHost
 )
 
 // AgentAllowlist is the untrusted harness-facing surface. No plaintext intake
 // or retrieval, no admin actions — and no intake methods: an agent can
 // request a handoff and poll its own status, but can never supply,
 // approve, or read back the sensitive value (QR-02).
+// HostAllowlist is the native-host adapter surface. It can observe
+// presentation metadata and review a pending request, but can never
+// fulfill, reject, or otherwise authorize delivery. This is a separate
+// role from intake: HI-04's data plane remains intake-only.
+var HostAllowlist = map[string]bool{
+	MethodHostEvent:        true,
+	MethodHostNotice:       true,
+	MethodHostStatus:       true,
+	MethodHostReview:       true,
+	MethodHostCancelPrompt: true,
+	MethodHealth:           true,
+}
+
 var AgentAllowlist = map[string]bool{
 	MethodCatalog:         true,
 	MethodUseSubmit:       true,
@@ -75,7 +99,13 @@ var AgentAllowlist = map[string]bool{
 // IntakeAllowlist is the trusted human-side surface (QR-02/SP-TUI-04):
 // review pending requests, supply payloads, authorize or reject. Only
 // intake.fulfill carries plaintext, and only inbound.
+// IntakeAllowlist is the trusted human-side surface (QR-02/SP-TUI-04):
+// review pending requests, supply payloads, authorize or reject. Only
+// intake.fulfill carries plaintext, and only inbound. It also owns
+// native-host registration because that adapter must authenticate over a
+// protected trust boundary; a host token never gains fulfillment rights.
 var IntakeAllowlist = map[string]bool{
+	MethodHostRegister:  true,
 	MethodIntakeInspect: true,
 	MethodIntakeFulfill: true,
 	MethodIntakeReject:  true,
@@ -88,6 +118,7 @@ var IntakeAllowlist = map[string]bool{
 // actions. Operators are trusted humans: they may fulfill from the
 // admin terminal as well as the intake socket.
 var AdminAllowlist = map[string]bool{
+	MethodHostRegister:    true,
 	MethodCatalog:         true,
 	MethodUseSubmit:       true,
 	MethodTransferSubmit:  true,

@@ -264,6 +264,22 @@ type RelayRecord struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
+// HostSession is the broker-issued binding for a native host integration
+// (HI-02). It identifies the harness instance/workflow and the two
+// principals authenticated by the broker. It carries no credential or
+// agent-asserted security claim.
+type HostSession struct {
+	ID             string    `json:"id"`
+	HostKind       string    `json:"host_kind"`
+	AgentPrincipal string    `json:"agent_principal"`
+	HumanPrincipal string    `json:"human_principal"`
+	ThreadID       string    `json:"thread_id,omitempty"`
+	ExpiresAt      time.Time `json:"expires_at"`
+	Revision       uint64    `json:"revision"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
 // UseRequest for credential-backed operation.
 type UseRequest struct {
 	ID           string            `json:"id"`

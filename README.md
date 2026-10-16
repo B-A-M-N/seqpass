@@ -127,6 +127,42 @@ delivers it to the registered recipient; the agent gets status only.
 # queue (no --auto-execute needed); disable with --no-relay-auto-deliver.
 ```
 
+### Native host presentation (HI-02/HI-03/HI-05/HI-07)
+
+SeqPass separates the agent control plane from host presentation. The
+optional `--host-socket PATH` enables a display-only native-host
+presentation domain. A trusted host adapter registers over the protected
+intake trust boundary with `host.register`, receives a broker-minted
+session token, and can then call only `host.event`, `host.notice`,
+`host.review`, and `host.cancel_prompt`.
+Those methods return broker-verified public metadata and a versioned
+protected-input notice; they cannot fulfill or reject a relay.
+
+A host-native secure-input mode is not enabled by this socket. Registration
+negotiates the host kind and non-secret capability flags (`presentation`,
+`input_transport`, `supports_resume`, `supports_cancel_prompt`, and
+`supports_multiple_pending`); the broker always normalizes
+`credential_form_via_mcp=false`. Capability flags describe UI support, not
+security. A native input requires a version-, adapter-, topology- and
+security-configuration-bound qualification record
+(`harness.AdapterQualification`), and the default classification remains
+`model_blind`/`external_tty` until all terminal, process/tool and transcript
+boundaries are verified. Purpose text is untrusted annotation; only
+broker-rendered `trusted_host_render` review DTOs may initiate protected
+input.
+
+Known broker host kinds are `codex`, `opencode`, `pi`, `jcode`,
+`qwen-code`, `claude-code`, and `agy` (plus `generic` for legacy adapters).
+
+
+
+Lifecycle: a pending relay survives an adapter restart until its own
+deadline; host disconnection is only a display-state hint, not user
+rejection. A host adapter may withdraw a still-pending prompt with
+`host.cancel_prompt`; once dispatch has started, the broker returns
+`prompt_cancelled=false` and preserves the uncertain/reconciled outcome
+rather than fabricating a final result.
+
 Relay guarantees: the grant binds exact agent + recipient (+ live
 config) + purpose + deadline + delivery budget, without creating a
 permanent policy and without bumping the global epoch; single-use

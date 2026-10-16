@@ -23,7 +23,7 @@ func TestRelayFulfillRefusesChangedRecipient(t *testing.T) {
 	if err := svc.DB().UpdateDestinationEndpoint("rd1", "/tmp/evil.sock", "operator"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.RelayFulfill("operator", reqID, []byte(relaySecret)); err == nil {
+	if _, err := svc.RelayFulfill("operator", reqID, relayRev(svc, reqID), []byte(relaySecret)); err == nil {
 		t.Fatal("fulfillment rebound to a changed recipient")
 	}
 	if n := countDeliveries(r); n != 0 {
@@ -47,7 +47,7 @@ func TestRelaySingleUseClearsMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	opID, err := svc.RelayFulfill("operator", reqID, []byte(relaySecret))
+	opID, err := svc.RelayFulfill("operator", reqID, relayRev(svc, reqID), []byte(relaySecret))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestRelayReusableLeavesNoHolders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	opID, err := svc.RelayFulfill("operator", reqID, []byte(relaySecret))
+	opID, err := svc.RelayFulfill("operator", reqID, relayRev(svc, reqID), []byte(relaySecret))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestRelayTenConcurrentDeliveries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := svc.RelayFulfill("operator", reqID, []byte(relaySecret))
+	first, err := svc.RelayFulfill("operator", reqID, relayRev(svc, reqID), []byte(relaySecret))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestRelayRestartPreservesAwaitingUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.RelayFulfill("operator", staged, []byte(relaySecret)); err != nil {
+	if _, err := svc.RelayFulfill("operator", staged, relayRev(svc, staged), []byte(relaySecret)); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now()
@@ -189,7 +189,7 @@ func TestRelayQueueDeliversWithoutAutoExecute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.RelayFulfill("operator", reqID, []byte(relaySecret)); err != nil {
+	if _, err := svc.RelayFulfill("operator", reqID, relayRev(svc, reqID), []byte(relaySecret)); err != nil {
 		t.Fatal(err)
 	}
 	if n := svc.ExecuteReadyRelays(context.Background()); n != 1 {
@@ -229,7 +229,7 @@ func TestRelayStatusTruthfulness(t *testing.T) {
 	if v, _ := st["plaintext_in_public_receipt"].(bool); v {
 		t.Fatal("broker receipt contains plaintext")
 	}
-	opID, err := svc.RelayFulfill("operator", reqID, []byte(relaySecret))
+	opID, err := svc.RelayFulfill("operator", reqID, relayRev(svc, reqID), []byte(relaySecret))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -189,6 +189,28 @@ CREATE TABLE IF NOT EXISTS relay_deliveries (
 );
 CREATE INDEX IF NOT EXISTS relay_deliveries_relay_idx ON relay_deliveries(relay_id, state);
 
+CREATE TABLE IF NOT EXISTS host_sessions (
+  id TEXT PRIMARY KEY,
+  host_kind TEXT NOT NULL,
+  agent_principal TEXT NOT NULL,
+  human_principal TEXT NOT NULL,
+  thread_id TEXT,
+  expires_at TIMESTAMP,
+  revision INTEGER NOT NULL DEFAULT 1,
+  created_at TIMESTAMP,
+  updated_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS host_session_agent_idx ON host_sessions(agent_principal, expires_at);
+
+CREATE TABLE IF NOT EXISTS host_session_tokens (
+  session_id TEXT PRIMARY KEY,
+  token_hash TEXT NOT NULL,
+  expires_at TIMESTAMP,
+  created_at TIMESTAMP,
+  updated_at TIMESTAMP,
+  FOREIGN KEY(session_id) REFERENCES host_sessions(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS ephemeral_payloads (
   ref TEXT PRIMARY KEY,
   size INTEGER NOT NULL,
@@ -258,7 +280,7 @@ CREATE INDEX IF NOT EXISTS obs_op_idx ON outcome_observations(operation_id, obse
 // the approval-binding repair columns; version 2 adds the trusted
 // dispatch record, observation record/commit timestamps, and evidence
 // kinds (G02/G07). Older databases take the repair path below.
-const schemaVersion = 2
+const schemaVersion = 3
 
 func (d *DB) currentVersion() (int, error) {
 	var v int

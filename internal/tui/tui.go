@@ -41,6 +41,7 @@ type item struct {
 	max         float64
 	purpose     string
 	state       string
+	revision    uint64
 }
 
 // Run starts the fullscreen inbox on the operator's own terminal. It
@@ -249,6 +250,7 @@ func (s *session) refresh() {
 			expires:     str(m["expires_at"]),
 			consumption: str(m["consumption"]),
 			max:         mx,
+			revision:    uint64(m["revision"].(float64)),
 			purpose:     sanitize(str(m["purpose"])),
 			state:       str(m["state"]),
 		})
@@ -279,7 +281,10 @@ func (s *session) doReject() {
 		return
 	}
 	defer cli.Close()
-	if _, err := cli.Call(ipc.MethodIntakeReject, map[string]interface{}{"request_id": it.id}); err != nil {
+	if _, err := cli.Call(ipc.MethodIntakeReject, map[string]interface{}{
+		"request_id":       it.id,
+		"request_revision": it.revision,
+	}); err != nil {
 		s.status = "reject failed: " + err.Error()
 		return
 	}
@@ -314,8 +319,9 @@ func (s *session) doFulfill() {
 	}
 	defer cli.Close()
 	res, err := cli.Call(ipc.MethodIntakeFulfill, map[string]interface{}{
-		"request_id": it.id,
-		"payload":    base64.StdEncoding.EncodeToString(secret),
+		"request_id":       it.id,
+		"request_revision": it.revision,
+		"payload":          base64.StdEncoding.EncodeToString(secret),
 	})
 	if err != nil {
 		s.status = "fulfill failed: " + err.Error()

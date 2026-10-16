@@ -52,13 +52,14 @@ type InputRequestNotice struct {
 
 // Assurance is the truthful classification shown before the user types.
 type Assurance struct {
-	Mode             InputMode      `json:"mode"`
-	Assurance        InputAssurance `json:"assurance"`
-	Protected        bool           `json:"protected"`
-	Reason           string         `json:"reason"`
-	SameUID          bool           `json:"same_uid"`
-	TerminalShared   bool           `json:"terminal_shared"`
-	IntakeAccessible bool           `json:"intake_accessible"`
+	Mode             InputMode          `json:"mode"`
+	Assurance        InputAssurance     `json:"assurance"`
+	Protected        bool               `json:"protected"`
+	Reason           string             `json:"reason"`
+	SameUID          bool               `json:"same_uid"`
+	TerminalShared   bool               `json:"terminal_shared"`
+	IntakeAccessible bool               `json:"intake_accessible"`
+	Properties       VerifiedProperties `json:"verified_properties"`
 }
 
 // Classify maps actual deployment topology to an honest assurance
@@ -99,4 +100,41 @@ func Classify(assuranceMode string, terminalShared bool, intakeAccessible bool) 
 		IntakeAccessible: false,
 		Reason:           "isolation not verified: use a dedicated broker UID and a separate trusted terminal",
 	}
+}
+
+// Model-blind versus agent-isolated assurance (HI-01). A host may keep
+// a value out of model-visible context without proving that its shell,
+// process-inspection, transcript, or terminal tooling cannot observe it.
+const (
+	// AssuranceModelBlind means plaintext is kept out of model messages
+	// and agent-visible tool results, but not every agent-observable
+	// process/transcript boundary is proven.
+	AssuranceModelBlind InputAssurance = "model_blind"
+	// AssuranceAgentIsolated means all classified agent boundaries are
+	// verified, including terminal, process/tool and transcript access.
+	AssuranceAgentIsolated InputAssurance = "agent_isolated"
+)
+
+// HostNativeKind identifies a broker-qualified host input surface. It is
+// distinct from InputMode so callers cannot relabel an ordinary TTY as
+// host-native merely by naming the mode.
+type HostNativeKind string
+
+const (
+	// HostNativeNone means no host-owned protected-input extension is
+	// qualified for the active integration.
+	HostNativeNone HostNativeKind = "none"
+	// HostNativeVerified means a broker-configured, independently
+	// qualified native host adapter is available.
+	HostNativeVerified HostNativeKind = "verified"
+)
+
+// HostIntegration is the trusted, broker-owned native integration fact.
+// HostKind names the integration that was qualified; it is never trusted
+// from a request field.
+type HostIntegration struct {
+	Kind      HostNativeKind     `json:"kind"`
+	Qualified bool               `json:"qualified"`
+	Revision  string             `json:"revision"`
+	Caps      VerifiedProperties `json:"verified_properties"`
 }

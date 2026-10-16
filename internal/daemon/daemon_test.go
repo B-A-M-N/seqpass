@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/secretbridge/secretbridge/internal/harness"
 	"github.com/secretbridge/secretbridge/internal/ipc"
 )
 
@@ -227,5 +228,74 @@ func TestDaemonRequiresExplicitVault(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("daemon accepted an empty vault type")
+	}
+}
+
+func TestHostQualificationFailClosed(t *testing.T) {
+	if sandboxAncestorUntrusted() {
+		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
+	}
+	dir := t.TempDir()
+	digest, err := harness.SecurityConfigDigest(harness.HostKindCodex, "1.2.3", "4.5.6", "local", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := Config{
+		DBPath: filepath.Join(dir, "qual.db"), VaultType: "memory-test",
+		SocketPath: filepath.Join(dir, "sock"), AdminSocket: filepath.Join(dir, "admin.sock"),
+		IntakeSocket: filepath.Join(dir, "intake.sock"), HostSocket: filepath.Join(dir, "host.sock"),
+	}
+	valid := harness.AdapterQualification{
+		Status: harness.QualificationPassed, HostKind: harness.HostKindCodex,
+		HostVersion: "1.2.3", AdapterVersion: "4.5.6", InputMode: harness.QualifiedHostNative,
+		ExecutionTopology: "local", SecurityConfigDigest: digest,
+		QualifiedAt: time.Now(), ExpiresAt: time.Now().Add(time.Minute),
+	}
+	cfg := base
+	cfg.HostQualification = valid
+	d, err := New(cfg)
+	if err != nil {
+		t.Fatalf("valid qualification rejected: %v", err)
+	}
+	_ = d.Shutdown()
+	changed := valid
+	changed.HostVersion = "1.2.4"
+	cfg.HostQualification = changed
+	if _, err := New(cfg); err == nil {
+		t.Fatal("changed host version accepted qualification")
+	}
+}
+func TestHostQualificationSnapshotSelectionFailClosed(t *testing.T) {
+	if sandboxAncestorUntrusted() {
+		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
+	}
+	dir := t.TempDir()
+	digest, err := harness.SecurityConfigDigest(harness.HostKindOpenCode, "2.0", "0.1", "local", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := Config{
+		DBPath: filepath.Join(dir, "qual-select.db"), VaultType: "memory-test",
+		SocketPath: filepath.Join(dir, "sock"), AdminSocket: filepath.Join(dir, "admin.sock"),
+		IntakeSocket: filepath.Join(dir, "intake.sock"), HostSocket: filepath.Join(dir, "host.sock"),
+	}
+	record := harness.AdapterQualification{
+		Status: harness.QualificationPassed, HostKind: harness.HostKindOpenCode,
+		HostVersion: "2.0", AdapterVersion: "0.1", InputMode: harness.QualifiedHostNative,
+		ExecutionTopology: "local", SecurityConfigDigest: digest,
+		QualifiedAt: time.Now(), ExpiresAt: time.Now().Add(time.Minute),
+	}
+	cfg := base
+	cfg.HostQualification = record
+	d, err := New(cfg)
+	if err != nil {
+		t.Fatalf("valid snapshot rejected: %v", err)
+	}
+	_ = d.Shutdown()
+	changed := record
+	changed.HostVersion = "2.1"
+	cfg.HostQualification = changed
+	if _, err := New(cfg); err == nil {
+		t.Fatal("host version mismatch selected native mode")
 	}
 }

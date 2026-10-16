@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/secretbridge/secretbridge/internal/harness"
+	"github.com/secretbridge/secretbridge/internal/intake"
 	"github.com/secretbridge/secretbridge/internal/ipc"
 	"github.com/secretbridge/secretbridge/internal/metadata"
 	"github.com/secretbridge/secretbridge/internal/secureops"
@@ -81,6 +83,16 @@ type Config struct {
 	// connect, while peer-credential authorization still applies. Empty
 	// keeps the owner-only default. Never the agent group.
 	IntakeGroup string
+	// HostSocket, when set, enables the display-only native-host adapter
+	// presentation domain (HI-02/HI-03). It is owner-only and must remain
+	// separate from every other socket directory. Empty keeps it disabled.
+	HostSocket string
+	// HostQualification, when supplied, is the broker-side accepted record
+	// for a native adapter. It must exactly match the running host version,
+	// adapter revision, topology, and security configuration or the broker
+	// refuses the stronger host-native assurance. Empty uses the external
+	// TTY fallback.
+	HostQualification harness.AdapterQualification
 	// NoRelayAutoDeliver disables the default broker-managed relay job
 	// queue (F05). By default fulfilled quick relays dispatch without
 	// requiring --auto-execute; this flag opts out explicitly.
@@ -230,14 +242,74 @@ func New(cfg Config) (*Daemon, error) {
 	for _, u := range cfg.AgentUIDs {
 		agents[u] = true
 	}
-	intake := map[uint32]bool{}
+	intakeUIDs := map[uint32]bool{}
 	for _, u := range cfg.IntakeUIDs {
-		intake[u] = true
+		intakeUIDs[u] = true
 	}
 	srv := ipc.NewServer(svc, cfg.SocketPath, cfg.AdminSocket, nil,
-		&ipc.UIDAuthorizer{AdminUIDs: allow, AgentUIDs: agents, IntakeUIDs: intake})
+		&ipc.UIDAuthorizer{AdminUIDs: allow, AgentUIDs: agents, IntakeUIDs: intakeUIDs})
 	srv.IntakeSocket = cfg.IntakeSocket
+	srv.HostSocket = cfg.HostSocket
+	if cfg.HostSocket != "" {
+		if err := svc.SetHostInputAssurance(string(harness.InputExternalTTY), string(intake.AssuranceModelBlind)); err != nil {
+			_ = svc.Close()
+			lease.Release()
+			return nil, fmt.Errorf("host assurance configuration failed: %w", err)
+		}
+	}
 	srv.AssuranceMode = cfg.AssuranceMode
+	// HI-05: qualification is accepted only as a complete record. Empty
+	// configuration remains fail-closed external TTY/model-blind.
+	if !cfg.HostQualification.QualifiedAt.IsZero() || cfg.HostQualification.Status != "" {
+		digest, err := harness.SecurityConfigDigest(cfg.HostQualification.HostKind,
+			cfg.HostQualification.HostVersion, cfg.HostQualification.AdapterVersion,
+			cfg.HostQualification.ExecutionTopology, nil)
+		if err != nil {
+			_ = svc.Close()
+			lease.Release()
+			return nil, fmt.Errorf("host qualification metadata invalid: %w", err)
+		}
+		if cfg.HostQualification.SecurityConfigDigest == "" {
+			cfg.HostQualification.SecurityConfigDigest = digest
+		}
+		if err := cfg.HostQualification.ValidFor(cfg.HostQualification.HostKind,
+			cfg.HostQualification.HostVersion, cfg.HostQualification.AdapterVersion,
+			harness.HostInputMode(cfg.HostQualification.InputMode),
+			cfg.HostQualification.ExecutionTopology, cfg.HostQualification.SecurityConfigDigest,
+			time.Now()); err != nil {
+			_ = svc.Close()
+			lease.Release()
+			return nil, fmt.Errorf("host qualification rejected: %w", err)
+		}
+		// CORE-04: match the accepted snapshot against its own exact facts
+		// before enabling native mode. Registration claims are never used
+		// as qualification evidence.
+		snapshot := &harness.QualificationSnapshot{
+			HostKind:       cfg.HostQualification.HostKind,
+			HostVersion:    cfg.HostQualification.HostVersion,
+			AdapterVersion: cfg.HostQualification.AdapterVersion,
+			InputMode:      cfg.HostQualification.InputMode,
+			Topology:       cfg.HostQualification.ExecutionTopology,
+			ConfigDigest:   cfg.HostQualification.SecurityConfigDigest,
+			Record:         cfg.HostQualification,
+		}
+		decision, err := harness.SelectNativeMode(snapshot,
+			cfg.HostQualification.HostKind, cfg.HostQualification.HostVersion,
+			cfg.HostQualification.AdapterVersion, cfg.HostQualification.ExecutionTopology,
+			nil, time.Now())
+		if err != nil || !decision.Qualified || decision.RecordUsed != true {
+			_ = svc.Close()
+			lease.Release()
+			return nil, fmt.Errorf("host qualification did not select native mode: %w", err)
+		}
+		mode := decision.Mode
+		assurance := intake.InputAssurance(decision.Assurance)
+		if err := svc.SetHostInputAssurance(string(mode), string(assurance)); err != nil {
+			_ = svc.Close()
+			lease.Release()
+			return nil, fmt.Errorf("host qualification assurance invalid: %w", err)
+		}
+	}
 	if cfg.SocketGroup != "" {
 		gid, err := lookupGroupGID(cfg.SocketGroup)
 		if err != nil {
@@ -276,7 +348,7 @@ func New(cfg Config) (*Daemon, error) {
 		path   string
 		admin  bool
 		intake bool
-	}{{cfg.SocketPath, false, false}, {cfg.AdminSocket, true, false}, {cfg.IntakeSocket, true, true}} {
+	}{{cfg.SocketPath, false, false}, {cfg.AdminSocket, true, false}, {cfg.IntakeSocket, true, true}, {cfg.HostSocket, cfg.HostSocket != "", false}} {
 		st, err := os.Stat(sp.path)
 		if err != nil {
 			_ = srv.Close()

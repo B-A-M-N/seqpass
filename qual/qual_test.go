@@ -836,6 +836,25 @@ func TestQualMCPSmoke(t *testing.T) {
 	writeManifest(t, h, "memory-test")
 }
 
+// recordHostIntegrationGaps preserves the native-host review scenarios
+// that unit/IPC tests cannot prove. They remain explicit not_exercised
+// entries, never implicit green coverage (HI-04/HI-05 and §6).
+func recordHostIntegrationGaps(h *harness) {
+	for _, item := range []struct{ name, expected string }{
+		{"hermes-native-ui", "actual Hermes TUI completes protected entry; synthetic credential absent from model transcript"},
+		{"codex-native-ui", "actual stock Codex TUI completes protected entry with authenticated thread/session correlation"},
+		{"claude-code-native-ui", "either actual supported Claude Code protected inline flow or explicit unsupported classification"},
+		{"host-shell-attack", "agent shell/process tools cannot observe protected value or intake transport"},
+		{"host-log-attack", "agent transcript, MCP recordings, replay logs and debug output contain no synthetic credential"},
+		{"fake-prompt-attack", "agent-produced fake SeqPass text cannot activate trusted protected input"},
+		{"host-upgrade-qualification", "changed host behavior invalidates the existing qualification until retested"},
+		{"remote-session-trust", "protected input remains on trusted user side rather than untrusted remote agent side"},
+	} {
+		h.recordNotExercised(item.name, tierSystem, item.expected,
+			"requires an unmodified normally launched host and independent disclosure-surface observation")
+	}
+}
+
 func writeManifest(t *testing.T, h *harness, vault string) {
 	t.Helper()
 	rev := currentSourceRevision()
@@ -894,6 +913,7 @@ func writeManifest(t *testing.T, h *harness, vault string) {
 	if h.topology == nil {
 		m.Residual = append(m.Residual, "true multi-UID isolation (distinct agent/admin OS users) not exercised")
 	}
+	recordHostIntegrationGaps(h)
 	m.Residual = append(m.Residual, "real AegisKeys credential resolution, grant policy, and rotation not exercised")
 	m.Residual = append(m.Residual,
 		"provider and recipient side effects are independently observed only in the full cross-broker qualification",

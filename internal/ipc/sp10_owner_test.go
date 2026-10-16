@@ -42,7 +42,7 @@ func TestIntakeOwnerScopingService(t *testing.T) {
 	if !found {
 		t.Fatal("unclaimed request not visible to intake-b")
 	}
-	opID, err := svc.RelayFulfill("uid:operator-a", reqID, []byte("sp10-secret"))
+	opID, err := svc.RelayFulfill("uid:operator-a", reqID, relayRev(svc, reqID), []byte("sp10-secret"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,4 +57,12 @@ func TestIntakeOwnerScopingService(t *testing.T) {
 	if err != nil {
 		t.Fatalf("owner should still inspect own request: %v", err)
 	}
+}
+
+func relayRev(svc *service.Service, requestID string) uint64 {
+	r, err := svc.DB().GetRelay(requestID)
+	if err != nil || r == nil {
+		return 0
+	}
+	return r.Revision
 }

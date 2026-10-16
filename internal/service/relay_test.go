@@ -68,7 +68,7 @@ func TestRelayFullCycleDelivered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	opID, err := svc.RelayFulfill("operator", reqID, []byte(relaySecret))
+	opID, err := svc.RelayFulfill("operator", reqID, relayRev(svc, reqID), []byte(relaySecret))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestRelayAgentCannotReadValue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.RelayFulfill("operator", reqID, []byte(relaySecret)); err != nil {
+	if _, err := svc.RelayFulfill("operator", reqID, relayRev(svc, reqID), []byte(relaySecret)); err != nil {
 		t.Fatal(err)
 	}
 	for _, st := range []struct {
@@ -164,10 +164,10 @@ func TestRelayDoubleFulfillOneWinner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.RelayFulfill("operator", reqID, []byte(relaySecret)); err != nil {
+	if _, err := svc.RelayFulfill("operator", reqID, relayRev(svc, reqID), []byte(relaySecret)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.RelayFulfill("operator", reqID, []byte("second-value")); err == nil {
+	if _, err := svc.RelayFulfill("operator", reqID, relayRev(svc, reqID), []byte("second-value")); err == nil {
 		t.Fatal("second fulfillment of one request succeeded")
 	}
 	if svc.eph.Live(relayPayloadKey(reqID)) == false {
@@ -185,7 +185,7 @@ func TestRelaySingleUseRaceOneDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	op1, err := svc.RelayFulfill("operator", reqID, []byte(relaySecret))
+	op1, err := svc.RelayFulfill("operator", reqID, relayRev(svc, reqID), []byte(relaySecret))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,7 @@ func TestRelayReusableConcurrentApps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fulfillOp, err := svc.RelayFulfill("operator", reqID, []byte(relaySecret))
+	fulfillOp, err := svc.RelayFulfill("operator", reqID, relayRev(svc, reqID), []byte(relaySecret))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +264,7 @@ func TestRelayForeignAgentDenied(t *testing.T) {
 	if err := svc.RelayCancel("uid:9999", reqID, false); err == nil {
 		t.Fatal("foreign agent cancelled another agent's relay")
 	}
-	if _, err := svc.RelayFulfill("operator", reqID, []byte(relaySecret)); err != nil {
+	if _, err := svc.RelayFulfill("operator", reqID, relayRev(svc, reqID), []byte(relaySecret)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.SubmitTransfer("uid:9999", &types.TransferRequest{
@@ -288,7 +288,7 @@ func TestRelaySubstitutedRecipientDenied(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.RelayFulfill("operator", reqID, []byte(relaySecret)); err != nil {
+	if _, err := svc.RelayFulfill("operator", reqID, relayRev(svc, reqID), []byte(relaySecret)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.SubmitTransfer("uid:1000", &types.TransferRequest{
@@ -336,7 +336,7 @@ func TestRelayExpiryEnforced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	opID, err := svc.RelayFulfill("operator", reqID, []byte(relaySecret))
+	opID, err := svc.RelayFulfill("operator", reqID, relayRev(svc, reqID), []byte(relaySecret))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,7 +373,7 @@ func TestRelayLostAckUncertain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	opID, err := svc.RelayFulfill("operator", reqID, []byte(relaySecret))
+	opID, err := svc.RelayFulfill("operator", reqID, relayRev(svc, reqID), []byte(relaySecret))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -421,7 +421,7 @@ func TestRelayRestartUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	opID, err := svc.RelayFulfill("operator", reqID, []byte(relaySecret))
+	opID, err := svc.RelayFulfill("operator", reqID, relayRev(svc, reqID), []byte(relaySecret))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +455,7 @@ func TestRelayAcceptedNotApplied(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.RelayFulfill("operator", reqID, []byte(relaySecret)); err != nil {
+	if _, err := svc.RelayFulfill("operator", reqID, relayRev(svc, reqID), []byte(relaySecret)); err != nil {
 		t.Fatal(err)
 	}
 	svc.runWorkerOnce(context.Background())
@@ -501,7 +501,7 @@ func TestRelayReservationMatrix(t *testing.T) {
 		}
 		// Advance to authorized without staging: flip via fulfill path
 		// with a real payload so reservation has bytes behind it.
-		if _, err := svc.RelayFulfill("operator", id, []byte("v-"+id)); err != nil {
+		if _, err := svc.RelayFulfill("operator", id, relayRev(svc, id), []byte("v-"+id)); err != nil {
 			t.Fatal(err)
 		}
 		return id
