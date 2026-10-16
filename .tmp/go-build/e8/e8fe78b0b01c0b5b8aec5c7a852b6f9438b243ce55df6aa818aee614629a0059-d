@@ -1,6 +1,0 @@
-./client.go
-./fileid_linux.go
-./peercred_linux.go
-./protocol.go
-./server.go
-./sysuid_linux.go

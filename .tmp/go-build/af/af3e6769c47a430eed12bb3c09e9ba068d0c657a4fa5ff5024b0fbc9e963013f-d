@@ -1,7 +1,0 @@
-./github.go
-./registry.go
-./testdriver.go
-./verify.go
-./github_exposure_test.go
-./redact_test.go
-./registry_test.go

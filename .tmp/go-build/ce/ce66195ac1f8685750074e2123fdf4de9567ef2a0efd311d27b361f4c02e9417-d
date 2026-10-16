@@ -1,4 +1,0 @@
-./main.go
-./relay.go
-./relay_display_test.go
-./tty_pty_test.go

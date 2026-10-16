@@ -1,8 +1,0 @@
-./admin_boundary_test.go
-./approval_binding_test.go
-./file_delivery_test.go
-./helper_test.go
-./ipc_lifecycle_test.go
-./operation_policy_test.go
-./socket_test.go
-./uid_test.go
