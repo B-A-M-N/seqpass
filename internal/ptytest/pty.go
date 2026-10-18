@@ -118,15 +118,20 @@ func (p *PTY) SetRawISIGOff() error {
 // set on ptmx in this environment, so waiting happens in select below —
 // never inside a read. Closing the pty ends the reader via EIO.
 func (p *PTY) startReader() {
+	// The handle is captured once: a test may clear the exported Master field
+	// to avoid a double close, and reading the field from this goroutine at
+	// the same time would be a data race (and the reader wants the stream it
+	// was started on anyway).
+	master := p.Master
 	go func() {
 		defer close(p.ch)
 		buf := make([]byte, 4096)
 		for {
-			n, err := p.Master.Read(buf)
+			n, err := master.Read(buf)
 			if n > 0 {
 				cp := make([]byte, n)
 				copy(cp, buf[:n])
-			p.ch <- cp
+				p.ch <- cp
 			}
 			if err != nil {
 				return

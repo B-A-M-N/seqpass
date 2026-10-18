@@ -9,6 +9,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -513,6 +514,13 @@ func tuiCmd(args []string) {
 	intakeF := fs.String("intake-socket", di, "Broker intake socket")
 	_ = fs.Parse(args)
 	if err := runTUI(*intakeF); err != nil {
+		var ie *tui.InterruptError
+		if errors.As(err, &ie) {
+			// The terminal has already been restored; report the
+			// conventional 128+signal status so a shell can tell an
+			// interruption from a failure.
+			os.Exit(128 + int(ie.Signal))
+		}
 		fmt.Fprintln(os.Stderr, "tui:", err)
 		os.Exit(1)
 	}
