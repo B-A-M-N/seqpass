@@ -11,10 +11,13 @@
  */
 import type { ProtectedInputNotice } from "../types";
 import type { SeqPassHostClient } from "../lib/client";
+import type { TuiPluginApi } from "@opencode-ai/plugin/tui";
+import { SeqPassProtectedInputDialog } from "./SeqPassProtectedInput";
 
 export function SeqPassReviewDialog(
   notice: ProtectedInputNotice,
   client: SeqPassHostClient,
+  ui: TuiPluginApi["ui"],
 ) {
   return {
     title: "SeqPass — protected credential request",
@@ -25,7 +28,7 @@ export function SeqPassReviewDialog(
     assurance: notice.input_assurance,
     untrustedNote: notice.untrusted_purpose ?? "(none)",
     actions: {
-      submit: () => client.fulfill(notice.request_id, notice.request_revision, ""),
+      approve: () => SeqPassProtectedInputDialog(notice, client, ui),
       reject: () => client.reject(notice.request_id, notice.request_revision),
       dismiss: () => client.dismissPrompt(notice.request_id),
     },

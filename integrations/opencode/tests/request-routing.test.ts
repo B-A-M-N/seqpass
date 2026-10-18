@@ -23,7 +23,7 @@ describe("SeqPass OpenCode V2 adapter contract", () => {
   };
 
   it("renders only broker-verified fields", () => {
-    const dialog = SeqPassReviewDialog(notice, {} as any);
+    const dialog = SeqPassReviewDialog(notice, {} as any, {} as any);
     expect(dialog.recipient).toBe("Test Recipient");
     expect(dialog.dataKind).toBe("api_key");
     expect(dialog.usage).toBe("single_dispatch");
@@ -32,7 +32,7 @@ describe("SeqPass OpenCode V2 adapter contract", () => {
   });
 
   it("does not include a credential field", () => {
-    const dialog = SeqPassReviewDialog(notice, {} as any);
+    const dialog = SeqPassReviewDialog(notice, {} as any, {} as any);
     expect("credential" in dialog).toBe(false);
     expect("secret" in dialog).toBe(false);
     expect("value" in dialog).toBe(false);
@@ -45,7 +45,7 @@ describe("SeqPass OpenCode V2 adapter contract", () => {
       reject: (id: string) => { calls.push("reject:" + id); },
       dismissPrompt: (id: string) => { calls.push("dismiss:" + id); },
     } as any;
-    const dialog = SeqPassReviewDialog(notice, client);
+    const dialog = SeqPassReviewDialog(notice, client, {} as any);
     dialog.actions.reject();
     dialog.actions.dismiss();
     expect(calls).toContain("reject:req-test");

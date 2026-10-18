@@ -204,6 +204,7 @@ func (s *Server) handleRelayRequest(ctx context.Context, req mcp.CallToolRequest
 		"input_required": true,
 		"input_kind":     args["data_kind"],
 		"next_action":    "protected_input",
+		"instruction":    "The user must authorize delivery via: seqpass relay (trusted intake command)",
 	})
 	return mcp.NewToolResultText(string(raw)), nil
 }

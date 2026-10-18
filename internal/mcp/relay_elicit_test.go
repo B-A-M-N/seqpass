@@ -5,12 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/secretbridge/secretbridge/internal/ipc"
 	"github.com/secretbridge/secretbridge/internal/service"
+	"github.com/secretbridge/secretbridge/internal/testruntime"
 	"github.com/secretbridge/secretbridge/internal/types"
 )
 
@@ -45,10 +45,11 @@ func elicitFixture(t *testing.T) (*Server, string) {
 	// Sandboxed environments may expose /home as nobody:nogroup even when
 	// the test runtime directory itself is correctly owned. The broker
 	// refuses such ancestors by design; skip these socket tests there.
-	if fi, err := os.Lstat("/home"); err != nil || fi.Sys().(*syscall.Stat_t).Uid != 0 && fi.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
-		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
+	dir, err := testruntime.Dir(t)
+	if err != nil {
+		testruntime.Skip(t, err)
+		return nil, ""
 	}
-	dir := t.TempDir()
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +63,7 @@ func elicitFixture(t *testing.T) (*Server, string) {
 	uid := uint32(os.Geteuid())
 	if err := svc.AddDestination(&types.Destination{
 		ID: "rd1", Name: "r", Type: "recipient-socket",
-		Endpoint: "/tmp/seqpass-mcp-relay-test.sock", ExpectedUID: &uid,
+  Endpoint: filepath.Join(dir, "recipient.sock"), ExpectedUID: &uid,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +116,7 @@ func TestRelayRequestDoesNotElicitSecret(t *testing.T) {
 	out := relayCall(t, s, ctx, map[string]interface{}{
 		"destination_id": "rd1", "data_kind": "password", "purpose": "test login",
 	})
-	for _, want := range []string{"request_id", "awaiting_user", "seqpass relay fulfill"} {
+	for _, want := range []string{"request_id", "awaiting_user", "seqpass relay"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("result missing %q: %s", want, out)
 		}
@@ -159,7 +160,7 @@ func TestRelayNoElicitationFallback(t *testing.T) {
 	if !strings.Contains(out, "request_id") {
 		t.Fatalf("no request ID: %s", out)
 	}
-	if !strings.Contains(out, "seqpass relay fulfill") {
+	if !strings.Contains(out, "seqpass relay") {
 		t.Fatalf("missing trusted intake instruction: %s", out)
 	}
 }

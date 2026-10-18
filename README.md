@@ -27,6 +27,28 @@ harness (Codex / Claude / Hermes)
                  └─ AegisKeys broker socket (authoritative encrypted vault)
 ```
 
+## Implementation status
+
+| Capability | Status | Evidence |
+|-----------|--------|----------|
+| Broker core (operations, policy, destinations, approval) | Implemented, tested | `go test ./...` |
+| Unix-socket IPC domains (agent / admin / intake / host) | Implemented, tested | IPC tests + socket tests |
+| Relay workflow (request → review → fulfill → dispatch) | Implemented, tested | Service + integration tests |
+| Administrative host-binding RPC | Implemented, tested | `internal/ipc/hostbinding_rpc_test.go` |
+| Host-session registration + revocation lifecycle | Implemented, tested | `internal/service/hostsession_test.go` |
+| Relay worker (bounded, deadline-priority) | Implemented, tested | `internal/service/relay_test.go` |
+| Transactional quota enforcement | Implemented, tested | `internal/metadata/relay.go` |
+| OpenCode adapter (trusted host + agent domain) | Type-checked, unit-tested | `bun x tsc --noEmit` + `bun x vitest run` |
+| Pi adapter (trusted host + agent domain) | Type-checked, unit-tested | `bun x tsc --noEmit` + `bun x vitest run` |
+| **Native protected-input isolation** | **Not yet production-qualified** | Requires live multi-UID topology + AegisKeys qualification |
+| **AegisKeys production resolution** | **Not yet production-qualified** | Requires live dedicated-UID grant + rotation tests |
+| Recipient durability contract | Implemented, tested | `internal/transfer/recipient_test.go` + `recipient_server_test.go` |
+| **Recipient live-socket integration** | **Not yet production-qualified** | Requires real recipient process + privileged Unix-socket topology |
+
+A capability is **implemented** when code exists and tests pass. A capability
+is **production-qualified** only after the required live deployment,
+credential, and isolation evidence has been independently verified.
+
 No HTTP listener, no browser UI, no TCP port. Approvals happen in the
 operator's trusted terminal (`seqpass admin`); agents observe approval state
 from inside the harness via `secret_status`.

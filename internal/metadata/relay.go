@@ -475,7 +475,10 @@ func (d *DB) reserveRelayOnce(relayID, opID, agent, destID string, now time.Time
 		}
 		nextState = types.RelayReserved
 	case types.RelayBoundedUses, types.RelayReusable:
-		if cur.State != types.RelayAuthorized && cur.State != types.RelayReserved {
+		// SP-13: RelayDispatching is acceptable for multi-dispatch grants —
+		// a concurrent delivery may be in-flight while another delivery is
+		// being reserved. The budget is decremented atomically here.
+		if cur.State != types.RelayAuthorized && cur.State != types.RelayReserved && cur.State != types.RelayDispatching {
 			rollback()
 			return fmt.Errorf("relay not dispatchable (state=%s)", cur.State)
 		}
@@ -536,6 +539,58 @@ func (d *DB) DeliveryCount(relayID string) (int, error) {
 	var n int
 	err := d.db.QueryRow(`SELECT COUNT(*) FROM relay_deliveries WHERE relay_id = ?`, relayID).Scan(&n)
 	return n, err
+}
+
+// RelayDeliveryRecord is the broker-side per-delivery accounting row.
+// It contains no credential bytes or recipient wire data.
+type RelayDeliveryRecord struct {
+	RelayID         string     `json:"relay_id"`
+	OperationID     string     `json:"operation_id"`
+	State           string     `json:"state"`
+	DestDigest      string     `json:"dest_digest"`
+	DestRevision    int        `json:"dest_revision"`
+	TerminalOutcome string     `json:"terminal_outcome,omitempty"`
+	Refunded        bool       `json:"refunded"`
+	CreatedAt       time.Time  `json:"created_at"`
+	CompletedAt     *time.Time `json:"completed_at,omitempty"`
+}
+
+// ListRelayDeliveries returns the bounded per-operation delivery rows for
+// a reusable or bounded grant. Rows are ordered oldest-first so a host can
+// render an auditable delivery history without confusing one recent op
+// for the whole grant.
+func (d *DB) ListRelayDeliveries(relayID string, limit int) ([]*RelayDeliveryRecord, error) {
+	if relayID == "" {
+		return nil, fmt.Errorf("missing relay ID")
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	rows, err := d.db.Query(`SELECT relay_id, operation_id, state, dest_digest,
+		dest_revision, terminal_outcome, refunded, created_at, completed_at
+		FROM relay_deliveries WHERE relay_id = ? ORDER BY created_at ASC LIMIT ?`,
+		relayID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]*RelayDeliveryRecord, 0)
+	for rows.Next() {
+		r := &RelayDeliveryRecord{}
+		var refunded int
+		var completedAt sql.NullTime
+		if err := rows.Scan(&r.RelayID, &r.OperationID, &r.State, &r.DestDigest,
+			&r.DestRevision, &r.TerminalOutcome, &refunded, &r.CreatedAt, &completedAt); err != nil {
+			return nil, err
+		}
+		r.Refunded = refunded != 0
+		if completedAt.Valid {
+			t := completedAt.Time
+			r.CompletedAt = &t
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // ReleaseRelayReservation returns one unconsumed budget unit (QR-05):
@@ -664,6 +719,9 @@ func (d *DB) SetRelayOpState(relayID, to string, now time.Time) error {
 // expired and returns their IDs so the service can drop the staged
 // payloads. Terminal rows are untouched.
 func (d *DB) ExpireRelays(now time.Time) ([]string, error) {
+	// SP-13: RelayDispatching and RelayDelivered/RelayUncertain are
+	// deliberately excluded. Once external dispatch is committed, deadline
+	// expiry cannot retroactively classify the operation as never dispatched.
 	rows, err := d.db.Query(`SELECT id FROM relay_requests
 		WHERE expires_at <= ? AND state IN (?, ?, ?, ?)`,
 		now, types.RelayAwaitingUser, types.RelayReady,
@@ -711,6 +769,127 @@ func (d *DB) MarkRelaysUnavailable(now time.Time) (int64, error) {
 		types.RelayUnavailable, now,
 		types.RelayReady, types.RelayAuthorized,
 		types.RelayReserved, types.RelayDispatching)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// BeginRelayQuotaCheck enforces the per-agent pending relay quota inside
+// a transaction (SP-17). The count and insert are one atomic unit — a
+// concurrent request cannot bypass the limit. Database errors fail closed.
+func (d *DB) BeginRelayQuotaCheck(agent string) error {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM relay_requests
+		WHERE agent_principal = ? AND state = ? AND expires_at > ?`,
+		agent, types.RelayAwaitingUser, time.Now()).Scan(&n); err != nil {
+		return fmt.Errorf("quota count failed: %w", err)
+	}
+	if n >= 20 {
+		return fmt.Errorf("too many pending relay requests for this principal (max 20)")
+	}
+	return tx.Commit()
+}
+
+// CreateRelayWithQuota enforces the per-agent pending relay quota and the
+// global pending ceiling inside one transaction (SP-17). The count and
+// insert are atomic — a concurrent request cannot bypass either limit.
+// Database errors fail closed, never silently disable protection.
+const (
+	maxPendingPerAgent = 20
+	maxPendingTotal    = 500
+)
+
+func (d *DB) CreateRelayWithQuota(agent string, r *types.RelayRecord) error {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("quota enforcement failed: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := time.Now()
+	var perAgent int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM relay_requests
+		WHERE agent_principal = ? AND state = ? AND expires_at > ?`,
+		agent, types.RelayAwaitingUser, now).Scan(&perAgent); err != nil {
+		return fmt.Errorf("relay quota enforcement failed: %w", err)
+	}
+	if perAgent >= maxPendingPerAgent {
+		return fmt.Errorf("too many pending relay requests for this principal (max %d)", maxPendingPerAgent)
+	}
+	var total int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM relay_requests
+		WHERE state = ? AND expires_at > ?`,
+		types.RelayAwaitingUser, now).Scan(&total); err != nil {
+		return fmt.Errorf("relay quota enforcement failed: %w", err)
+	}
+	if total >= maxPendingTotal {
+		return fmt.Errorf("too many pending relay requests system-wide (max %d)", maxPendingTotal)
+	}
+	if err := insertRelayTx(tx, r); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// insertRelayTx is the transaction-scoped relay insert used by quota-gated
+// creation.
+func insertRelayTx(tx *sql.Tx, r *types.RelayRecord) error {
+	now := time.Now()
+	if r.CreatedAt.IsZero() {
+		r.CreatedAt = now
+	}
+	r.UpdatedAt = now
+	r.State = types.RelayAwaitingUser
+	r.Revision = 1
+	_, err := tx.Exec(`
+		INSERT INTO relay_requests (`+relayColumns+`)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, r.ID, r.AgentPrincipal, r.IntakeOwner, r.DestinationID,
+		r.DestRevision, r.DestDigest, r.DataKind, r.Purpose, r.State,
+		r.Consumption, r.MaxDeliveries, 0, r.ExpiresAt,
+		r.Revision, r.OpID, r.CreatedAt, r.UpdatedAt)
+	return err
+}
+
+// CleanupExpiredRelays permanently removes relay rows and their host
+// session associations after their expiry plus a retention window. This
+// is called by the lifecycle loop.
+func (d *DB) CleanupExpiredRelays(now time.Time) (int64, error) {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	// First remove associations for expired relays.
+	if _, err := tx.Exec(`
+		DELETE FROM relay_host_sessions WHERE relay_id IN (
+			SELECT id FROM relay_requests WHERE expires_at <= ?
+		)`, now); err != nil {
+		return 0, err
+	}
+	// Then remove the relays themselves.
+	res, err := tx.Exec(`
+		DELETE FROM relay_requests WHERE expires_at <= ?`, now)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return n, tx.Commit()
+}
+
+// CleanupCompletedDeliveries removes completed delivery rows after their
+// completed_at plus a retention window.
+func (d *DB) CleanupCompletedDeliveries(now time.Time) (int64, error) {
+	res, err := d.db.Exec(`
+		DELETE FROM relay_deliveries WHERE state = 'completed' AND completed_at <= ?`, now)
 	if err != nil {
 		return 0, err
 	}

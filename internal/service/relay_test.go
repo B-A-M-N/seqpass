@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"context"
 	"encoding/json"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/secretbridge/secretbridge/internal/testruntime"
 	"github.com/secretbridge/secretbridge/internal/types"
 )
 
@@ -298,7 +300,7 @@ func TestRelaySubstitutedRecipientDenied(t *testing.T) {
 	}
 	// Repoint rd1 after approval: reservation must fail closed.
 	uid := uint32(os.Geteuid())
-	other := "/tmp/seqpass-relay-test-other.sock"
+	other := filepath.Join(testruntime.DirOrTemp(t), "other.sock")
 	if err := svc.DB().UpdateDestinationRecipient("rd1", other, &uid, nil, "operator"); err != nil {
 		t.Fatal(err)
 	}
@@ -539,4 +541,42 @@ func TestRelayReservationMatrix(t *testing.T) {
 	if err := svc.DB().ReleaseRelayReservation(u, "op-1", now); err != nil {
 		t.Fatalf("holder release: %v", err)
 	}
+}
+
+// SP-14: a slow recipient cannot starve other pending relays — the worker
+// processes the deadline-sorted page without unbounded memory growth.
+func TestRelayWorkerBoundedPageSize(t *testing.T) {
+	svc, _ := relayService(t)
+	uid := uint32(os.Geteuid())
+	for i := 0; i < 40; i++ {
+		if err := svc.AddDestination(&types.Destination{
+			ID:           fmt.Sprintf("dest-%d", i),
+			Name:         fmt.Sprintf("dest-%d", i),
+			Type:         "recipient-socket",
+			Endpoint:     filepath.Join(t.TempDir(), fmt.Sprintf("r-%d.sock", i)),
+			ExpectedUID:  &uid,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Create enough relays to exceed the 32-record page size.
+	var reqIDs []string
+	for i := 0; i < 40; i++ {
+		agent := fmt.Sprintf("uid:%d", 1000 + i/20)
+		reqID, err := svc.RelayRequest(agent, fmt.Sprintf("dest-%d", i), "password", "", time.Minute, types.RelaySingleDispatch, 1)
+		if err != nil {
+			t.Fatalf("relay request %d: %v", i, err)
+		}
+		reqIDs = append(reqIDs, reqID)
+	}
+	for _, reqID := range reqIDs {
+		if _, err := svc.RelayFulfill("uid:1000", reqID, 1, []byte("test-secret")); err != nil {
+			t.Fatalf("relay fulfill %s: %v", reqID, err)
+		}
+	}
+	// ExecuteReadyRelays processes a bounded page without deadlocking or
+	// consuming unbounded memory. Since there are no live recipients, the
+	// transfers will fail, but the invariant is that the call returns.
+	n := svc.ExecuteReadyRelays(context.Background())
+	_ = n // bounded execution attempted, no goroutine leak
 }

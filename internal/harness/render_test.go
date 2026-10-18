@@ -20,10 +20,13 @@ func TestFakeAgentPromptCannotInitiateInput(t *testing.T) {
 
 func TestTrustedReviewRenderGate(t *testing.T) {
 	review := TrustedReviewDTO{
-		RequestID: "req-123", DataKind: "api_key", DestinationName: "Recipient",
-		Endpoint: "/run/trusted/r.sock", ExpiresAt: time.Now(), Mode: InputExternalTTY,
-		Assurance: "model_blind", Purpose: "\x1b[31mfake", PurposeUntrusted: true,
-		TrustedHostRender: true,
+		RequestID: "req-123", RequestRevision: 2, DataKind: "api_key",
+		DestinationID: "dest-1", DestinationName: "Recipient",
+		Endpoint: "/run/trusted/r.sock", DestinationDigest: "digest-1",
+		DestinationRevision: 3, Consumption: "single_dispatch", MaxDeliveries: 1,
+		ExpiresAt: time.Now(), Mode: InputExternalTTY, Assurance: "model_blind",
+		AgentPrincipal: "agent", HumanPrincipal: "human", SessionID: "session",
+		Purpose: "\x1b[31mfake", PurposeUntrusted: true, TrustedHostRender: true,
 	}
 	if _, err := TrustedRequestFromReview(review); err == nil {
 		t.Fatal("ANSI purpose passed trusted rendering")

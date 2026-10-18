@@ -197,10 +197,35 @@ CREATE TABLE IF NOT EXISTS host_sessions (
   thread_id TEXT,
   expires_at TIMESTAMP,
   revision INTEGER NOT NULL DEFAULT 1,
+  input_mode TEXT NOT NULL DEFAULT '',
+  input_assurance TEXT NOT NULL DEFAULT '',
+  input_reason TEXT NOT NULL DEFAULT '',
   created_at TIMESTAMP,
   updated_at TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS host_session_agent_idx ON host_sessions(agent_principal, expires_at);
+
+CREATE TABLE IF NOT EXISTS host_principal_bindings (
+  human_principal TEXT NOT NULL,
+  agent_principal TEXT NOT NULL,
+  host_kind TEXT NOT NULL,
+  expires_at TIMESTAMP NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 1,
+  created_at TIMESTAMP,
+  updated_at TIMESTAMP,
+  PRIMARY KEY (human_principal, agent_principal, host_kind)
+);
+CREATE INDEX IF NOT EXISTS host_binding_lookup_idx ON host_principal_bindings(human_principal, host_kind, expires_at);
+
+CREATE TABLE IF NOT EXISTS relay_host_sessions (
+  relay_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  agent_principal TEXT NOT NULL,
+  human_principal TEXT NOT NULL,
+  host_kind TEXT NOT NULL,
+  created_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS relay_host_session_idx ON relay_host_sessions(session_id);
 
 CREATE TABLE IF NOT EXISTS host_session_tokens (
   session_id TEXT PRIMARY KEY,
@@ -520,17 +545,20 @@ func (d *DB) backupPreMigration(from int) error {
 // security-critical column present, exactly one authorization row.
 func (d *DB) verifySchema() error {
 	expected := map[string][]string{
-		"authorization_state":  {"id", "epoch"},
-		"secret_refs":          {"id", "name", "binding"},
-		"destinations":         {"id", "endpoint", "revision", "expected_uid", "expected_gid"},
-		"policies":             {"id", "rules", "revision"},
-		"transfers":            {"id", "status", "revision", "auth_epoch", "dest_digest", "dest_revision", "op_hash"},
-		"uses":                 {"id", "status", "revision", "auth_epoch", "dest_digest", "dest_revision", "op_hash"},
-		"execution_attempts":   {"id", "op_id", "worker", "outcome"},
-		"op_receipts":          {"op_id", "status", "result_json"},
-		"outcome_observations": {"observation_id", "operation_id", "state", "recorded_at", "evidence_kind"},
-		"dispatch_records":     {"op_id", "payload_digest", "dest_endpoint"},
-		"relay_requests":       {"id", "agent_principal", "destination_id", "state", "consumption", "expires_at", "revision"},
+		"authorization_state":     {"id", "epoch"},
+		"secret_refs":             {"id", "name", "binding"},
+		"destinations":            {"id", "endpoint", "revision", "expected_uid", "expected_gid"},
+		"policies":                {"id", "rules", "revision"},
+		"transfers":               {"id", "status", "revision", "auth_epoch", "dest_digest", "dest_revision", "op_hash"},
+		"uses":                    {"id", "status", "revision", "auth_epoch", "dest_digest", "dest_revision", "op_hash"},
+		"execution_attempts":      {"id", "op_id", "worker", "outcome"},
+		"op_receipts":             {"op_id", "status", "result_json"},
+		"outcome_observations":    {"observation_id", "operation_id", "state", "recorded_at", "evidence_kind"},
+		"dispatch_records":        {"op_id", "payload_digest", "dest_endpoint"},
+		"relay_requests":          {"id", "agent_principal", "destination_id", "state", "consumption", "expires_at", "revision"},
+		"host_principal_bindings": {"human_principal", "agent_principal", "host_kind", "expires_at", "revision"},
+		"relay_host_sessions":     {"relay_id", "session_id", "agent_principal", "human_principal", "host_kind"},
+		"host_sessions":           {"id", "host_kind", "agent_principal", "human_principal", "expires_at", "revision", "input_mode", "input_assurance", "input_reason"},
 	}
 	for table, columns := range expected {
 		rows, err := d.db.Query(`SELECT name FROM pragma_table_info(?)`, table)

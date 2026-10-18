@@ -35,22 +35,25 @@ type HostEvent struct {
 // field comes from the relay row and live destination snapshot; Purpose
 // remains explicitly untrusted annotation.
 type TrustedReviewDTO struct {
-	RequestID         string          `json:"request_id"`
-	DataKind          string          `json:"data_kind"`
-	DestinationID     string          `json:"destination_id"`
-	DestinationName   string          `json:"destination_name"`
-	Endpoint          string          `json:"endpoint"`
-	Action            string          `json:"action"`
-	ExpiresAt         time.Time       `json:"expires_at"`
-	Consumption       string          `json:"consumption"`
-	MaxDeliveries     uint32          `json:"max_deliveries"`
-	Mode              SecureInputMode `json:"input_mode"`
-	Assurance         string          `json:"input_assurance"`
-	AgentPrincipal    string          `json:"agent_principal"`
-	HumanPrincipal    string          `json:"human_principal"`
-	SessionID         string          `json:"session_id,omitempty"`
-	ThreadID          string          `json:"thread_id,omitempty"`
-	Purpose           string          `json:"purpose,omitempty"`
-	PurposeUntrusted  bool            `json:"purpose_untrusted"`
-	TrustedHostRender bool            `json:"trusted_host_render"`
+	RequestID           string          `json:"request_id"`
+	RequestRevision     uint64          `json:"request_revision"`
+	DestinationDigest   string          `json:"destination_digest"`
+	DestinationRevision int             `json:"destination_revision"`
+	DataKind            string          `json:"data_kind"`
+	DestinationID       string          `json:"destination_id"`
+	DestinationName     string          `json:"destination_name"`
+	Endpoint            string          `json:"endpoint"`
+	Action              string          `json:"action"`
+	ExpiresAt           time.Time       `json:"expires_at"`
+	Consumption         string          `json:"consumption"`
+	MaxDeliveries       uint32          `json:"max_deliveries"`
+	Mode                SecureInputMode `json:"input_mode"`
+	Assurance           string          `json:"input_assurance"`
+	AgentPrincipal      string          `json:"agent_principal"`
+	HumanPrincipal      string          `json:"human_principal"`
+	SessionID           string          `json:"session_id,omitempty"`
+	ThreadID            string          `json:"thread_id,omitempty"`
+	Purpose             string          `json:"purpose,omitempty"`
+	PurposeUntrusted    bool            `json:"purpose_untrusted"`
+	TrustedHostRender   bool            `json:"trusted_host_render"`
 }

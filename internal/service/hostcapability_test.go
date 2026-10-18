@@ -1,10 +1,12 @@
 package service
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/secretbridge/secretbridge/internal/harness"
+	"github.com/secretbridge/secretbridge/internal/testruntime"
 	"github.com/secretbridge/secretbridge/internal/types"
 )
 
@@ -22,6 +24,12 @@ func TestRegisterHostSessionNegotiatesCapabilities(t *testing.T) {
 			SupportsCancelPrompt:    true,
 			SupportsMultiplePending: true,
 		},
+	}
+	if err := svc.DB().CreateHostPrincipalBinding(&types.HostPrincipalBinding{
+		HumanPrincipal: "uid:1000", AgentPrincipal: "uid:2001", HostKind: string(harness.HostKindOpenCode),
+		ExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
 	}
 	_, token, err := svc.RegisterHostSession("uid:2001", "uid:1000", reg)
 	if err != nil {
@@ -47,6 +55,12 @@ func TestRegisterAllSevenHarnessHostKinds(t *testing.T) {
 		harness.HostKindAgy,
 	} {
 		reg := harness.HostRegistration{HostKind: kind, ThreadID: "turn"}
+		if err := svc.DB().CreateHostPrincipalBinding(&types.HostPrincipalBinding{
+			HumanPrincipal: "uid:1000", AgentPrincipal: "uid:2001", HostKind: string(kind),
+			ExpiresAt: time.Now().Add(time.Hour),
+		}); err != nil {
+			t.Fatal(err)
+		}
 		host, token, err := svc.RegisterHostSession("uid:2001", "uid:1000", reg)
 		if err != nil {
 			t.Fatalf("%s register: %v", kind, err)
@@ -75,7 +89,7 @@ func TestRelayFulfillRejectRequiresExactReviewedRevision(t *testing.T) {
 	uid := uint32(0)
 	if err := svc.AddDestination(&types.Destination{
 		ID: "revd1", Name: "rev recipient", Type: "recipient-socket",
-		Endpoint: "/tmp/seqpass-rev-test.sock", ExpectedUID: &uid,
+		Endpoint: filepath.Join(testruntime.DirOrTemp(t), "recipient.sock"), ExpectedUID: &uid,
 	}); err != nil {
 		t.Fatal(err)
 	}

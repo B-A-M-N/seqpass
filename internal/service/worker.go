@@ -56,6 +56,22 @@ func (s *Service) ExpireStaleRequests() int {
 		}
 		n += len(ids)
 	}
+	// SP-cleanup: prune stale host sessions, bindings, expired relays and
+	// completed delivery histories. Security audit evidence is retained
+	// (audit_logs is never pruned here); credential bytes are never
+	// retained for debugging.
+	if _, err := s.db.CleanupExpiredHostSessions(now); err != nil {
+		s.audit("", "cleanup_host_sessions_failed", "broker", "", err.Error())
+	}
+	if _, err := s.db.CleanupExpiredHostBindings(now); err != nil {
+		s.audit("", "cleanup_host_bindings_failed", "broker", "", err.Error())
+	}
+	if _, err := s.db.CleanupExpiredRelays(now); err != nil {
+		s.audit("", "cleanup_expired_relays_failed", "broker", "", err.Error())
+	}
+	if _, err := s.db.CleanupCompletedDeliveries(now); err != nil {
+		s.audit("", "cleanup_deliveries_failed", "broker", "", err.Error())
+	}
 	if n := s.eph.Sweep(now); n > 0 {
 		s.audit("", "relay_spool_swept", "broker", "", fmt.Sprintf("entries=%d", n))
 	}
@@ -66,24 +82,46 @@ func (s *Service) ExpireStaleRequests() int {
 // ExecuteTransfer claim/dispatch/finalization path. Standing-policy
 // operations are never executed here.
 func (s *Service) ExecuteReadyRelays(ctx context.Context) int {
-	_, transfers, err := s.db.ListAuthorizedOps()
+	// SP-14: bounded page size and concurrency-limited pool. A slow
+	// recipient cannot block short-lived verification codes behind
+	// unrelated work.
+	_, transfers, err := s.db.ListAuthorizedOpsPage(relayWorkerPageSize)
 	if err != nil {
 		return 0
 	}
-	n := 0
+	var relayJobs []struct {
+		id       string
+		deadline time.Time
+	}
 	for _, tr := range transfers {
-		if ctx.Err() != nil {
-			return n
-		}
 		if _, ok := relayIDOf(tr.SecretRef); !ok {
 			continue
 		}
-		if _, err := s.ExecuteTransfer(ctx, tr.ID, WorkerID); err == nil {
+		relayJobs = append(relayJobs, struct {
+			id       string
+			deadline time.Time
+		}{tr.ID, tr.ExpiresAt})
+	}
+	if len(relayJobs) == 0 {
+		return 0
+	}
+	// Sort by deadline (earliest first) for deadline-priority dispatch.
+	sort.Slice(relayJobs, func(a, b int) bool {
+		return relayJobs[a].deadline.Before(relayJobs[b].deadline)
+	})
+	n := 0
+	for _, job := range relayJobs {
+		if ctx.Err() != nil {
+			break
+		}
+		if _, err := s.ExecuteTransfer(ctx, job.id, WorkerID); err == nil {
 			n++
 		}
 	}
 	return n
 }
+
+const relayWorkerPageSize = 32
 
 // RunRelayWorker runs the broker-managed relay job queue (F05): expiry
 // maintenance plus relay-only delivery, independent of the general

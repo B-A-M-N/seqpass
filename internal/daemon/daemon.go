@@ -251,6 +251,15 @@ func New(cfg Config) (*Daemon, error) {
 	srv.IntakeSocket = cfg.IntakeSocket
 	srv.HostSocket = cfg.HostSocket
 	if cfg.HostSocket != "" {
+		// SP-01: validate the host socket path before starting the IPC server
+		// so a configured but nonexistent or invalid path fails startup
+		// cleanly, rather than silently creating a socket in a new directory.
+		hostDir := filepath.Dir(cfg.HostSocket)
+		if fi, err := os.Lstat(hostDir); err != nil || !fi.IsDir() {
+			_ = svc.Close()
+			lease.Release()
+			return nil, fmt.Errorf("host socket directory does not exist: %s", hostDir)
+		}
 		if err := svc.SetHostInputAssurance(string(harness.InputExternalTTY), string(intake.AssuranceModelBlind)); err != nil {
 			_ = svc.Close()
 			lease.Release()
@@ -293,6 +302,7 @@ func New(cfg Config) (*Daemon, error) {
 			ConfigDigest:   cfg.HostQualification.SecurityConfigDigest,
 			Record:         cfg.HostQualification,
 		}
+		svc.SetHostQualification(snapshot)
 		decision, err := harness.SelectNativeMode(snapshot,
 			cfg.HostQualification.HostKind, cfg.HostQualification.HostVersion,
 			cfg.HostQualification.AdapterVersion, cfg.HostQualification.ExecutionTopology,
@@ -301,13 +311,6 @@ func New(cfg Config) (*Daemon, error) {
 			_ = svc.Close()
 			lease.Release()
 			return nil, fmt.Errorf("host qualification did not select native mode: %w", err)
-		}
-		mode := decision.Mode
-		assurance := intake.InputAssurance(decision.Assurance)
-		if err := svc.SetHostInputAssurance(string(mode), string(assurance)); err != nil {
-			_ = svc.Close()
-			lease.Release()
-			return nil, fmt.Errorf("host qualification assurance invalid: %w", err)
 		}
 	}
 	if cfg.SocketGroup != "" {
@@ -344,11 +347,23 @@ func New(cfg Config) (*Daemon, error) {
 	// explicit trusted intake group is configured (F04) — never
 	// world-accessible, never the agent group. Peer-UID allowlists remain
 	// the authorization control (QR-02).
-	for _, sp := range []struct {
+	socketChecks := []struct {
 		path   string
 		admin  bool
 		intake bool
-	}{{cfg.SocketPath, false, false}, {cfg.AdminSocket, true, false}, {cfg.IntakeSocket, true, true}, {cfg.HostSocket, cfg.HostSocket != "", false}} {
+	}{
+		{cfg.SocketPath, false, false},
+		{cfg.AdminSocket, true, false},
+		{cfg.IntakeSocket, true, true},
+	}
+	if cfg.HostSocket != "" {
+		socketChecks = append(socketChecks, struct {
+			path   string
+			admin  bool
+			intake bool
+		}{cfg.HostSocket, false, false})
+	}
+	for _, sp := range socketChecks {
 		st, err := os.Stat(sp.path)
 		if err != nil {
 			_ = srv.Close()

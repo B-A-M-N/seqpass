@@ -11,6 +11,7 @@ import (
 	"github.com/secretbridge/secretbridge/internal/ipc"
 	"github.com/secretbridge/secretbridge/internal/ptytest"
 	"github.com/secretbridge/secretbridge/internal/service"
+	"github.com/secretbridge/secretbridge/internal/testruntime"
 	"github.com/secretbridge/secretbridge/internal/types"
 )
 
@@ -19,13 +20,11 @@ import (
 // intake authorizes the broker euid (same-user test topology).
 func testBroker(t *testing.T) (*service.Service, string) {
 	t.Helper()
-	// Sandboxed environments may expose /home as nobody:nogroup even when
-	// the test runtime directory itself is correctly owned. The broker
-	// refuses such ancestors by design; skip these PTY tests there.
-	if fi, err := os.Lstat("/home"); err != nil || fi.Sys().(*syscall.Stat_t).Uid != 0 && fi.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
-		t.Skip("sandbox reports an untrusted ancestor; TUI broker fixture needs Unix socket support")
+	dir, err := testruntime.Dir(t)
+	if err != nil {
+		testruntime.Skip(t, err)
+		return nil, ""
 	}
-	dir := t.TempDir()
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +39,7 @@ func testBroker(t *testing.T) (*service.Service, string) {
 	uid := euid
 	if err := svc.AddDestination(&types.Destination{
 		ID: "rd1", Name: "rcpt", Type: "recipient-socket",
-		Endpoint: "/tmp/tui-test-no-recipient.sock", ExpectedUID: &uid,
+  Endpoint: filepath.Join(dir, "recipient.sock"), ExpectedUID: &uid,
 	}); err != nil {
 		t.Fatal(err)
 	}

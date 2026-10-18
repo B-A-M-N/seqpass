@@ -29,11 +29,11 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/secretbridge/secretbridge/internal/ipc"
+	"github.com/secretbridge/secretbridge/internal/testruntime"
 )
 
 // Qualification tiers (CV-05): every case declares which slice of the
@@ -160,12 +160,12 @@ func buildBinary(t *testing.T, dir string) string {
 
 func startBroker(t *testing.T, h *harness) {
 	t.Helper()
-	// Sandboxed environments may expose /home as nobody:nogroup even when
-	// the test runtime directory itself is correctly owned. The broker
-	// refuses such ancestors by design; skip these socket tests there.
-	if fi, err := os.Lstat("/home"); err != nil || fi.Sys().(*syscall.Stat_t).Uid != 0 && fi.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
-		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
+	dir, err := testruntime.Dir(t)
+	if err != nil {
+		testruntime.Skip(t, err)
+		return
 	}
+	_ = dir
 	db := filepath.Join(h.dir, "qual.db")
 	h.agent = filepath.Join(h.dir, "agent.sock")
 	h.admin = filepath.Join(h.dir, "admin.sock")

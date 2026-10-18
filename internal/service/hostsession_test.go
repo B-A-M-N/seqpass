@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/secretbridge/secretbridge/internal/harness"
+	"github.com/secretbridge/secretbridge/internal/types"
 )
 
 func TestRegisterAndAuthenticateHostSession(t *testing.T) {
@@ -14,6 +15,7 @@ func TestRegisterAndAuthenticateHostSession(t *testing.T) {
 		ThreadID:     "turn-abc",
 		TTLOfSession: 5 * time.Minute,
 	}
+	createHostBinding(t, svc, "uid:1000", "uid:2001", harness.HostKindCodex)
 	h, tok, err := svc.RegisterHostSession("uid:2001", "uid:1000", reg)
 	if err != nil {
 		t.Fatalf("register: %v", err)
@@ -33,8 +35,23 @@ func TestRegisterAndAuthenticateHostSession(t *testing.T) {
 	}
 }
 
+func TestRegisterHostSessionRequiresTrustedPairing(t *testing.T) {
+	svc := hostSessionService(t)
+	if _, _, err := svc.RegisterHostSession("uid:2001", "uid:1000", harness.HostRegistration{HostKind: harness.HostKindCodex}); err == nil {
+		t.Fatal("unbound human/agent pairing accepted")
+	}
+	createHostBinding(t, svc, "uid:1000", "uid:9999", harness.HostKindCodex)
+	if _, _, err := svc.RegisterHostSession("uid:2001", "uid:1000", harness.HostRegistration{HostKind: harness.HostKindCodex}); err == nil {
+		t.Fatal("wrong bound agent accepted")
+	}
+	if _, _, err := svc.RegisterHostSession("uid:1000", "uid:1000", harness.HostRegistration{HostKind: harness.HostKindCodex}); err == nil {
+		t.Fatal("self-binding accepted")
+	}
+}
+
 func TestHostSessionBindingRefusesCrossAgent(t *testing.T) {
 	svc := hostSessionService(t)
+	createHostBinding(t, svc, "uid:1000", "uid:2001", harness.HostKindCodex)
 	codexHost, codexToken, err := svc.RegisterHostSession("uid:2001", "uid:1000", harness.HostRegistration{HostKind: harness.HostKindCodex})
 	if err != nil {
 		t.Fatal(err)
@@ -42,6 +59,7 @@ func TestHostSessionBindingRefusesCrossAgent(t *testing.T) {
 	if _, err := svc.HostSessionAuth(codexHost.ID, codexToken.Token); err != nil {
 		t.Fatal(err)
 	}
+	createHostBinding(t, svc, "uid:1000", "uid:2002", harness.HostKindHermes)
 	hermesHost, hermesToken, err := svc.RegisterHostSession("uid:2002", "uid:1000", harness.HostRegistration{HostKind: harness.HostKindHermes})
 	if err != nil {
 		t.Fatal(err)
@@ -57,6 +75,16 @@ func TestHostSessionBindingRefusesCrossAgent(t *testing.T) {
 	// Correctly bound unknown relay still fails closed.
 	if err := svc.BindRelayHost("uid:2001", "req-other", codexHost); err == nil {
 		t.Fatal("unknown relay bound")
+	}
+}
+
+func createHostBinding(t *testing.T, svc *Service, human, agent string, kind harness.HostSessionKind) {
+	t.Helper()
+	if err := svc.DB().CreateHostPrincipalBinding(&types.HostPrincipalBinding{
+		HumanPrincipal: human, AgentPrincipal: agent, HostKind: string(kind),
+		ExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

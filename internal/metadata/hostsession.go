@@ -14,7 +14,8 @@ import (
 // metadata, not authorization: every transition validates the caller's
 // authenticated principal and the broker-held token.
 const hostSessionColumns = `id, host_kind, agent_principal, human_principal,
-  thread_id, expires_at, revision, created_at, updated_at`
+  thread_id, expires_at, revision, input_mode, input_assurance, input_reason,
+  created_at, updated_at`
 
 func scanHostSession(row interface {
 	Scan(...interface{}) error
@@ -22,7 +23,8 @@ func scanHostSession(row interface {
 	h := &types.HostSession{}
 	var thread, human sql.NullString
 	err := row.Scan(&h.ID, &h.HostKind, &h.AgentPrincipal, &human, &thread,
-		&h.ExpiresAt, &h.Revision, &h.CreatedAt, &h.UpdatedAt)
+		&h.ExpiresAt, &h.Revision, &h.InputMode, &h.Assurance, &h.AssuranceReason,
+		&h.CreatedAt, &h.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -51,9 +53,10 @@ func (d *DB) CreateHostSession(h *types.HostSession) error {
 	h.Revision = 1
 	_, err := d.db.Exec(`
 		INSERT INTO host_sessions (`+hostSessionColumns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, h.ID, h.HostKind, h.AgentPrincipal, h.HumanPrincipal, h.ThreadID,
-		h.ExpiresAt, h.Revision, h.CreatedAt, h.UpdatedAt)
+		h.ExpiresAt, h.Revision, h.InputMode, h.Assurance, h.AssuranceReason,
+		h.CreatedAt, h.UpdatedAt)
 	return err
 }
 
@@ -155,4 +158,75 @@ func (d *DB) BindRelayToHostSession(relayID, sessionID, agentPrincipal string) e
 		return fmt.Errorf("relay and host session bind to different agents")
 	}
 	return nil
+}
+
+// CreateHostSessionWithToken atomically creates both the host session record
+// and its bearer token binding in one transaction (SP-11). A partial write
+// (session without token, or token without session) is impossible.
+func (d *DB) CreateHostSessionWithToken(h *types.HostSession, tokenHash string, tokenExpiresAt time.Time) error {
+	if h == nil || h.ID == "" || h.HostKind == "" || h.AgentPrincipal == "" {
+		return fmt.Errorf("incomplete host session")
+	}
+	if h.HumanPrincipal == "" {
+		return fmt.Errorf("host session needs an authorized human principal")
+	}
+	if h.ExpiresAt.IsZero() || !time.Now().Before(h.ExpiresAt) {
+		return fmt.Errorf("host session needs a future expiry")
+	}
+	if tokenHash == "" {
+		return fmt.Errorf("missing token hash")
+	}
+	if tokenExpiresAt.IsZero() || !time.Now().Before(tokenExpiresAt) {
+		return fmt.Errorf("host session token needs a future expiry")
+	}
+	now := time.Now()
+	if h.CreatedAt.IsZero() {
+		h.CreatedAt = now
+	}
+	h.UpdatedAt = now
+	h.Revision = 1
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.Exec(`
+		INSERT INTO host_sessions (`+hostSessionColumns+`)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, h.ID, h.HostKind, h.AgentPrincipal, h.HumanPrincipal, h.ThreadID,
+		h.ExpiresAt, h.Revision, h.InputMode, h.Assurance, h.AssuranceReason,
+		h.CreatedAt, h.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(`
+		INSERT INTO host_session_tokens
+		(session_id, token_hash, expires_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?)`, h.ID, tokenHash, tokenExpiresAt, now, now)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// CleanupExpiredHostSessions removes host sessions whose expiry has passed
+// and their associated tokens (cascade), per the retention policy. It
+// returns the count removed. Called by the lifecycle loop.
+func (d *DB) CleanupExpiredHostSessions(now time.Time) (int64, error) {
+	res, err := d.db.Exec(`
+		DELETE FROM host_sessions WHERE expires_at <= ?`, now)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// CleanupExpiredHostBindings removes expired host principal bindings.
+func (d *DB) CleanupExpiredHostBindings(now time.Time) (int64, error) {
+	res, err := d.db.Exec(`
+		DELETE FROM host_principal_bindings WHERE expires_at <= ?`, now)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }

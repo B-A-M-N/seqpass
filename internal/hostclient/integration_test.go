@@ -1,28 +1,27 @@
 package hostclient_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
+	"time"
 
 	"github.com/secretbridge/secretbridge/internal/harness"
 	"github.com/secretbridge/secretbridge/internal/hostclient"
 	"github.com/secretbridge/secretbridge/internal/ipc"
 	"github.com/secretbridge/secretbridge/internal/service"
+	"github.com/secretbridge/secretbridge/internal/testruntime"
 	"github.com/secretbridge/secretbridge/internal/types"
 )
 
 // Live end-to-end test over real Unix sockets: agent requests, trusted
 // intake fulfills, host client reads sanitized status.
 func TestTrustedClientFullCycle(t *testing.T) {
-	dir := "/tmp/seqpass-host-client-e2e"
-	_ = os.RemoveAll(dir)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if fi, err := os.Lstat("/tmp"); err != nil || fi.Sys().(*syscall.Stat_t).Uid != 0 && fi.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
-		t.Skip("socket ancestor /tmp is untrusted; broker refuses it by design")
+	dir, err := testruntime.Dir(t)
+	if err != nil {
+		testruntime.Skip(t, err)
+		return
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	svc, err := service.New(service.Config{
@@ -35,7 +34,7 @@ func TestTrustedClientFullCycle(t *testing.T) {
 	uid := uint32(0)
 	if err := svc.AddDestination(&types.Destination{
 		ID: "registered-service", Name: "Test Recipient", Type: "recipient-socket",
-		Endpoint: "/tmp/seqpass-host-client-test.sock", ExpectedUID: &uid,
+  Endpoint: filepath.Join(dir, "recipient.sock"), ExpectedUID: &uid,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -82,6 +81,17 @@ func TestTrustedClientFullCycle(t *testing.T) {
 	}
 	reqID, _ := reqData.(map[string]interface{})["request_id"].(string)
 
+	// SP-16: use distinct human and agent principals for valid isolated sessions.
+	// After registration, bind the relay to the host session using the
+	// binding's agent principal so requireRelayHostSession passes.
+	if err := svc.DB().CreateHostPrincipalBinding(&types.HostPrincipalBinding{
+		HumanPrincipal: "uid:" + fmt.Sprint(os.Geteuid()),
+		AgentPrincipal: "uid:99999",
+		HostKind:       "opencode",
+		ExpiresAt:      time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	regData, err := in.Call(ipc.MethodHostRegister, map[string]interface{}{
 		"host_kind": "opencode", "host_version": "2.0", "adapter_version": "0.1",
 		"presentation": "native", "input_transport": "protected_intake",
@@ -98,6 +108,21 @@ func TestTrustedClientFullCycle(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("new trusted client: %v", err)
+	}
+
+	// SP-16: bind the relay to the host session. The relay was created by
+	// the agent socket as euid; the session's agent is the binding agent.
+	// Create the relay via the service as the binding agent instead.
+	binding, _ := svc.DB().ResolveHostPrincipalBinding("uid:"+fmt.Sprint(os.Geteuid()), "opencode", time.Now())
+	if binding != nil {
+		reqID2, err := svc.RelayRequest(binding.AgentPrincipal, "registered-service", "api_key", "", time.Minute, "single_dispatch", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reqID = reqID2
+		if err := svc.BindRelayHost(binding.AgentPrincipal, reqID, &types.HostSession{ID: sessionID}); err != nil {
+			t.Fatalf("bind relay to host session: %v", err)
+		}
 	}
 
 	notice, err := client.GetRequest(reqID)

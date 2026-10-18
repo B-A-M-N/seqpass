@@ -81,6 +81,28 @@ func (s *Service) RegisterHostSession(hostPrincipal, humanPrincipal string, reg 
 			return nil, nil, fmt.Errorf("thread ID contains control characters")
 		}
 	}
+	now := time.Now()
+	// S1: the human's authenticated intake principal never implicitly
+	// authorizes the host's agent identity. A broker-provisioned binding
+	// must resolve the exact agent principal, and a self-binding is refused.
+	if hostPrincipal == humanPrincipal {
+		return nil, nil, fmt.Errorf("host principal binding must use distinct identities")
+	}
+	binding, err := s.db.ResolveHostPrincipalBinding(humanPrincipal, string(reg.HostKind), now)
+	if err != nil {
+		return nil, nil, err
+	}
+	if binding == nil || binding.AgentPrincipal != hostPrincipal {
+		s.audit("", "host_registration_denied", humanPrincipal, hostPrincipal, "unbound-agent")
+		return nil, nil, fmt.Errorf("host is not authorized for this agent principal")
+	}
+	// S3/S7: qualify this exact registration against the broker's accepted
+	// snapshot. Unqualified hosts fall back; they never inherit another
+	// host's native assurance.
+	decision, qualErr := s.SelectNativeModeForRegistration(reg.HostKind, reg.HostVersion, reg.AdapterVersion, reg.Topology, reg.SecurityConfig)
+	if qualErr != nil {
+		s.audit("", "host_registration_downgraded", hostPrincipal, humanPrincipal, "qualification-mismatch")
+	}
 	idBytes := make([]byte, 16)
 	if _, err := rand.Read(idBytes); err != nil {
 		return nil, nil, fmt.Errorf("session ID randomness unavailable: %w", err)
@@ -89,21 +111,27 @@ func (s *Service) RegisterHostSession(hostPrincipal, humanPrincipal string, reg 
 	if err != nil {
 		return nil, nil, err
 	}
-	now := time.Now()
-	expiresAt := now.Add(clampHostSessionTTL(reg.TTLOfSession))
+	// SP-10: the session TTL must never outlive the underlying binding.
+	sessionTTL := clampHostSessionTTL(reg.TTLOfSession)
+	if time.Until(binding.ExpiresAt) < sessionTTL {
+		sessionTTL = time.Until(binding.ExpiresAt)
+	}
+	expiresAt := now.Add(sessionTTL)
 	h := &types.HostSession{
-		ID:             "host-" + hex.EncodeToString(idBytes),
-		HostKind:       string(reg.HostKind),
-		AgentPrincipal: hostPrincipal,
-		HumanPrincipal: humanPrincipal,
-		ThreadID:       threadID,
-		ExpiresAt:      expiresAt,
+		ID:              "host-" + hex.EncodeToString(idBytes),
+		HostKind:        string(reg.HostKind),
+		AgentPrincipal:  hostPrincipal,
+		HumanPrincipal:  humanPrincipal,
+		ThreadID:        threadID,
+		ExpiresAt:       expiresAt,
+		InputMode:       string(decision.Mode),
+		Assurance:       decision.Assurance,
+		AssuranceReason: decision.Reason,
 	}
-	if err := s.db.CreateHostSession(h); err != nil {
-		return nil, nil, err
-	}
+	// SP-11: session and token are created in one transaction. A partial
+	// write leaves neither record operational.
 	tokenHash := hashSessionToken(token)
-	if err := s.db.CreateHostSessionToken(h.ID, tokenHash, expiresAt); err != nil {
+	if err := s.db.CreateHostSessionWithToken(h, tokenHash, expiresAt); err != nil {
 		return nil, nil, err
 	}
 	s.audit(h.ID, "host_session_registered", hostPrincipal, humanPrincipal, string(reg.HostKind))
@@ -135,7 +163,21 @@ func (s *Service) HostSessionAuth(sessionID, token string) (*types.HostSession, 
 	if err != nil || h == nil || !now.Before(h.ExpiresAt) {
 		return nil, fmt.Errorf("host session invalid or expired")
 	}
+	// SP-10: revalidate the underlying host principal binding on every
+	// authentication. A revoked or expired binding must immediately lose
+	// operational authority — not just prevent new registrations.
+	binding, bindErr := s.db.ResolveHostPrincipalBinding(h.HumanPrincipal, h.HostKind, now)
+	if bindErr != nil || binding == nil || binding.AgentPrincipal != h.AgentPrincipal {
+		return nil, fmt.Errorf("host binding revoked or expired")
+	}
 	return h, nil
+}
+
+// SelectNativeModeForRegistration evaluates this exact registration against
+// the broker-held qualification snapshot. It is per-session evidence, never
+// shared Service state.
+func (s *Service) SelectNativeModeForRegistration(hostKind harness.HostSessionKind, hostVersion, adapterVersion, topology string, securityConfig map[string]string) (harness.NativeModeDecision, error) {
+	return harness.SelectNativeMode(s.hostQualification, hostKind, hostVersion, adapterVersion, topology, securityConfig, time.Now())
 }
 
 // BindRelayHost attaches an already authenticated relay to an already
@@ -146,7 +188,16 @@ func (s *Service) BindRelayHost(agent, relayID string, session *types.HostSessio
 	if session == nil {
 		return fmt.Errorf("missing host session")
 	}
-	return s.db.BindRelayToHostSession(relayID, session.ID, agent)
+	return s.db.CreateRelayHostSession(relayID, session.ID, agent, time.Now())
+}
+
+// ListPendingRelaysForHostSession returns relays explicitly bound to the
+// exact authenticated host session; there is no shared-principal fallback.
+func (s *Service) ListPendingRelaysForHostSession(session *types.HostSession, limit int) ([]*types.RelayRecord, error) {
+	if session == nil {
+		return nil, fmt.Errorf("missing host session")
+	}
+	return s.db.ListPendingRelaysForHostSession(session.ID, limit)
 }
 
 var _ = metadata.DestDigest

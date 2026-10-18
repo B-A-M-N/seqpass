@@ -46,12 +46,14 @@ const (
 	// validation require the protected intake trust boundary. Agent-facing
 	// request events are deliberately not here: notifications are scoped
 	// to the already authenticated native host, not to model control.
-	MethodHostRegister     = "host.register"
-	MethodHostEvent        = "host.event"
-	MethodHostReview       = "host.review"
-	MethodHostNotice       = "host.notice"
-	MethodHostStatus       = "host.status"
-	MethodHostCancelPrompt = "host.cancel_prompt"
+	MethodHostBindingCreate = "admin.host_binding_create"
+	MethodHostRegister      = "host.register"
+	MethodHostEvent         = "host.event"
+	MethodHostPending       = "host.pending"
+	MethodHostReview        = "host.review"
+	MethodHostNotice        = "host.notice"
+	MethodHostStatus        = "host.status"
+	MethodHostCancelPrompt  = "host.cancel_prompt"
 )
 
 // Role is the explicit IPC security domain (SP-TUI-04). It replaces the
@@ -76,6 +78,7 @@ const (
 // role from intake: HI-04's data plane remains intake-only.
 var HostAllowlist = map[string]bool{
 	MethodHostEvent:        true,
+	MethodHostPending:      true,
 	MethodHostNotice:       true,
 	MethodHostStatus:       true,
 	MethodHostReview:       true,
@@ -118,38 +121,39 @@ var IntakeAllowlist = map[string]bool{
 // actions. Operators are trusted humans: they may fulfill from the
 // admin terminal as well as the intake socket.
 var AdminAllowlist = map[string]bool{
-	MethodHostRegister:    true,
-	MethodCatalog:         true,
-	MethodUseSubmit:       true,
-	MethodTransferSubmit:  true,
-	MethodStatus:          true,
-	MethodOpsMine:         true,
-	MethodRelayRequest:    true,
-	MethodRelayStatus:     true,
-	MethodRelayCancel:     true,
-	MethodIntakeInspect:   true,
-	MethodIntakeFulfill:   true,
-	MethodIntakeReject:    true,
-	MethodIntakeCancel:    true,
-	MethodIntakeRequest:   true,
-	MethodOpsPending:      true,
-	MethodOpsReady:        true,
-	MethodApproveUse:      true,
-	MethodRejectUse:       true,
-	MethodApproveTransfer: true,
-	MethodRejectTransfer:  true,
-	MethodSecretAdd:       true,
-	MethodSecretStage:     true,
-	MethodDestAdd:         true,
-	MethodPolicyAdd:       true,
-	MethodPolicySet:       true,
-	MethodDestUpdate:      true,
-	MethodExecuteUse:      true,
-	MethodExecuteTransfer: true,
-	MethodOpShow:          true,
-	MethodVerifyOutcome:   true,
-	MethodRecipientStatus: true,
-	MethodHealth:          true,
+	MethodHostBindingCreate: true,
+	MethodHostRegister:      true,
+	MethodCatalog:           true,
+	MethodUseSubmit:         true,
+	MethodTransferSubmit:    true,
+	MethodStatus:            true,
+	MethodOpsMine:           true,
+	MethodRelayRequest:      true,
+	MethodRelayStatus:       true,
+	MethodRelayCancel:       true,
+	MethodIntakeInspect:     true,
+	MethodIntakeFulfill:     true,
+	MethodIntakeReject:      true,
+	MethodIntakeCancel:      true,
+	MethodIntakeRequest:     true,
+	MethodOpsPending:        true,
+	MethodOpsReady:          true,
+	MethodApproveUse:        true,
+	MethodRejectUse:         true,
+	MethodApproveTransfer:   true,
+	MethodRejectTransfer:    true,
+	MethodSecretAdd:         true,
+	MethodSecretStage:       true,
+	MethodDestAdd:           true,
+	MethodPolicyAdd:         true,
+	MethodPolicySet:         true,
+	MethodDestUpdate:        true,
+	MethodExecuteUse:        true,
+	MethodExecuteTransfer:   true,
+	MethodOpShow:            true,
+	MethodVerifyOutcome:     true,
+	MethodRecipientStatus:   true,
+	MethodHealth:            true,
 }
 
 type Request struct {

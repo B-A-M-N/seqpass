@@ -1,11 +1,13 @@
 package service
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/secretbridge/secretbridge/internal/harness"
 	"github.com/secretbridge/secretbridge/internal/intake"
+	"github.com/secretbridge/secretbridge/internal/testruntime"
 	"github.com/secretbridge/secretbridge/internal/types"
 )
 
@@ -19,7 +21,7 @@ func relayHostFixture(t *testing.T) (*Service, string, *types.HostSession) {
 	uid := uint32(0)
 	if err := svc.AddDestination(&types.Destination{
 		ID: "hd1", Name: "host destination", Type: "recipient-socket",
-		Endpoint: "/tmp/seqpass-host-event-test.sock", ExpectedUID: &uid,
+		Endpoint: filepath.Join(testruntime.DirOrTemp(t), "recipient.sock"), ExpectedUID: &uid,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -27,10 +29,19 @@ func relayHostFixture(t *testing.T) (*Service, string, *types.HostSession) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := svc.DB().CreateHostPrincipalBinding(&types.HostPrincipalBinding{
+		HumanPrincipal: "uid:1000", AgentPrincipal: "uid:2001", HostKind: string(harness.HostKindCodex),
+		ExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	session, _, err := svc.RegisterHostSession("uid:2001", "uid:1000", harness.HostRegistration{
 		HostKind: harness.HostKindCodex, ThreadID: "turn-1", TTLOfSession: time.Hour,
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.BindRelayHost("uid:2001", reqID, session); err != nil {
 		t.Fatal(err)
 	}
 	return svc, reqID, session
@@ -42,8 +53,10 @@ func TestHostRelayEventIsPayloadFreeAndSessionBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// SP-23: the broker derives the event sequence from the relay revision
+	// (1 for a newly created relay), not from the caller-supplied counter.
 	if ev.Type != harness.HostRelayPending || ev.SessionID != session.ID ||
-		ev.Sequence != 7 || ev.RequestID != reqID || ev.State != types.RelayAwaitingUser {
+		ev.Sequence != 1 || ev.RequestID != reqID || ev.State != types.RelayAwaitingUser {
 		t.Fatalf("unexpected event: %+v", ev)
 	}
 	if _, err := svc.HostRelayEvent("uid:2002", reqID, session, 7); err == nil {

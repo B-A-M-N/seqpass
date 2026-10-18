@@ -431,11 +431,17 @@ func (s *Service) ExecuteTransfer(ctx context.Context, transferID, worker string
 	}); err != nil {
 		return fail(types.StatusFailed, "dispatch-record-failed", "secret_transfer_failed", err)
 	}
-	// Relay visibility: the grant shows dispatching while bytes move.
-	// Best-effort — a display miss never fails the trusted delivery.
+	// SP-13: relay state transitions from committed dispatch truth.
+	// If the relay state transition fails, the dispatch has already been
+	// committed, so we must not fabricate a failure that would imply the
+	// operation was never dispatched. The relay state will be reconciled
+	// from the authoritative execution attempt record.
 	if relayID, ok := relayIDOf(tr.SecretRef); ok {
-		if r, _ := s.db.GetRelay(relayID); r != nil && r.Consumption == types.RelaySingleDispatch {
-			_ = s.db.SetRelayOpState(relayID, types.RelayDispatching, time.Now())
+		if err := s.db.SetRelayOpState(relayID, types.RelayDispatching, time.Now()); err != nil {
+			// The dispatch barrier has already committed. Log but do not
+			// report failure as if no dispatch occurred. The status
+			// reconciliation derives relay state from the execution attempt.
+			s.audit(relayID, "relay_dispatch_state_reconcile_needed", tr.RequestedBy, tr.DestinationID, "dispatch-committed")
 		}
 	}
 	deliverer := transfer.NewDeliverer()

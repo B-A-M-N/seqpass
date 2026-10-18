@@ -43,6 +43,10 @@ type Service struct {
 	// cannot set or override them.
 	hostInputMode string
 	hostAssurance string
+	// hostQualification is the broker-accepted qualification snapshot used
+	// to derive per-registration session assurance (S3/S7). It is not
+	// copied to global host state.
+	hostQualification *harness.QualificationSnapshot
 	// eph is the production short-lived relay spool (QR-01). It lives in
 	// broker memory under every vault type: a production broker hosts
 	// AegisKeys-backed reusable credentials AND bounded relays
@@ -175,6 +179,12 @@ func (s *Service) HostInputReason() string {
 		return "external trusted input with all agent boundaries verified"
 	}
 	return "protected transport verified; full agent process/tool/transcript isolation is not proven"
+}
+
+// SetHostQualification installs the broker-accepted qualification snapshot.
+// It is trusted wiring only and never copied into shared host state.
+func (s *Service) SetHostQualification(snapshot *harness.QualificationSnapshot) {
+	s.hostQualification = snapshot
 }
 
 func (s *Service) SetHostInputAssurance(mode, assurance string) error {

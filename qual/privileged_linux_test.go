@@ -24,6 +24,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/secretbridge/secretbridge/internal/testruntime"
 )
 
 type privilegedIdentity struct {
@@ -169,7 +171,7 @@ func runPrivilegedBoundary(t *testing.T, h *harness) (ready bool, blocked string
 		}
 	}
 
-	root, err := os.MkdirTemp("/tmp", "seqpass-isolated-qual-")
+	root, err := testruntime.Dir(testruntime.NamedFunc("privileged-isolated-qual"))
 	if err != nil {
 		h.recordTier("privileged-runtime", tierSystem, "create a disposable private qualification tree", "temporary root is created", err.Error(), false)
 		return true, ""
@@ -723,10 +725,11 @@ func TestPrivilegedProbeIPCRoundTrip(t *testing.T) {
 	// Sandboxed environments may expose /home as nobody:nogroup even when
 	// the test runtime directory itself is correctly owned. The broker
 	// refuses such ancestors by design; skip these socket tests there.
-	if fi, err := os.Lstat("/home"); err != nil || fi.Sys().(*syscall.Stat_t).Uid != 0 && fi.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
-		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
+	dir, err := testruntime.Dir(t)
+	if err != nil {
+		testruntime.Skip(t, err)
+		return
 	}
-	dir := t.TempDir()
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Fatal(err)
 	}

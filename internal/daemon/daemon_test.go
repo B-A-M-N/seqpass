@@ -3,20 +3,20 @@ package daemon
 import (
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/secretbridge/secretbridge/internal/harness"
 	"github.com/secretbridge/secretbridge/internal/ipc"
+	"github.com/secretbridge/secretbridge/internal/testruntime"
 )
 
 // sandboxAncestorUntrusted reports whether this sandbox exposes a
 // high-level ancestor (e.g. /home) as nobody:nogroup. The broker refuses
 // such ancestors by design, so socket-based tests must skip there.
 func sandboxAncestorUntrusted() bool {
-	fi, err := os.Lstat("/home")
-	return err != nil || fi.Sys().(*syscall.Stat_t).Uid != 0 && fi.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid())
+	_, err := testruntime.Dir(testruntime.NamedFunc("sandboxAncestorUntrusted"))
+	return err != nil
 }
 
 // G05: two brokers cannot own one database. The second is refused before
@@ -232,10 +232,10 @@ func TestDaemonRequiresExplicitVault(t *testing.T) {
 }
 
 func TestHostQualificationFailClosed(t *testing.T) {
-	if sandboxAncestorUntrusted() {
-		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
-	}
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Skipf("sandbox does not support trusted socket dir: %v", err)
+	}
 	digest, err := harness.SecurityConfigDigest(harness.HostKindCodex, "1.2.3", "4.5.6", "local", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -266,10 +266,10 @@ func TestHostQualificationFailClosed(t *testing.T) {
 	}
 }
 func TestHostQualificationSnapshotSelectionFailClosed(t *testing.T) {
-	if sandboxAncestorUntrusted() {
-		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
-	}
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Skipf("sandbox does not support trusted socket dir: %v", err)
+	}
 	digest, err := harness.SecurityConfigDigest(harness.HostKindOpenCode, "2.0", "0.1", "local", nil)
 	if err != nil {
 		t.Fatal(err)

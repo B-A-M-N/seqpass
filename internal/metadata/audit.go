@@ -1,6 +1,7 @@
 package metadata
 
 import (
+	"database/sql"
 	"time"
 
 	"github.com/secretbridge/secretbridge/internal/types"
@@ -15,6 +16,24 @@ func (d *DB) WriteAuditLog(al *types.AuditLog) error {
 	}
 
 	_, err := d.db.Exec(`
+		INSERT INTO audit_logs (id, operation_id, action, actor, target, outcome, metadata, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, al.ID, al.OperationID, al.Action, al.Actor, al.Target, al.Outcome, al.Metadata, al.CreatedAt)
+	return err
+}
+
+// WriteAuditLogTx writes an audit record inside an existing transaction
+// (SP-21). Security-significant mutations use this so the mutation and
+// its audit evidence commit atomically — a crash after the mutation but
+// before the audit cannot leave unrecorded security changes.
+func writeAuditLogTx(tx *sql.Tx, al *types.AuditLog) error {
+	if al.ID == "" {
+		al.ID = generateID()
+	}
+	if al.CreatedAt.IsZero() {
+		al.CreatedAt = time.Now()
+	}
+	_, err := tx.Exec(`
 		INSERT INTO audit_logs (id, operation_id, action, actor, target, outcome, metadata, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`, al.ID, al.OperationID, al.Action, al.Actor, al.Target, al.Outcome, al.Metadata, al.CreatedAt)

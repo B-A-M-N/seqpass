@@ -5,6 +5,10 @@
   "type": "module",
   "main": "seqpass.ts",
   "scripts": {
-    "test": "echo 'run with Pi extension harness; unit tests in tests/'"
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "vitest": "^2.0.0"
   }
 }

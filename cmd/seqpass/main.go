@@ -61,7 +61,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  seqpass broker --vault aegiskeys [--assurance best-effort|isolated] [--db PATH] [--socket PATH] [--admin-uid UID,...] [--agent-uid UID,...] [--intake-uid UID,...] [--intake-group GROUP] [--host-socket PATH] [--auto-execute]")
 	fmt.Fprintln(os.Stderr, "  seqpass broker --vault memory-test --dev  # development only, never production")
 	fmt.Fprintln(os.Stderr, "  seqpass mcp [--socket PATH]   # stdio adapter; register in Codex/Claude/Hermes")
-	fmt.Fprintln(os.Stderr, "  seqpass admin <catalog|pending|show|approve|reject|add-secret|add-dest|add-policy|set-policy|update-dest|execute> ...")
+	fmt.Fprintln(os.Stderr, "  seqpass admin <catalog|pending|show|approve|reject|add-secret|add-dest|add-policy|set-policy|update-dest|execute|host-binding> ...")
 	fmt.Fprintln(os.Stderr, "  seqpass relay <inbox|fulfill|status|cancel|request> ...  # trusted human handoff (intake socket)")
 	fmt.Fprintln(os.Stderr, "  seqpass tui [--intake-socket PATH]  # persistent native inbox TUI (own terminal, never the agent's)")
 	fmt.Fprintln(os.Stderr, "  seqpass status")
@@ -173,7 +173,7 @@ func adminClient() *ipc.Client {
 
 func adminCmd(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "admin subcommands: catalog|pending|show|approve|reject|verify|recipient-status|add-secret|stage-secret|add-dest|execute")
+		fmt.Fprintln(os.Stderr, "admin subcommands: catalog|pending|show|approve|reject|verify|recipient-status|add-secret|stage-secret|add-dest|execute|host-binding")
 		os.Exit(1)
 	}
 	cli := adminClient()
@@ -414,10 +414,39 @@ func adminCmd(args []string) {
 		data, err := cli.Call(method, map[string]interface{}{"op_id": *id})
 		must(err)
 		printJSON(data)
+	case "host-binding":
+		hostBindingCmd(args[1:], cli)
 	default:
 		fmt.Fprintln(os.Stderr, "unknown admin subcommand:", args[0])
 		os.Exit(1)
 	}
+}
+
+// hostBindingCmd provisions, inspects, renews, and revokes trusted
+// human-to-agent host principal bindings via the admin socket (SP-02).
+func hostBindingCmd(args []string, cli *ipc.Client) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "host-binding subcommands: create|inspect|renew|revoke")
+		fmt.Fprintln(os.Stderr, "  create --human UID --agent UID --kind KIND --ttl-seconds SECONDS")
+		fmt.Fprintln(os.Stderr, "  inspect --human UID --kind KIND")
+		fmt.Fprintln(os.Stderr, "  renew   --human UID --agent UID --kind KIND --ttl-seconds SECONDS")
+		fmt.Fprintln(os.Stderr, "  revoke  --human UID --agent UID --kind KIND")
+		os.Exit(1)
+	}
+	action := args[0]
+	fs := flag.NewFlagSet("host-binding "+action, flag.ExitOnError)
+	human := fs.String("human", "", "trusted human principal (e.g. uid:1000)")
+	agent := fs.String("agent", "", "approved agent principal (e.g. uid:2001)")
+	kind := fs.String("kind", "", "host kind (e.g. codex, opencode)")
+	ttl := fs.Int("ttl-seconds", 0, "binding TTL in seconds (required for create/renew)")
+	_ = fs.Parse(args[1:])
+	params := map[string]interface{}{"action": action, "host_kind": *kind}
+	if *human != "" { params["human_principal"] = *human }
+	if *agent != "" { params["agent_principal"] = *agent }
+	if *ttl > 0 { params["ttl_seconds"] = uint64(*ttl) }
+	data, err := cli.Call(ipc.MethodHostBindingCreate, params)
+	must(err)
+	printJSON(data)
 }
 
 func statusCmd(args []string) {

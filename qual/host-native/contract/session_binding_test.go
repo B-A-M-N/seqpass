@@ -7,12 +7,13 @@ import (
 
 	"github.com/secretbridge/secretbridge/internal/harness"
 	"github.com/secretbridge/secretbridge/internal/service"
+	"github.com/secretbridge/secretbridge/internal/testruntime"
 	"github.com/secretbridge/secretbridge/internal/types"
 )
 
 func TestHostSessionNoticeBinding(t *testing.T) {
 	svc, err := service.New(service.Config{
-		DBPath: filepath.Join(t.TempDir(), "binding.db"), VaultType: "memory-test",
+		DBPath: filepath.Join(testruntime.DirOrTemp(t), "binding.db"), VaultType: "memory-test",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -21,7 +22,7 @@ func TestHostSessionNoticeBinding(t *testing.T) {
 	uid := uint32(0)
 	if err := svc.AddDestination(&types.Destination{
 		ID: "registered-service", Name: "Registered Recipient", Type: "recipient-socket",
-		Endpoint: "/tmp/seqpass-host-native-contract.sock", ExpectedUID: &uid,
+		Endpoint: filepath.Join(testruntime.DirOrTemp(t), "recipient.sock"), ExpectedUID: &uid,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -29,10 +30,19 @@ func TestHostSessionNoticeBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := svc.DB().CreateHostPrincipalBinding(&types.HostPrincipalBinding{
+		HumanPrincipal: "uid:1000", AgentPrincipal: "uid:2001", HostKind: string(harness.HostKindOpenCode),
+		ExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	session, _, err := svc.RegisterHostSession("uid:2001", "uid:1000", harness.HostRegistration{
 		HostKind: harness.HostKindOpenCode, ThreadID: "thread-1",
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.BindRelayHost("uid:2001", reqID, session); err != nil {
 		t.Fatal(err)
 	}
 	notice, err := svc.HostRelayNotice("uid:1000", reqID, session)

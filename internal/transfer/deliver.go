@@ -266,9 +266,11 @@ func (d *Deliverer) deliverSocket(ctx context.Context, opID, plaintext string, d
 	// inside the trusted protocol (ack binding above) and the
 	// broker-private dispatch record — it is never published to the
 	// agent, so a low-entropy secret gains no offline guessing oracle.
+	// SP-22: the exact credential byte length is secret-derived metadata.
+	// It is retained internally for ack binding but omitted from the
+	// public receipt returned to the agent.
 	return map[string]interface{}{
 		"destination_id": dest.ID,
 		"delivered":      true,
-		"bytes":          a.Bytes,
 	}, nil
 }

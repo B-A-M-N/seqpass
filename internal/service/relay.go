@@ -116,12 +116,11 @@ func (s *Service) RelayRequest(agent, destID, dataKind, purpose string, ttl time
 	if consumption == types.RelaySingleDispatch {
 		maxDeliveries = 1
 	}
-	// F17: per-principal pending-request bound so one agent cannot flood
-	// the broker store or hide legitimate requests.
-	if n, err := s.db.CountPendingRelaysForAgent(agent); err == nil && n >= 20 {
-		s.audit("", "relay_request_denied", agent, destID, "pending-limit")
-		return "", errors.New("too many pending relay requests for this principal (max 20)")
-	}
+	// F17/SP-17: transactional per-principal pending-request bound so one
+	// agent cannot flood the broker store or hide legitimate requests.
+	// The count and insert happen in the same atomic operation — a race
+	// between the check and insert cannot exceed the quota. Database
+	// errors fail closed, never silently disable protection.
 	rid, err := newRelayID()
 	if err != nil {
 		return "", err
@@ -140,7 +139,10 @@ func (s *Service) RelayRequest(agent, destID, dataKind, purpose string, ttl time
 		ExpiresAt:      now.Add(clampRelayTTL(ttl)),
 		CreatedAt:      now,
 	}
-	if err := s.db.CreateRelay(r); err != nil {
+	if err := s.db.CreateRelayWithQuota(agent, r); err != nil {
+		if strings.Contains(err.Error(), "too many pending relay requests") {
+			s.audit("", "relay_request_denied", agent, destID, "pending-limit")
+		}
 		return "", err
 	}
 	s.audit(r.ID, "relay_requested", agent, destID, dataKind)
@@ -455,9 +457,14 @@ func (s *Service) RelayStatus(agent, relayID string) (map[string]interface{}, er
 	now := time.Now()
 	state := r.State
 	if !now.Before(r.ExpiresAt) {
+		// SP-13: once external dispatch is committed, deadline expiry
+		// cannot retroactively classify the operation as never dispatched.
 		switch state {
 		case types.RelayAwaitingUser, types.RelayReady, types.RelayAuthorized, types.RelayReserved:
 			state = types.RelayExpired
+		case types.RelayDispatching:
+			// Do not overwrite committed dispatch with "expired" — the
+			// operation outcome will overlay the authoritative truth.
 		}
 	}
 	var opState string

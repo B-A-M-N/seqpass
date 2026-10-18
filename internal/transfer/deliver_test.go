@@ -9,11 +9,11 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/secretbridge/secretbridge/internal/types"
+	"github.com/secretbridge/secretbridge/internal/testruntime"
 )
 
 func destOf(t *testing.T, typ, ep string) *types.Destination {
@@ -29,10 +29,11 @@ func sockDir(t *testing.T) string {
 	// Sandboxed environments may expose /home as nobody:nogroup even when
 	// the test runtime directory itself is correctly owned. The broker
 	// refuses such ancestors by design; skip these socket tests there.
-	if fi, err := os.Lstat("/home"); err != nil || fi.Sys().(*syscall.Stat_t).Uid != 0 && fi.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
-		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
+	dir, err := testruntime.Dir(t)
+	if err != nil {
+		testruntime.Skip(t, err)
+		return ""
 	}
-	dir := t.TempDir()
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Fatal(err)
 	}

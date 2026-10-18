@@ -61,6 +61,16 @@ type UIDAuthorizer struct {
 	AdminUIDs  map[uint32]bool
 	AgentUIDs  map[uint32]bool
 	IntakeUIDs map[uint32]bool
+	// PrincipalAdmin marks intake identities authorized to create
+	// trusted host principal bindings. Principal strings mirror the
+	// broker's UID mapping (for example "uid:1000").
+	PrincipalAdmin map[string]bool
+}
+
+// CanAdminPrincipal reports whether the authenticated intake principal is
+// explicitly trusted for host-binding administration. Default fail-closed.
+func (a *UIDAuthorizer) CanAdminPrincipal(p AuthenticatedPrincipal) bool {
+	return a != nil && a.PrincipalAdmin[p.Principal]
 }
 
 func (a *UIDAuthorizer) CanConnectAgent(p AuthenticatedPrincipal) bool {
@@ -562,6 +572,13 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 	if !allow[req.Method] {
 		return Response{OK: false, Error: "access denied"}
 	}
+	if req.Method == MethodHostBindingCreate {
+		if auth, ok := s.auth.(interface {
+			CanAdminPrincipal(AuthenticatedPrincipal) bool
+		}); !ok || !auth.CanAdminPrincipal(ap) {
+			return Response{OK: false, Error: "access denied"}
+		}
+	}
 	_ = ctx
 	p := req.Params
 	switch req.Method {
@@ -828,6 +845,22 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 		if err != nil {
 			return Response{OK: false, Error: err.Error()}
 		}
+		// SP-03: when a known host session is available (agent passes
+		// session_id + session_token), atomically create the relay and
+		// bind it to the session so the native host inbox discovers it.
+		if sid := strParam(p, "session_id"); sid != "" {
+			tok := strParam(p, "session_token")
+			sess, authErr := s.svc.HostSessionAuth(sid, tok)
+			if authErr != nil {
+				return Response{OK: false, Error: "host session invalid"}
+			}
+			if sess.AgentPrincipal != principal {
+				return Response{OK: false, Error: "relay and host session bind to different agents"}
+			}
+			if err := s.svc.BindRelayHost(principal, reqID, sess); err != nil {
+				return Response{OK: false, Error: err.Error()}
+			}
+		}
 		return Response{OK: true, Data: map[string]interface{}{
 			"request_id": reqID, "status": "awaiting_user",
 			"next_action": "protected_input",
@@ -899,17 +932,32 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 			ThreadID:       strParam(p, "thread_id"),
 			HostVersion:    strParam(p, "host_version"),
 			AdapterVersion: strParam(p, "adapter_version"),
+			Topology:       s.AssuranceMode,
+			SecurityConfig: harness.BrokerSecurityConfig(s.AssuranceMode, s.IntakeGroup != ""),
 			Credentials:    caps,
 		}
 		if ttl, ok := uintParam(p, "ttl_seconds"); ok {
 			reg.TTLOfSession = time.Duration(ttl) * time.Second
 		}
-		session, token, err := s.svc.RegisterHostSession(principal, principal, reg)
+		// S1: resolve the authorized agent principal from the broker's
+		// trusted human/host-kind binding. Never bind both principals to
+		// the authenticated intake identity.
+		resolved, bindErr := s.svc.DB().ResolveHostPrincipalBinding(principal, string(reg.HostKind), time.Now())
+		if bindErr != nil || resolved == nil {
+			return Response{OK: false, Error: "host is not authorized for this agent principal"}
+		}
+		session, token, err := s.svc.RegisterHostSession(resolved.AgentPrincipal, principal, reg)
 		if err != nil {
 			return Response{OK: false, Error: err.Error()}
 		}
 		return Response{OK: true, Data: map[string]interface{}{"session": session, "token": token}}
-	case MethodHostEvent, MethodHostNotice, MethodHostStatus, MethodHostReview, MethodHostCancelPrompt:
+	case MethodHostBindingCreate:
+		// SP-02: the admin host-binding RPC is only reachable through the
+		// admin socket with an explicitly authorized administrative identity.
+		// The auth.CanAdminPrincipal check at the top of dispatch already
+		// gated this. Route to the host-binding handler.
+		return s.dispatchHostBindingCreate(p)
+	case MethodHostEvent, MethodHostPending, MethodHostNotice, MethodHostStatus, MethodHostReview, MethodHostCancelPrompt:
 		var sess *types.HostSession
 		if sid := strParam(p, "session_id"); sid != "" {
 			tok := strParam(p, "session_token")
@@ -921,36 +969,59 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 		} else {
 			return Response{OK: false, Error: "missing host session"}
 		}
+		if req.Method == MethodHostPending {
+			limit := int(uintParamOr(p, "limit"))
+			records, err := s.svc.ListPendingRelaysForHostSession(sess, limit)
+			if err != nil {
+				return Response{OK: false, Error: err.Error()}
+			}
+			notices := make([]*harness.ProtectedInputNotice, 0, len(records))
+			for _, r := range records {
+				n, err := s.svc.HostRelayNotice(principal, r.ID, sess)
+				if err != nil {
+					return Response{OK: false, Error: err.Error()}
+				}
+				notices = append(notices, n)
+			}
+			return Response{OK: true, Data: notices}
+		}
+
 		if req.Method == MethodHostEvent {
-			// A monotonically increasing host-supplied counter lets reconnects
-			// order replayed state while revision remains broker truth.
+			// SP-04: the host socket authenticates a trusted human. The
+			// service derives the agent principal from the broker-issued
+			// session, never from a caller-supplied string.
 			sequence := uint64(uintParamOr(p, "sequence"))
-			ev, err := s.svc.HostRelayEvent(principal, strParam(p, "request_id"), sess, sequence)
+			ev, err := s.svc.HostRelayEvent(sess.AgentPrincipal, strParam(p, "request_id"), sess, sequence)
 			if err != nil {
 				return Response{OK: false, Error: err.Error()}
 			}
 			return Response{OK: true, Data: ev}
 		}
 		if req.Method == MethodHostStatus {
-			st, err := s.svc.HostRelayStatus(principal, strParam(p, "request_id"), sess)
+			// SP-04: derive agent principal from the trusted session.
+			st, err := s.svc.HostRelayStatus(sess.AgentPrincipal, strParam(p, "request_id"), sess)
 			if err != nil {
 				return Response{OK: false, Error: err.Error()}
 			}
 			return Response{OK: true, Data: st}
 		}
 		if req.Method == MethodHostNotice {
-			notice, err := s.svc.HostRelayNotice(principal, strParam(p, "request_id"), sess)
+			// SP-04: HostRelayNotice takes the human principal for review
+			// validation, but the service derives the agent from the session.
+			notice, err := s.svc.HostRelayNotice(sess.HumanPrincipal, strParam(p, "request_id"), sess)
 			if err != nil {
 				return Response{OK: false, Error: err.Error()}
 			}
 			return Response{OK: true, Data: notice}
 		}
 		if req.Method == MethodHostCancelPrompt {
-			// Display-only prompt cancellation (HI-10): only awaiting-user
-			// prompts are withdrawn. If the operation has already dispatched,
-			// the broker returns not-cancelled so the host never reports a
-			// false final outcome.
-			cancelled, err := s.svc.RelayCancelPrompt(principal, strParam(p, "request_id"))
+			// SP-04: check the exact relay-session association before
+			// calling cancellation. The agent principal is derived from
+			// the trusted session, never from the caller's connection.
+			if err := s.requireRelayHostSession(sess.AgentPrincipal, strParam(p, "request_id"), sess); err != nil {
+				return Response{OK: false, Error: err.Error()}
+			}
+			cancelled, err := s.svc.RelayCancelPrompt(sess.AgentPrincipal, strParam(p, "request_id"))
 			if err != nil {
 				return Response{OK: false, Error: err.Error()}
 			}
@@ -958,7 +1029,7 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 				"request_id": strParam(p, "request_id"), "prompt_cancelled": cancelled,
 			}}
 		}
-		review, err := s.svc.HostRelayReview(principal, strParam(p, "request_id"), sess)
+		review, err := s.svc.HostRelayReview(sess.HumanPrincipal, strParam(p, "request_id"), sess)
 		if err != nil {
 			return Response{OK: false, Error: err.Error()}
 		}
@@ -987,6 +1058,26 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 	default:
 		return Response{OK: false, Error: "unknown method"}
 	}
+}
+
+// requireRelayHostSession checks the exact relay-to-host-session binding
+// before any host-domain transition. SP-04: the service enforces that the
+// session's agent and human principals match the persisted association.
+// If the binding already exists and matches, this is a no-op — never
+// a "already bound" error.
+func (s *Server) requireRelayHostSession(agent, relayID string, sess *types.HostSession) error {
+	existing, err := s.svc.DB().GetRelayHostSession(relayID)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		if existing.SessionID != sess.ID || existing.AgentPrincipal != agent ||
+			existing.HumanPrincipal != sess.HumanPrincipal || existing.HostKind != sess.HostKind {
+			return fmt.Errorf("relay and host session bind to different agents")
+		}
+		return nil // already correctly bound
+	}
+	return s.svc.BindRelayHost(agent, relayID, sess)
 }
 
 func isAdminMethod(m string) bool {

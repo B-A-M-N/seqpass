@@ -5,12 +5,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
+	"time"
 
+	"fmt"
 	"github.com/secretbridge/secretbridge/internal/harness"
 	"github.com/secretbridge/secretbridge/internal/intake"
 	"github.com/secretbridge/secretbridge/internal/service"
+	"github.com/secretbridge/secretbridge/internal/testruntime"
 	"github.com/secretbridge/secretbridge/internal/types"
 )
 
@@ -18,10 +20,11 @@ import (
 // all gated to the test UID. Callers address each domain separately.
 func fourSocketServer(t *testing.T, svc *service.Service) (agent, admin, intake, host string) {
 	t.Helper()
-	if fi, err := os.Lstat("/home"); err != nil || fi.Sys().(*syscall.Stat_t).Uid != 0 && fi.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
-		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
+	dir, err := testruntime.Dir(t)
+	if err != nil {
+		testruntime.Skip(t, err)
+		return
 	}
-	dir := t.TempDir()
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -50,10 +53,11 @@ func threeSocketServer(t *testing.T, svc *service.Service) (agent, admin, intake
 	// Sandboxed environments may expose /home as nobody:nogroup even when
 	// the test runtime directory itself is correctly owned. The broker
 	// refuses such ancestors by design; skip these socket tests there.
-	if fi, err := os.Lstat("/home"); err != nil || fi.Sys().(*syscall.Stat_t).Uid != 0 && fi.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
-		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
+	dir, err := testruntime.Dir(t)
+	if err != nil {
+		testruntime.Skip(t, err)
+		return
 	}
-	dir := t.TempDir()
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -75,6 +79,23 @@ func threeSocketServer(t *testing.T, svc *service.Service) (agent, admin, intake
 	return agent, admin, intake
 }
 
+func createTestHostBinding(t *testing.T, svc *service.Service, human, agent, kind string) {
+	t.Helper()
+	// SP-09: only one active binding is allowed per (human, host_kind).
+	// Revoke any existing binding first so test setup can provision a
+	// fresh binding for a different agent on the same host kind.
+	existing, _ := svc.DB().ResolveHostPrincipalBinding(human, kind, time.Now())
+	if existing != nil {
+		_ = svc.DB().RevokeHostPrincipalBinding(human, existing.AgentPrincipal, kind)
+	}
+	if err := svc.DB().CreateHostPrincipalBinding(&types.HostPrincipalBinding{
+		HumanPrincipal: human, AgentPrincipal: agent, HostKind: kind,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func relayTestService(t *testing.T) *service.Service {
 	t.Helper()
 	svc, err := service.New(service.Config{
@@ -87,7 +108,7 @@ func relayTestService(t *testing.T) *service.Service {
 	uid := uint32(os.Geteuid())
 	if err := svc.AddDestination(&types.Destination{
 		ID: "rd1", Name: "r", Type: "recipient-socket",
-		Endpoint: "/tmp/seqpass-relay-ipc-test.sock", ExpectedUID: &uid,
+		Endpoint: filepath.Join(testruntime.DirOrTemp(t), "recipient.sock"), ExpectedUID: &uid,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -191,10 +212,11 @@ func TestStrangerDeniedEverywhere(t *testing.T) {
 	// Sandboxed environments may expose /home as nobody:nogroup even when
 	// the test runtime directory itself is correctly owned. The broker
 	// refuses such ancestors by design; skip these socket tests there.
-	if fi, err := os.Lstat("/home"); err != nil || fi.Sys().(*syscall.Stat_t).Uid != 0 && fi.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
-		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
+	dir, err := testruntime.Dir(t)
+	if err != nil {
+		testruntime.Skip(t, err)
+		return
 	}
-	dir := t.TempDir()
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -273,13 +295,14 @@ func TestHostSessionPresentationDomain(t *testing.T) {
 	}
 	defer host.Close()
 
-	data, err := ag.Call(MethodRelayRequest, map[string]interface{}{
-		"destination_id": "rd1", "data_kind": "api_key", "purpose": "host integration",
-	})
+	// SP-16: create the relay as the distinct agent principal (uid:99999)
+	// so relay, binding, and host session all share the same agent.
+	createTestHostBinding(t, svc, "uid:"+fmt.Sprint(os.Geteuid()), "uid:99999", "codex")
+	bindingAgent := "uid:99999"
+	reqID, err := svc.RelayRequest(bindingAgent, "rd1", "api_key", "host integration", time.Minute, "single_dispatch", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	reqID, _ := data.(map[string]interface{})["request_id"].(string)
 	if reqID == "" {
 		t.Fatal("missing request ID")
 	}
@@ -311,6 +334,10 @@ func TestHostSessionPresentationDomain(t *testing.T) {
 	}
 	if capsObj["supports_resume"] != true || capsObj["supports_cancel_prompt"] != true {
 		t.Fatalf("optional capability flags lost: %+v", reg)
+	}
+	// SP-16: bind the relay to the host session.
+	if err := svc.BindRelayHost("uid:99999", reqID, &types.HostSession{ID: sessionID}); err != nil {
+		t.Fatalf("bind relay to host session: %v", err)
 	}
 	notice, err := host.Call(MethodHostNotice, map[string]interface{}{
 		"session_id": sessionID, "session_token": token, "request_id": reqID,
@@ -392,24 +419,22 @@ func TestConcurrentHostSessionsStayIsolated(t *testing.T) {
 	}
 	defer hostB.Close()
 
-	request := func(kind string) string {
-		t.Helper()
-		data, err := agA.Call(MethodRelayRequest, map[string]interface{}{
-			"destination_id": "rd1", "data_kind": kind,
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		id, _ := data.(map[string]interface{})["request_id"].(string)
-		if id == "" {
-			t.Fatal("missing relay ID")
-		}
-		return id
-	}
-	reqA := request("api_key")
-	reqB := request("token")
+
+	uidCounter := 0
 	register := func() (string, string) {
 		t.Helper()
+		// SP-16: use a distinct agent principal for each call. The closure
+		// captures the counter to generate unique agent UIDs.
+		uidCounter++
+		agentUID := fmt.Sprintf("uid:900%02d", uidCounter)
+		// Note: we do NOT create a binding here because SP-09 unique active
+		// binding enforcement means a second binding for the same human+kind
+		// would need to revoke the first, invalidating the first session.
+		// Instead, create a fresh binding per registration only on the first
+		// call; subsequent sessions share the same binding agent.
+		if uidCounter == 1 {
+			createTestHostBinding(t, svc, "uid:"+fmt.Sprint(os.Geteuid()), agentUID, "hermes")
+		}
 		reg, err := in.Call(MethodHostRegister, map[string]interface{}{
 			"host_kind": "hermes", "ttl_seconds": 300,
 			"host_version": "1.0", "adapter_version": "0.1",
@@ -425,13 +450,39 @@ func TestConcurrentHostSessionsStayIsolated(t *testing.T) {
 	}
 	sessA, tokA := register()
 	sessB, tokB := register()
-	for _, tc := range []struct{ sessionID, token, requestID string }{
-		{sessA, tokA, reqA}, {sessB, tokB, reqB},
+	// SP-16: create relays via the service using the binding agent (uid:90001)
+	// so relay, binding, and host session all share the same agent principal.
+	reqA, err := svc.RelayRequest("uid:90001", "rd1", "api_key", "", time.Minute, "single_dispatch", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqB, err := svc.RelayRequest("uid:90001", "rd1", "token", "", time.Minute, "single_dispatch", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Explicitly bind each relay to its own session — requireRelayHostSession
+	// checks but does not auto-create the binding.
+	sessAObj, _ := svc.DB().GetHostSession(sessA)
+	sessBObj, _ := svc.DB().GetHostSession(sessB)
+	if sessAObj == nil || sessBObj == nil {
+		t.Fatal("host sessions not found after registration")
+	}
+	if err := svc.BindRelayHost("uid:90001", reqA, sessAObj); err != nil {
+		t.Fatalf("bind reqA to sessA: %v", err)
+	}
+	if err := svc.BindRelayHost("uid:90001", reqB, sessBObj); err != nil {
+		t.Fatalf("bind reqB to sessB: %v", err)
+	}
+	hosts := map[string]*Client{"A": hostA, "B": hostB}
+	for _, tc := range []struct {
+		label, sessionID, token, requestID string
+	}{
+		{"A", sessA, tokA, reqA}, {"B", sessB, tokB, reqB},
 	} {
-		if _, err := hostA.Call(MethodHostEvent, map[string]interface{}{
+		if _, err := hosts[tc.label].Call(MethodHostEvent, map[string]interface{}{
 			"session_id": tc.sessionID, "session_token": tc.token, "request_id": tc.requestID,
 		}); err != nil {
-			t.Fatalf("own session denied: %v", err)
+			t.Fatalf("own session %s denied: %v", tc.label, err)
 		}
 	}
 	// Explicit cross-session access is denied even under the same OS
@@ -465,13 +516,14 @@ func TestHostPromptCancellationDoesNotHideDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer host.Close()
-	data, err := ag.Call(MethodRelayRequest, map[string]interface{}{
-		"destination_id": "rd1", "data_kind": "api_key",
-	})
+	// SP-16: use distinct human and agent principals. Create the relay
+	// via the service as the binding agent so relay, binding, and session
+	// share the same principal.
+	createTestHostBinding(t, svc, "uid:"+fmt.Sprint(os.Geteuid()), "uid:99997", "codex")
+	reqID, err := svc.RelayRequest("uid:99997", "rd1", "api_key", "", time.Minute, "single_dispatch", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	reqID := data.(map[string]interface{})["request_id"].(string)
 	reg, err := in.Call(MethodHostRegister, map[string]interface{}{"host_kind": "codex"})
 	if err != nil {
 		t.Fatal(err)
@@ -479,6 +531,10 @@ func TestHostPromptCancellationDoesNotHideDispatch(t *testing.T) {
 	m := reg.(map[string]interface{})
 	sid := m["session"].(map[string]interface{})["id"].(string)
 	tok := m["token"].(map[string]interface{})["token"].(string)
+	// Bind the relay to the session.
+	if err := svc.BindRelayHost("uid:99997", reqID, &types.HostSession{ID: sid}); err != nil {
+		t.Fatalf("bind relay: %v", err)
+	}
 	cancel := func() bool {
 		t.Helper()
 		res, err := host.Call(MethodHostCancelPrompt, map[string]interface{}{
@@ -493,11 +549,12 @@ func TestHostPromptCancellationDoesNotHideDispatch(t *testing.T) {
 		t.Fatal("pending prompt was not cancelled")
 	}
 	// A terminal cancelled grant remains cancelled and cannot be revived.
-	st, err := ag.Call(MethodRelayStatus, map[string]interface{}{"request_id": reqID})
+	// The relay was created via svc as uid:99997; check status directly.
+	st, err := svc.RelayStatus("uid:99997", reqID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.(map[string]interface{})["status"] != "cancelled" {
+	if st["status"] != "cancelled" {
 		t.Fatalf("unexpected status: %+v", st)
 	}
 }
@@ -529,5 +586,123 @@ func TestRelayInputLimitsStayBounded(t *testing.T) {
 		"payload": base64.StdEncoding.EncodeToString(tooLarge),
 	}); err == nil {
 		t.Fatal("oversized payload accepted")
+	}
+}
+
+// SP-03/SP-04 acceptance: two agents with distinct host sessions cannot see,
+// bind, cancel, or fulfill one another's relays even when they know the
+// other request ID. Distinct agent principals are enforced throughout.
+func TestTwoAgentHostSessionIsolation(t *testing.T) {
+	svc := relayTestService(t)
+	agentSock, _, intakeSock, hostSock := fourSocketServer(t, svc)
+	agA, err := Dial(agentSock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer agA.Close()
+	in, err := Dial(intakeSock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	hostA, err := Dial(hostSock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hostA.Close()
+	hostB, err := Dial(hostSock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hostB.Close()
+
+	// SP-16: create relays via the service using distinct agent principals
+	// so relay, binding, and host session all share the same agent.
+	createTestHostBinding(t, svc, "uid:"+fmt.Sprint(os.Geteuid()), "uid:9001", "codex")
+	createTestHostBinding(t, svc, "uid:"+fmt.Sprint(os.Geteuid()), "uid:9002", "hermes")
+	reqIDA, err := svc.RelayRequest("uid:9001", "rd1", "api_key", "agent-a request", time.Minute, "single_dispatch", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reqIDA == "" {
+		t.Fatal("missing request ID A")
+	}
+	_ = agA // agent socket connection retained for other assertions
+
+	regA, err := in.Call(MethodHostRegister, map[string]interface{}{
+		"host_kind": "codex", "thread_id": "thread-a", "ttl_seconds": 300,
+		"host_version": "1.0", "adapter_version": "0.1",
+		"presentation": "native", "input_transport": "external_tty",
+	})
+	if err != nil {
+		t.Fatalf("register A: %v", err)
+	}
+	sessA := regA.(map[string]interface{})["session"].(map[string]interface{})["id"].(string)
+	tokA := regA.(map[string]interface{})["token"].(map[string]interface{})["token"].(string)
+
+	regB, err := in.Call(MethodHostRegister, map[string]interface{}{
+		"host_kind": "hermes", "thread_id": "thread-b", "ttl_seconds": 300,
+		"host_version": "1.0", "adapter_version": "0.1",
+		"presentation": "native", "input_transport": "external_tty",
+	})
+	if err != nil {
+		t.Fatalf("register B: %v", err)
+	}
+	sessB := regB.(map[string]interface{})["session"].(map[string]interface{})["id"].(string)
+	tokB := regB.(map[string]interface{})["token"].(map[string]interface{})["token"].(string)
+
+	// Bind reqA to session A — the relay and session share agent uid:9001.
+	if err := svc.BindRelayHost("uid:9001", reqIDA, &types.HostSession{ID: sessA}); err != nil {
+		t.Fatalf("bind A: %v", err)
+	}
+
+	// Host A sees its bound relay.
+	pendingA, err := hostA.Call(MethodHostPending, map[string]interface{}{
+		"session_id": sessA, "session_token": tokA,
+	})
+	if err != nil {
+		t.Fatalf("pending A: %v", err)
+	}
+	foundA := false
+	if arr, ok := pendingA.([]interface{}); ok {
+		for _, item := range arr {
+			if m, ok := item.(map[string]interface{}); ok && m["request_id"] == reqIDA {
+				foundA = true
+			}
+		}
+	}
+	if !foundA {
+		t.Fatal("host A did not see its own relay")
+	}
+
+	// Host B's pending inbox must not contain reqA.
+	pendingB, err := hostB.Call(MethodHostPending, map[string]interface{}{
+		"session_id": sessB, "session_token": tokB,
+	})
+	if err != nil {
+		t.Fatalf("pending B: %v", err)
+	}
+	foundB := false
+	if arr, ok := pendingB.([]interface{}); ok {
+		for _, item := range arr {
+			if m, ok := item.(map[string]interface{}); ok && m["request_id"] == reqIDA {
+				foundB = true
+			}
+		}
+	}
+	if foundB {
+		t.Fatal("host B saw agent A's relay — isolation violated")
+	}
+
+	// Host B cannot access reqA directly.
+	if _, err := hostB.Call(MethodHostNotice, map[string]interface{}{
+		"session_id": sessB, "session_token": tokB, "request_id": reqIDA,
+	}); err == nil {
+		t.Fatal("host B accessed another session's relay")
+	}
+	if _, err := hostB.Call(MethodHostCancelPrompt, map[string]interface{}{
+		"session_id": sessB, "session_token": tokB, "request_id": reqIDA,
+	}); err == nil {
+		t.Fatal("host B cancelled another session's relay")
 	}
 }

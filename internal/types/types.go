@@ -269,15 +269,42 @@ type RelayRecord struct {
 // principals authenticated by the broker. It carries no credential or
 // agent-asserted security claim.
 type HostSession struct {
-	ID             string    `json:"id"`
-	HostKind       string    `json:"host_kind"`
-	AgentPrincipal string    `json:"agent_principal"`
+	ID              string    `json:"id"`
+	HostKind        string    `json:"host_kind"`
+	AgentPrincipal  string    `json:"agent_principal"`
+	HumanPrincipal  string    `json:"human_principal"`
+	ThreadID        string    `json:"thread_id,omitempty"`
+	ExpiresAt       time.Time `json:"expires_at"`
+	Revision        uint64    `json:"revision"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+	InputMode       string    `json:"input_mode"`
+	Assurance       string    `json:"input_assurance"`
+	AssuranceReason string    `json:"input_reason"`
+}
+
+// HostPrincipalBinding is the broker-authorized association between a
+// trusted human intake identity and an approved agent identity. Neither
+// side can create it by supplying an identity claim; it is explicitly
+// provisioned by the broker operator and version-guarded.
+type HostPrincipalBinding struct {
 	HumanPrincipal string    `json:"human_principal"`
-	ThreadID       string    `json:"thread_id,omitempty"`
+	AgentPrincipal string    `json:"agent_principal"`
+	HostKind       string    `json:"host_kind"`
 	ExpiresAt      time.Time `json:"expires_at"`
 	Revision       uint64    `json:"revision"`
+}
+
+// RelayHostSession is the exact association between one relay and one
+// broker-issued native host session. It is created when a trusted host
+// claims the relay and never inferred from a shared principal.
+type RelayHostSession struct {
+	RelayID        string    `json:"relay_id"`
+	SessionID      string    `json:"session_id"`
+	AgentPrincipal string    `json:"agent_principal"`
+	HumanPrincipal string    `json:"human_principal"`
+	HostKind       string    `json:"host_kind"`
 	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // UseRequest for credential-backed operation.

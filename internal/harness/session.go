@@ -1,6 +1,10 @@
 package harness
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
+
 
 // HostSessionKind identifies a broker-qualified native-host integration.
 // This is trusted configuration metadata, never a request-supplied
@@ -63,13 +67,15 @@ type HostSessionToken struct {
 // protected IPC domain. AgentPrincipal and HumanPrincipal are assigned
 // from authenticated peer identity — the caller cannot name principals.
 type HostRegistration struct {
-	HostKind       HostSessionKind  `json:"host_kind"`
-	ThreadID       string           `json:"thread_id"`
-	HostVersion    string           `json:"host_version"`
-	AdapterVersion string           `json:"adapter_version"`
-	Credentials    HostCapabilities `json:"credentials"`
-	TTLOfSession   time.Duration    `json:"-"`
-	HumanPrincipal string           `json:"-"`
+	HostKind       HostSessionKind   `json:"host_kind"`
+	ThreadID       string            `json:"thread_id"`
+	HostVersion    string            `json:"host_version"`
+	AdapterVersion string            `json:"adapter_version"`
+	Topology       string            `json:"execution_topology,omitempty"`
+	SecurityConfig map[string]string `json:"security_config,omitempty"`
+	Credentials    HostCapabilities  `json:"credentials"`
+	TTLOfSession   time.Duration     `json:"-"`
+	HumanPrincipal string            `json:"-"`
 }
 
 // ProtectedInputTransaction is the shared trusted-adapter contract for
@@ -92,13 +98,25 @@ type ProtectedInputTransaction interface {
 // RelayStatus is the sanitized completion view available to the trusted
 // adapter. It deliberately omits credential bytes and recipient wire data.
 type RelayStatus struct {
-	RequestID           string    `json:"request_id"`
-	State               string    `json:"state"`
-	RecipientID         string    `json:"recipient_id"`
-	Consumption         string    `json:"consumption"`
-	ExpiresAt           time.Time `json:"expires_at"`
-	OperationID         string    `json:"operation_id,omitempty"`
-	RemainingDeliveries *int64    `json:"remaining_deliveries,omitempty"`
+	RequestID           string                `json:"request_id"`
+	State               string                `json:"state"`
+	RecipientID         string                `json:"recipient_id"`
+	Consumption         string                `json:"consumption"`
+	ExpiresAt           time.Time             `json:"expires_at"`
+	OperationID         string                `json:"operation_id,omitempty"`
+	RemainingDeliveries *int64                `json:"remaining_deliveries,omitempty"`
+	Deliveries          []RelayDeliveryStatus `json:"deliveries,omitempty"`
+}
+
+// RelayDeliveryStatus is one sanitized per-delivery outcome for reusable or
+// bounded grants. It exposes only broker-observed state and the operation
+// locator — never credential bytes or recipient wire data.
+type RelayDeliveryStatus struct {
+	OperationID string    `json:"operation_id"`
+	State       string    `json:"state"`
+	Outcome     string    `json:"outcome,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
 }
 
 // NegotiatedCapabilities returns the broker's explicit capability record for
@@ -123,4 +141,18 @@ type TrustedHostClient struct {
 	Intake  any
 	Host    any
 	Session HostSessionToken
+}
+
+// BrokerSecurityConfig derives the deployment security configuration from
+// trusted broker topology facts (SP-06). This is set by the broker, not by
+// the adapter. The adapter may report host version/capabilities, but its
+// self-reported security configuration cannot establish isolation.
+func BrokerSecurityConfig(assuranceMode string, hasIntakeGroup bool) map[string]string {
+	cfg := map[string]string{
+		"assurance_mode":    assuranceMode,
+		"intake_group":      fmt.Sprintf("%t", hasIntakeGroup),
+		"separate_uid":      fmt.Sprintf("%t", assuranceMode == "isolated"),
+		"host_socket_owner": "broker_euid",
+	}
+	return cfg
 }
