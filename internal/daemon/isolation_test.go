@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/secretbridge/secretbridge/internal/harness"
@@ -56,6 +57,66 @@ func TestBestEffortReportsUnverified(t *testing.T) {
 	}
 	if got := d.svc.HostInputMode(); got != string(harness.InputExternalTTY) {
 		t.Fatalf("best-effort input mode = %q, want external_tty", got)
+	}
+}
+
+// Objective 4.4 with concurrency: the drift revocation rewrites assurance
+// state while per-connection handlers read it. Run with -race, this asserts
+// the label and the service's host facts are published safely rather than
+// torn. It is the regression test for the unsynchronized assurance fields.
+func TestDriftRevocationIsSafeUnderConcurrentReads(t *testing.T) {
+	if sandboxAncestorUntrusted() {
+		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	d, err := New(Config{
+		DBPath:      filepath.Join(dir, "m.db"),
+		SocketPath:  filepath.Join(dir, "a.sock"),
+		AdminSocket: filepath.Join(dir, "a.sock.admin"),
+		VaultType:   "memory-test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Shutdown()
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				// The reads a health call and a host registration make.
+				_ = d.svc.HostInputMode()
+				_ = d.svc.HostInputAssurance()
+				_ = d.svc.HostInputReason()
+				_ = d.srv.AssuranceLabel()
+				_, _ = d.svc.SelectNativeModeForRegistration(harness.HostKindOpenCode,
+					"2.0", "0.1", "local", nil)
+			}
+		}()
+	}
+	for i := 0; i < 50; i++ {
+		d.revokeOnDrift([]string{"synthetic drift"})
+	}
+	close(stop)
+	wg.Wait()
+
+	// The revocation is observable and honest.
+	if got := d.srv.AssuranceLabel(); got != "unverified" {
+		t.Fatalf("post-drift label = %q, want unverified", got)
+	}
+	if got := d.svc.HostInputAssurance(); got != string(intake.AssuranceUnverified) {
+		t.Fatalf("post-drift assurance = %q, want unverified", got)
 	}
 }
 

@@ -109,7 +109,23 @@ func TestHostBindingAgentDomainDenied(t *testing.T) {
 	}
 	defer svc.Close()
 
-	agentSock := filepath.Join(t.TempDir(), "agent.sock")
+	// The socket fixture needs a trusted, owner-only directory. t.TempDir()
+	// creates its parent with mode 0777 & ^umask, so under a permissive
+	// umask (e.g. 002) the group-writable ancestor would make the broker
+	// refuse to bind and the test would skip for the wrong reason. A
+	// uniquely named owner-only directory under /tmp is world-traversable
+	// but not group-writable, so the ancestor check passes whatever the
+	// umask is.
+	sockDir, err := os.MkdirTemp("/tmp", "seqpass-hostbinding-")
+	if err != nil {
+		t.Skipf("socket fixture unavailable: %v", err)
+		return
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+	if err := os.Chmod(sockDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	agentSock := filepath.Join(sockDir, "agent.sock")
 	euid := uint32(os.Geteuid())
 	auth := &UIDAuthorizer{
 		AdminUIDs:  map[uint32]bool{euid: true},

@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/secretbridge/secretbridge/internal/harness"
@@ -45,6 +46,12 @@ type Config struct {
 type Service struct {
 	db    *metadata.DB
 	vault vault.Vault // ephemeral/test only; production resolves via AegisKeys
+	// hostMu guards the broker-owned host presentation facts below. They are
+	// written by trusted wiring (startup configuration) and by the security
+	// drift path, while per-connection IPC handlers read them concurrently to
+	// answer health and host-registration calls. Without the lock the drift
+	// revocation would race those readers on a security label.
+	hostMu sync.RWMutex
 	// Broker-owned host presentation facts (HI-01/HI-07). The agent
 	// cannot set or override them.
 	hostInputMode string
@@ -173,14 +180,24 @@ func New(config Config) (*Service, error) {
 // agent method. An unqualified host-native label is rejected: host_native
 // is reserved for a future independently qualified adapter.
 // HostInputMode returns the broker-configured presentation mode.
-func (s *Service) HostInputMode() string { return s.hostInputMode }
+func (s *Service) HostInputMode() string {
+	s.hostMu.RLock()
+	defer s.hostMu.RUnlock()
+	return s.hostInputMode
+}
 
 // HostInputAssurance returns the broker-configured assurance label.
-func (s *Service) HostInputAssurance() string { return s.hostAssurance }
+func (s *Service) HostInputAssurance() string {
+	s.hostMu.RLock()
+	defer s.hostMu.RUnlock()
+	return s.hostAssurance
+}
 
 // HostInputReason explains why that label was assigned without exposing
 // or depending on agent claims.
 func (s *Service) HostInputReason() string {
+	s.hostMu.RLock()
+	defer s.hostMu.RUnlock()
 	if s.hostReason != "" {
 		return s.hostReason
 	}
@@ -198,6 +215,8 @@ func (s *Service) HostInputReason() string {
 // topologies and when security drift revokes a previously verified host
 // capability. It never enables native mode.
 func (s *Service) SetHostInputUnverified(reason string) {
+	s.hostMu.Lock()
+	defer s.hostMu.Unlock()
 	s.hostInputMode = string(harness.InputExternalTTY)
 	s.hostAssurance = string(intake.AssuranceUnverified)
 	s.hostReason = reason
@@ -206,10 +225,22 @@ func (s *Service) SetHostInputUnverified(reason string) {
 // SetHostQualification installs the broker-accepted qualification snapshot.
 // It is trusted wiring only and never copied into shared host state.
 func (s *Service) SetHostQualification(snapshot *harness.QualificationSnapshot) {
+	s.hostMu.Lock()
+	defer s.hostMu.Unlock()
 	s.hostQualification = snapshot
 }
 
+// hostQualificationSnapshot returns the current accepted snapshot for a
+// per-registration decision.
+func (s *Service) hostQualificationSnapshot() *harness.QualificationSnapshot {
+	s.hostMu.RLock()
+	defer s.hostMu.RUnlock()
+	return s.hostQualification
+}
+
 func (s *Service) SetHostInputAssurance(mode, assurance string) error {
+	s.hostMu.Lock()
+	defer s.hostMu.Unlock()
 	if assurance == string(intake.AssuranceModelBlind) && mode == string(harness.InputExternalTTY) {
 		s.hostInputMode, s.hostAssurance = mode, assurance
 		return nil

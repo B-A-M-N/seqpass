@@ -112,7 +112,13 @@ type Server struct {
 	// topology: "verified" only for a live-verified isolated deployment,
 	// otherwise "unverified". It is reported alongside the topology so a
 	// caller can never read a best-effort mode as a security guarantee.
-	AssuranceLabel string
+	//
+	// It is written by the daemon after the live boundary check succeeds and
+	// may be revoked later when the boundary drifts, while per-connection
+	// handlers read it concurrently. It is therefore guarded rather than
+	// exported as a plain field.
+	assuranceMu    sync.RWMutex
+	assuranceLabel string
 	// IntakeSocket, when non-empty, serves the trusted human-side
 	// intake domain on its own owner-only socket (QR-02/SP-TUI-04).
 	// Set before Start, like AgentGID.
@@ -172,6 +178,27 @@ func NewServer(svc *service.Service, socket, adminSock string, mapper PrincipalM
 		closed:    make(chan struct{}),
 		createdID: make(map[string]fileID),
 	}
+}
+
+// SetAssuranceLabel publishes the honest assurance classification for the
+// running topology. It is trusted daemon wiring: the label may only read
+// "verified" after the live boundary check has passed, and the daemon revokes
+// it when that boundary later drifts. Safe to call while handlers are serving.
+func (s *Server) SetAssuranceLabel(label string) {
+	s.assuranceMu.Lock()
+	s.assuranceLabel = label
+	s.assuranceMu.Unlock()
+}
+
+// AssuranceLabel reports the current classification. An unset label is
+// reported as "unverified": absence of evidence is never a guarantee.
+func (s *Server) AssuranceLabel() string {
+	s.assuranceMu.RLock()
+	defer s.assuranceMu.RUnlock()
+	if s.assuranceLabel == "" {
+		return "unverified"
+	}
+	return s.assuranceLabel
 }
 
 // listenUnix hardens the socket lifecycle (F02/C02/C09):
@@ -592,10 +619,7 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 		if mode == "" {
 			mode = "best-effort"
 		}
-		label := s.AssuranceLabel
-		if label == "" {
-			label = "unverified"
-		}
+		label := s.AssuranceLabel()
 		return Response{OK: true, Data: map[string]string{
 			"status": "ok", "assurance_mode": mode, "assurance": label,
 			"input_mode": s.svc.HostInputMode(), "input_reason": s.svc.HostInputReason(),

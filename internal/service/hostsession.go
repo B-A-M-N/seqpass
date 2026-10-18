@@ -183,10 +183,11 @@ func (s *Service) HostSessionAuth(sessionID, token string) (*types.HostSession, 
 // the stronger surface; it never widens what is offered and never upgrades
 // assurance.
 func (s *Service) SelectNativeModeForRegistration(hostKind harness.HostSessionKind, hostVersion, adapterVersion, topology string, securityConfig map[string]string) (harness.NativeModeDecision, error) {
+	snapshot := s.hostQualificationSnapshot()
 	if s.cfg.RequireVerifiedHostIsolation {
-		return harness.SelectNativeModeRequiringIsolation(s.hostQualification, hostKind, hostVersion, adapterVersion, topology, securityConfig, time.Now())
+		return harness.SelectNativeModeRequiringIsolation(snapshot, hostKind, hostVersion, adapterVersion, topology, securityConfig, time.Now())
 	}
-	return harness.SelectNativeMode(s.hostQualification, hostKind, hostVersion, adapterVersion, topology, securityConfig, time.Now())
+	return harness.SelectNativeMode(snapshot, hostKind, hostVersion, adapterVersion, topology, securityConfig, time.Now())
 }
 
 // BindRelayHost attaches an already authenticated relay to an already

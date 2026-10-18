@@ -14,9 +14,16 @@ import (
 // sandboxAncestorUntrusted reports whether this sandbox exposes a
 // high-level ancestor (e.g. /home) as nobody:nogroup. The broker refuses
 // such ancestors by design, so socket-based tests must skip there.
+//
+// It probes by asking for a real test runtime directory, then removes it: a
+// probe must not leak the directory it created.
 func sandboxAncestorUntrusted() bool {
-	_, err := testruntime.Dir(testruntime.NamedFunc("sandboxAncestorUntrusted"))
-	return err != nil
+	dir, err := testruntime.Dir(testruntime.NamedFunc("sandboxAncestorUntrusted"))
+	if err != nil {
+		return true
+	}
+	_ = os.RemoveAll(dir)
+	return false
 }
 
 // G05: two brokers cannot own one database. The second is refused before

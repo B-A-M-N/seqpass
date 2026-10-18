@@ -318,7 +318,7 @@ func New(cfg Config) (*Daemon, error) {
 	// upgraded only after the live boundary check below proves the running
 	// topology. This closes the window between binding sockets and verifying
 	// them, during which a health call must not read a guarantee.
-	srv.AssuranceLabel = isolation.LabelUnverified
+	srv.SetAssuranceLabel(isolation.LabelUnverified)
 	// HI-05: qualification is accepted only as a complete record. Empty
 	// configuration remains fail-closed external TTY/model-blind.
 	if !cfg.HostQualification.QualifiedAt.IsZero() || cfg.HostQualification.Status != "" {
@@ -461,7 +461,7 @@ func New(cfg Config) (*Daemon, error) {
 		}
 		// The running topology is verified: the honest label may now be
 		// upgraded, and remains revocable if the boundary later drifts.
-		srv.AssuranceLabel = label
+		srv.SetAssuranceLabel(label)
 	} else {
 		// best-effort is never advertised as verified (objective 4.1).
 		svc.SetHostInputUnverified("best-effort topology: same-UID operation does not establish a boundary against an agent with local shell access")
@@ -646,7 +646,7 @@ func (d *Daemon) revokeOnDrift(drift []string) {
 	d.svc.SetHostQualification(nil)
 	d.svc.SetHostInputUnverified(reason)
 	if d.srv != nil {
-		d.srv.AssuranceLabel = isolation.LabelUnverified
+		d.srv.SetAssuranceLabel(isolation.LabelUnverified)
 	}
 	if db := d.svc.DB(); db != nil {
 		_ = db.WriteAuditLog(&types.AuditLog{

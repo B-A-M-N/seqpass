@@ -130,6 +130,33 @@ func TestDoctorDetectsAccessibleProtectedObject(t *testing.T) {
 	}
 }
 
+// The doctor must not claim terminal isolation: that is a property of the
+// specific terminal the human types into, decided by host qualification, and
+// it cannot be observed from the agent's process. Claiming it would let
+// VerifiedProperties.Complete report agent_isolated from an unproven fact.
+func TestDoctorDoesNotClaimTerminalIsolation(t *testing.T) {
+	agent := uint32(65533)
+	if agent == uint32(os.Geteuid()) {
+		t.Skip("agent uid collides with the test identity")
+	}
+	rep, err := Doctor(Config{
+		AssuranceMode: ModeIsolated,
+		BrokerUID:     uint32(os.Geteuid()),
+		AgentUIDs:     []uint32{agent},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Properties.TerminalIsolated {
+		t.Fatalf("doctor claimed terminal isolation it cannot verify: %+v", rep.Properties)
+	}
+	// Every other property may be reported from live evidence, but the
+	// incomplete set must never read as complete.
+	if rep.Properties.Complete() {
+		t.Fatalf("incomplete properties reported complete: %+v", rep.Properties)
+	}
+}
+
 // A broker-owned protected object that does not exist must not be scored as
 // though the agent were denied access to it.
 func TestDoctorMissingBrokerOwnedObjectFails(t *testing.T) {
