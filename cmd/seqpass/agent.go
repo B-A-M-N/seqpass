@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -110,11 +111,22 @@ func agentStatus(args []string) {
 		os.Exit(1)
 	}
 	data := agentCall(ipc.MethodRelayStatus, map[string]interface{}{"request_id": *reqID})
+	if err := reportAgentStatus(*reqID, data); err != nil {
+		fatal(err.Error())
+	}
+}
+
+// reportAgentStatus turns a relay.status payload into the agent-visible event
+// and summary. The broker response is untrusted at this boundary, so the
+// decision is separated from the I/O and tested directly: an unqualified
+// state is never reported (fail closed), and credential-bearing fields are
+// scrubbed before anything is emitted.
+func reportAgentStatus(reqID string, data interface{}) error {
 	m := mapOf(data)
 	state, err := adapter.Normalize(strField(m, "status"))
 	if err != nil {
 		// Fail closed: an unqualified broker state is never reported.
-		fatal("broker reported an unqualified request state")
+		return errors.New("broker reported an unqualified request state")
 	}
 	sanitized := adapter.Scrub(m)
 	sanitized["status"] = string(state)
@@ -122,13 +134,14 @@ func agentStatus(args []string) {
 	sanitized["succeeded"] = state.Succeeded()
 	emitEvent(adapter.Event{
 		Type:       adapter.EventStateChanged,
-		RequestID:  *reqID,
+		RequestID:  reqID,
 		State:      state,
 		Outcome:    strField(m, "outcome"),
 		NextAction: strField(m, "next_action"),
 		Assurance:  strField(m, "input_assurance"),
 	})
 	printJSON(sanitized)
+	return nil
 }
 
 func agentCancel(args []string) {
