@@ -8,8 +8,12 @@
 // through a hidden field that is never echoed (so neither the value nor its
 // length reaches the terminal transcript) and is zeroed after submission.
 //
-// stdlib-only: raw key input is driven through /dev/tty with the terminal
-// mode saved and restored on every exit path, including a termination
+// Terminal handling uses golang.org/x/term for raw mode and state save and
+// restore; every other byte of the protocol (key input, escape sequences,
+// bracketed paste) is decoded in this package.
+//
+// Raw key input is driven through /dev/tty with the terminal mode saved and
+// restored on every exit path, including a termination
 // signal — the signal path unwinds the same defers rather than exiting the
 // process from a goroutine.
 package tui
@@ -141,6 +145,23 @@ type session struct {
 	// outcome or an action failure). Without it the next poll overwrites the
 	// one line that explains what just happened.
 	stickyUntil time.Time
+	// termSignal holds a termination request that arrived while a prompt had
+	// the input reader. A prompt must abort on it, and the loop must then end
+	// the session with InterruptError: swallowing the signal would leave the
+	// terminal in raw mode until a supervisor escalates to SIGKILL, which
+	// skips every restore.
+	termSignal os.Signal
+}
+
+// interrupted reports and clears a termination request that a prompt
+// absorbed, if any. Clearing keeps the recorded signal from being re-read as
+// a fresh verdict later in the same session.
+func (s *session) interrupted() error {
+	if sig := s.termSignal; sig != nil {
+		s.termSignal = nil
+		return &InterruptError{Signal: sigNum(sig)}
+	}
+	return nil
 }
 
 // stickyDuration is how long an operator-action status survives polling.
@@ -263,9 +284,19 @@ func (s *session) loop() error {
 		case 'R':
 			s.refresh()
 		case 'r':
-			s.doReject()
+			if err := s.doReject(); err != nil {
+				return err
+			}
 		case '\r', '\n':
-			s.doFulfill()
+			if err := s.doFulfill(); err != nil {
+				return err
+			}
+		}
+		// A termination request absorbed by a prompt ends the session through
+		// the same unwind as a signal in the loop itself.
+		if err := s.interrupted(); err != nil {
+			s.clearScreen()
+			return err
 		}
 	}
 }
@@ -327,19 +358,22 @@ func (s *session) refresh() {
 	s.setTransient(fmt.Sprintf("%d pending — auto-refresh %s", len(items), s.cfg.PollInterval))
 }
 
-func (s *session) doReject() {
+func (s *session) doReject() error {
 	if len(s.items) == 0 {
-		return
+		return nil
 	}
 	it := s.items[s.sel]
 	if !s.confirm("Reject " + neutralize(it.id) + "? [y/N]: ") {
+		if err := s.interrupted(); err != nil {
+			return err
+		}
 		s.setSticky("reject cancelled")
-		return
+		return nil
 	}
 	cli, err := s.dial()
 	if err != nil {
 		s.setSticky("broker unreachable")
-		return
+		return nil
 	}
 	defer cli.Close()
 	if _, err := cli.Call(ipc.MethodIntakeReject, map[string]interface{}{
@@ -347,36 +381,45 @@ func (s *session) doReject() {
 		"request_revision": it.revision,
 	}); err != nil {
 		s.setSticky("reject failed: " + err.Error())
-		return
+		return nil
 	}
 	s.setSticky("rejected " + neutralize(it.id))
 	s.refresh()
+	return nil
 }
 
-func (s *session) doFulfill() {
+func (s *session) doFulfill() error {
 	if len(s.items) == 0 {
-		return
+		return nil
 	}
 	it := s.items[s.sel]
 	s.renderDetail(it)
 	secret, err := s.readMasked("Value for " + neutralize(it.kind) + " (hidden, not echoed; Enter accepts, Ctrl+C cancels): ")
 	if err != nil {
+		// A termination request absorbed by the prompt must end the session,
+		// not be misread as the operator declining.
+		if ie := s.interrupted(); ie != nil {
+			return ie
+		}
 		s.setSticky("cancelled: no payload sent")
-		return
+		return nil
 	}
 	defer clearBytes(secret)
 	if len(secret) == 0 {
 		s.setSticky("empty value refused")
-		return
+		return nil
 	}
 	if !s.confirm("Deliver to " + neutralize(it.dest) + "? [y/N]: ") {
+		if ie := s.interrupted(); ie != nil {
+			return ie
+		}
 		s.setSticky("declined: no payload sent")
-		return
+		return nil
 	}
 	cli, err := s.dial()
 	if err != nil {
 		s.setSticky("broker unreachable")
-		return
+		return nil
 	}
 	defer cli.Close()
 	res, err := cli.Call(ipc.MethodIntakeFulfill, map[string]interface{}{
@@ -386,7 +429,7 @@ func (s *session) doFulfill() {
 	})
 	if err != nil {
 		s.setSticky("fulfill failed: " + err.Error())
-		return
+		return nil
 	}
 	m, _ := res.(map[string]interface{})
 	// The outcome is sticky: the next poll must not replace it with the
@@ -396,6 +439,7 @@ func (s *session) doFulfill() {
 	// then poll: the sticky status survives the poll.
 	s.render()
 	s.refresh()
+	return nil
 }
 
 // render draws the inbox. It never prints secret material: this view only
@@ -432,7 +476,9 @@ func (s *session) renderDetail(it item) {
 }
 
 // confirm reads a y/N answer through the shared input channel, so no
-// bytes are stranded in a second reader between prompts.
+// bytes are stranded in a second reader between prompts. A termination
+// request is recorded on the session: the caller checks it and ends the
+// session, so a signal cannot be mistaken for the operator answering no.
 func (s *session) confirm(prompt string) bool {
 	fmt.Fprint(s.tty, "\r\n"+prompt)
 	var line []byte
@@ -440,9 +486,10 @@ func (s *session) confirm(prompt string) bool {
 		var c byte
 		var ok bool
 		select {
-		case <-s.term:
+		case sig := <-s.term:
 			// A termination request must abort a pending prompt, not be
-			// queued behind it.
+			// queued behind it or read as a "no".
+			s.termSignal = sig
 			return false
 		case <-s.inputEnd:
 			return false
@@ -475,7 +522,10 @@ func (s *session) readMasked(prompt string) ([]byte, error) {
 		var c byte
 		var ok bool
 		select {
-		case <-s.term:
+		case sig := <-s.term:
+			// Record the signal so the caller ends the session: returning
+			// ErrInterrupted alone would read as an operator cancel.
+			s.termSignal = sig
 			clearBytes(st.buf)
 			return nil, ErrInterrupted
 		case <-s.inputEnd:

@@ -83,6 +83,15 @@ type Deployment struct {
 	NoRelayAutoDeliver bool
 }
 
+// EnvEndpoint returns the operator's environment override for one endpoint,
+// or "" when unset. Every command resolves its socket the same way: an
+// explicit flag, then the environment, then the shared default — so a client
+// cannot end up on a different installation than the broker it was started
+// with. Only endpoints are env-overridable, never identities.
+func EnvEndpoint(name string) string {
+	return os.Getenv(name)
+}
+
 // Defaults returns the single-user development installation under
 // ~/.seqpass. It is what every command uses when no path is given, so the
 // broker and the CLIs that talk to it cannot drift apart.
@@ -134,17 +143,18 @@ func ParseUIDs(s string) ([]uint32, error) {
 	return out, nil
 }
 
-// ApplyEnv overlays the endpoint environment overrides. It only fills
-// endpoints, never identities: an attacker-controlled environment must not be
-// able to widen who is authorized.
+// ApplyEnv overlays the endpoint environment overrides onto the deployment.
+// It only fills endpoints, never identities: an attacker-controlled
+// environment must not be able to widen who is authorized. Call it after the
+// flags are parsed, before validation.
 func (d *Deployment) ApplyEnv() {
-	if v := os.Getenv(EnvSocket); v != "" {
+	if v := EnvEndpoint(EnvSocket); v != "" {
 		d.SocketPath = v
 	}
-	if v := os.Getenv(EnvAdminSocket); v != "" {
+	if v := EnvEndpoint(EnvAdminSocket); v != "" {
 		d.AdminSocket = v
 	}
-	if v := os.Getenv(EnvIntakeSocket); v != "" {
+	if v := EnvEndpoint(EnvIntakeSocket); v != "" {
 		d.IntakeSocket = v
 	}
 }

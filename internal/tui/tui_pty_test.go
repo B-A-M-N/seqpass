@@ -313,6 +313,78 @@ func TestTUITerminationRestoresTerminal(t *testing.T) {
 	}
 }
 
+// F06: a termination signal that arrives while the hidden-value prompt is
+// active must end the session, not be absorbed as an operator cancel. The
+// previous behavior kept the session alive with the terminal in raw mode,
+// which a supervisor would then have to end with SIGKILL — skipping every
+// restore.
+func TestTUITerminationDuringPromptEndsSession(t *testing.T) {
+	if os.Getenv("CI") != "" {
+		t.Skip("no pty in CI")
+	}
+	svc, intake := testBroker(t)
+	reqID, err := svc.RelayRequest("uid:agent-9", "rd1", "password", "sigterm in prompt", 0, "single_dispatch", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pt, err := ptytest.Open()
+	if err != nil {
+		t.Skipf("no pty: %v", err)
+	}
+	defer pt.Close()
+
+	before, err := ptytest.EchoOn(pt.Slave)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !before {
+		t.Skip("pty fixture starts without ECHO")
+	}
+
+	term := make(chan os.Signal, 1)
+	winch := make(chan os.Signal, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- runOnFile(Config{IntakeSocket: intake, PollInterval: 100 * time.Millisecond}, pt.Slave, winch, term)
+	}()
+	if out := pt.WaitFor(reqID, 10*time.Second); !bytes.Contains(out, []byte(reqID)) {
+		t.Fatalf("request never rendered: %q", out)
+	}
+	if _, err := pt.Master.Write([]byte("\r")); err != nil {
+		t.Fatal(err)
+	}
+	if out := pt.WaitFor("Value for", 10*time.Second); !bytes.Contains(out, []byte("Value for")) {
+		t.Fatalf("hidden prompt never shown: %q", out)
+	}
+	// Deliver the signal while the prompt owns the reader.
+	term <- syscall.SIGTERM
+	select {
+	case err := <-done:
+		var ie *InterruptError
+		if !errors.As(err, &ie) {
+			t.Fatalf("termination during prompt returned %v, want *InterruptError", err)
+		}
+		if ie.Signal != syscall.SIGTERM {
+			t.Fatalf("signal = %v, want SIGTERM", ie.Signal)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("session kept running after a termination signal during a prompt")
+	}
+	// Nothing was submitted: the request must still be pending, because a
+	// signal must never become an authorization.
+	got, err := svc.DB().GetRelay(reqID)
+	if err != nil || got == nil {
+		t.Fatal("relay row lost")
+	}
+	if got.State != types.RelayAwaitingUser {
+		t.Fatalf("relay state = %s, want still awaiting user", got.State)
+	}
+	// And the terminal is restored, so the escalation path is never needed.
+	if on, err := ptytest.EchoOn(pt.Slave); err != nil || !on {
+		t.Fatalf("terminal left in raw mode after termination during prompt (echo=%v err=%v)", on, err)
+	}
+}
+
 // F06: Ctrl+C at the inbox quits cleanly, submitting nothing.
 func TestTUICtrlCQuits(t *testing.T) {
 	if os.Getenv("CI") != "" {

@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/secretbridge/secretbridge/internal/config"
 	"github.com/secretbridge/secretbridge/internal/ipc"
 	"golang.org/x/term"
 )
@@ -28,7 +29,7 @@ func resolveIntakeSocket(explicit string) string {
 	if explicit != "" {
 		return explicit
 	}
-	if env := os.Getenv("SEQ_PASS_INTAKE_SOCKET"); env != "" {
+	if env := config.EnvEndpoint(config.EnvIntakeSocket); env != "" {
 		return env
 	}
 	_, _, _, di := defaultPaths()
@@ -36,7 +37,7 @@ func resolveIntakeSocket(explicit string) string {
 }
 
 func resolveAgentSocket() string {
-	if env := os.Getenv("SEQ_PASS_SOCKET"); env != "" {
+	if env := config.EnvEndpoint(config.EnvSocket); env != "" {
 		return env
 	}
 	_, sock, _, _ := defaultPaths()

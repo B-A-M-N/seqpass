@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/secretbridge/secretbridge/internal/config"
 	"github.com/secretbridge/secretbridge/internal/harness"
 	"github.com/secretbridge/secretbridge/internal/intake"
 	"github.com/secretbridge/secretbridge/internal/ipc"
@@ -565,24 +566,30 @@ func (d *Daemon) protectedPaths() []string {
 	return paths
 }
 
-// isolationConfig builds the live doctor input for this broker.
+// isolationConfigFor builds the live doctor input for this broker.
+//
+// The field mapping itself lives in config.Deployment.Isolation, the single
+// mapping shared with `seqpass doctor --topology`, so a preflight verdict and
+// a startup verdict are always about the same system. This wrapper exists
+// because the broker's Config is a different (richer) type than the shared
+// Deployment, and because the live check needs the real PID. The claim is
+// passed through untouched: New resolves the default before the first check,
+// so the mapping's defaulting must never re-derive a different mode.
 func isolationConfigFor(cfg Config) isolation.Config {
-	return isolation.Config{
-		AssuranceMode:   cfg.AssuranceMode,
-		BrokerUID:       uint32(os.Geteuid()),
-		BrokerGID:       uint32(os.Getegid()),
-		AgentUIDs:       cfg.AgentUIDs,
-		IntakeUIDs:      cfg.IntakeUIDs,
-		AdminUIDs:       cfg.AdminUIDs,
-		AgentSocket:     cfg.SocketPath,
+	dep := config.Deployment{
+		DBPath:          cfg.DBPath,
+		SocketPath:      cfg.SocketPath,
 		AdminSocket:     cfg.AdminSocket,
 		IntakeSocket:    cfg.IntakeSocket,
 		HostSocket:      cfg.HostSocket,
-		DBPath:          cfg.DBPath,
+		AssuranceMode:   cfg.AssuranceMode,
+		AdminUIDs:       cfg.AdminUIDs,
+		AgentUIDs:       cfg.AgentUIDs,
+		IntakeUIDs:      cfg.IntakeUIDs,
 		AegisKeysDir:    cfg.AegisKeysDir,
 		AegisKeysSocket: cfg.AegisKeysSocket,
-		BrokerPID:       os.Getpid(),
 	}
+	return dep.Isolation(os.Getpid())
 }
 
 // isolationDoctor runs the live boundary check. It is a package variable so

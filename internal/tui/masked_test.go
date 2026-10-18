@@ -74,6 +74,18 @@ func TestMaskedInputBracketedPasteNewlineDoesNotSubmit(t *testing.T) {
 	if got := mustDecode(t, in); !bytes.Equal(got, []byte("line1\nline2")) {
 		t.Fatalf("multi-line paste decoded to %q", got)
 	}
+	// A multi-line paste keeps its interior newlines but loses the trailing
+	// run, which is what copying a block out of an editor appends.
+	in = []byte("\x1b[200~line1\nline2\n\n\x1b[201~\r")
+	if got := mustDecode(t, in); !bytes.Equal(got, []byte("line1\nline2")) {
+		t.Fatalf("block paste decoded to %q", got)
+	}
+	// A value that genuinely ends in newlines cannot be distinguished from
+	// editor copy behavior, so the trim is total at paste end.
+	in = []byte("\x1b[200~tok\n\n\x1b[201~\r")
+	if got := mustDecode(t, in); !bytes.Equal(got, []byte("tok")) {
+		t.Fatalf("paste decoded to %q", got)
+	}
 }
 
 func TestMaskedInputEscapeSequencesAreDiscarded(t *testing.T) {

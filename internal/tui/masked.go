@@ -1,3 +1,6 @@
+// masked.go is part of the trusted intake TUI (package tui): the hidden-field
+// decoder for the operator's own terminal.
+
 package tui
 
 import (
@@ -124,7 +127,9 @@ func (m *maskedInput) feedEscape(c byte) {
 			m.paste = false
 			// A line copied out of an editor ends with its newline; keeping
 			// it would corrupt the value the operator believes they pasted.
-			m.trimPastedTrailingNewline()
+			// Multi-line pastes keep their interior newlines, so only the
+			// trailing run is removed.
+			m.trimPastedTrailingNewlines()
 		}
 		return
 	}
@@ -175,10 +180,12 @@ func (m *maskedInput) backspace() {
 	m.buf = m.buf[:i]
 }
 
-func (m *maskedInput) trimPastedTrailingNewline() {
-	if n := len(m.buf); n > 0 && m.buf[n-1] == '\n' {
-		m.buf = m.buf[:n-1]
+func (m *maskedInput) trimPastedTrailingNewlines() {
+	n := len(m.buf)
+	for n > 0 && m.buf[n-1] == '\n' {
+		n--
 	}
+	m.buf = m.buf[:n]
 }
 
 // feedAll drives a byte slice through the decoder, for tests and for any

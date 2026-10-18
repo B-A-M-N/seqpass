@@ -169,7 +169,7 @@ func mcpCmd(args []string) {
 	_, sock, _, _ := defaultPaths()
 	sockF := fs.String("socket", sock, "Broker socket")
 	_ = fs.Parse(args)
-	if env := os.Getenv("SEQ_PASS_SOCKET"); env != "" {
+	if env := config.EnvEndpoint(config.EnvSocket); env != "" {
 		*sockF = env
 	}
 	srv := mcpserver.NewServer(*sockF)
@@ -181,7 +181,7 @@ func mcpCmd(args []string) {
 }
 
 func adminSock() string {
-	if env := os.Getenv("SEQ_PASS_ADMIN_SOCKET"); env != "" {
+	if env := config.EnvEndpoint(config.EnvAdminSocket); env != "" {
 		return env
 	}
 	_, _, admin, _ := defaultPaths()
@@ -483,7 +483,7 @@ func hostBindingCmd(args []string, cli *ipc.Client) {
 
 func statusCmd(args []string) {
 	_ = args
-	sock := os.Getenv("SEQ_PASS_SOCKET")
+	sock := config.EnvEndpoint(config.EnvSocket)
 	if sock == "" {
 		_, sock, _, _ = defaultPaths()
 	}
@@ -508,7 +508,7 @@ func statusCmd(args []string) {
 func tuiCmd(args []string) {
 	fs := flag.NewFlagSet("tui", flag.ExitOnError)
 	_, _, _, di := defaultPaths()
-	if env := os.Getenv("SEQ_PASS_INTAKE_SOCKET"); env != "" {
+	if env := config.EnvEndpoint(config.EnvIntakeSocket); env != "" {
 		di = env
 	}
 	intakeF := fs.String("intake-socket", di, "Broker intake socket")
@@ -647,7 +647,7 @@ func healthVerified(data interface{}) bool {
 // broker. It never generates, stores or prints a credential.
 func initCmd(args []string) {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
-	dbDefault, sock, admin, intake := defaultPaths()
+	dbDefault, _, _, _ := defaultPaths()
 	dbF := fs.String("db", dbDefault, "database path")
 	vaultF := fs.String("vault", config.VaultAegisKeys, "vault type: aegiskeys (production) or memory-test (development, requires --dev)")
 	devF := fs.Bool("dev", false, "development-only acknowledgement for the memory-test vault")
@@ -707,6 +707,18 @@ func initCmd(args []string) {
 	fmt.Printf("assurance:       %s%s\n", d.EffectiveAssurance(), map[bool]string{true: " (default)", false: ""}[*assuranceF == ""])
 	fmt.Println()
 	fmt.Println("Next steps (run the broker as the dedicated service UID):")
+	printNextSteps(d)
+}
+
+// printNextSteps writes the exact broker and doctor commands for the chosen
+// topology. It is separated from initCmd so the printed text can be tested:
+// these lines are the installation, and a missing flag in them is a broken
+// installation the operator pastes verbatim.
+func printNextSteps(d config.Deployment) {
+	_, sock, admin, intake := defaultPaths()
+	// The printed commands must run as printed: the development acknowledgement
+	// is required by both the broker and the doctor, whichever claim is used.
+	devFlag := map[bool]string{true: " --dev", false: ""}[d.VaultType == config.VaultMemoryTest]
 	var idFlags string
 	if d.SocketGroup != "" {
 		idFlags += " --socket-group " + d.SocketGroup
@@ -721,13 +733,15 @@ func initCmd(args []string) {
 		idFlags += " --admin-uid " + joinUIDs(d.AdminUIDs)
 	}
 	if d.EffectiveAssurance() == config.AssuranceIsolated {
-		fmt.Printf("  seqpass broker --vault %s --assurance isolated --db %s --socket %s \\\n", d.VaultType, d.DBPath, sock)
+		fmt.Printf("  seqpass broker --vault %s%s --assurance isolated --db %s --socket %s \\\n", d.VaultType, devFlag, d.DBPath, sock)
 		fmt.Printf("    --admin-socket %s --intake-socket %s%s\n", admin, intake, idFlags)
 	} else {
-		fmt.Printf("  seqpass broker --vault %s --dev --assurance best-effort --db %s --socket %s\n", d.VaultType, d.DBPath, sock)
+		// Best-effort still carries the identities the operator declared, so
+		// the printed command cannot quietly narrow the authorization to
+		// euid-only.
+		fmt.Printf("  seqpass broker --vault %s%s --assurance best-effort --db %s --socket %s%s\n", d.VaultType, devFlag, d.DBPath, sock, idFlags)
 	}
-	fmt.Printf("  seqpass doctor --topology --vault %s%s --db %s%s\n", d.VaultType,
-		map[bool]string{true: " --dev", false: ""}[d.VaultType == config.VaultMemoryTest], d.DBPath, idFlags)
+	fmt.Printf("  seqpass doctor --topology --vault %s%s --db %s%s\n", d.VaultType, devFlag, d.DBPath, idFlags)
 	fmt.Println()
 	fmt.Println("Then register the adapter: seqpass mcp (Codex/Claude/Hermes) or seqpass agent.")
 }
