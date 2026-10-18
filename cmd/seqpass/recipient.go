@@ -28,7 +28,7 @@ func recipientCmd(args []string) {
 	sock := fs.String("socket", "", "recipient Unix socket path (required)")
 	journalDir := fs.String("journal", "", "durable plaintext-free operation journal directory (required)")
 	consumerDir := fs.String("consumer-dir", "", "file consumer destination directory (required for --consumer file)")
-	mode := fs.String("consumer", "reference", "consumer mode: file|reference")
+	mode := fs.String("consumer", "", "consumer mode (required): file (commits and verifies the credential) or reference (metadata-only fixture that applies nothing)")
 	sockMode := fs.Uint("socket-mode", 0600, "socket permission bits (octal)")
 	socketUID := fs.Int("socket-uid", 0, "socket owner UID (>0 to set; requires privilege)")
 	socketGID := fs.Int("socket-gid", 0, "socket group GID (>0 to set; requires privilege)")
@@ -37,6 +37,13 @@ func recipientCmd(args []string) {
 
 	if *sock == "" || *journalDir == "" {
 		fmt.Fprintln(os.Stderr, "recipient: --socket and --journal are required")
+		os.Exit(2)
+	}
+	// The consumer must be chosen explicitly: silently defaulting to the
+	// metadata-only fixture would durably journal acceptance for a
+	// credential that was never applied.
+	if *mode == "" {
+		fmt.Fprintln(os.Stderr, "recipient: --consumer is required (file or reference); there is no default")
 		os.Exit(2)
 	}
 

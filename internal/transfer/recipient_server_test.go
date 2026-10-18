@@ -61,6 +61,22 @@ func writeRequest(t *testing.T, conn net.Conn, req interface{}) {
 	}
 }
 
+// writeRequestTolerant writes a framed request without failing the test when
+// the peer has already closed. A refused caller is expected to see either a
+// broken pipe on write or an EOF on read.
+func writeRequestTolerant(conn net.Conn, req interface{}) (int, error) {
+	frame, err := json.Marshal(req)
+	if err != nil {
+		return 0, err
+	}
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(frame)))
+	if n, err := conn.Write(lenBuf[:]); err != nil {
+		return n, err
+	}
+	return conn.Write(frame)
+}
+
 func readResponse(t *testing.T, conn net.Conn) map[string]interface{} {
 	t.Helper()
 	var lenBuf [4]byte
@@ -78,7 +94,6 @@ func readResponse(t *testing.T, conn net.Conn) map[string]interface{} {
 	}
 	return resp
 }
-
 func readFullN(conn net.Conn, buf []byte) (int, error) {
 	total := 0
 	for total < len(buf) {
@@ -203,6 +218,102 @@ func TestRecipientServerRejectsUnknownVersion(t *testing.T) {
 	}
 	if records, _ := consumer.journal.List(); len(records) != 0 {
 		t.Fatalf("unknown version journalled: %+v", records)
+	}
+}
+
+// The server-side caller allowlist is enforced before any frame is read: a
+// caller whose OS identity is not listed is refused, and nothing is
+// journalled.
+func TestRecipientServerRefusesUntrustedCallerUID(t *testing.T) {
+	server := func(t *testing.T, trusted []uint32) (*ReferenceRecipient, string) {
+		t.Helper()
+		dir, err := os.MkdirTemp("", "seqpass-recipient-")
+		if err != nil {
+			t.Skipf("no temp dir: %v", err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		if err := os.Chmod(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		journal, err := NewOperationJournal(filepath.Join(dir, "records"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		consumer, err := NewReferenceRecipient(journal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sock := filepath.Join(dir, "recipient.sock")
+		srv, err := NewRecipientServer(RecipientServerConfig{
+			SocketPath:        sock,
+			Consumer:          consumer,
+			TrustedCallerUIDs: trusted,
+		})
+		if err != nil {
+			t.Skipf("unix socket unavailable: %v", err)
+		}
+		go srv.Serve()
+		t.Cleanup(func() { _ = srv.Close() })
+		return consumer, sock
+	}
+
+	// A caller identity that is not the recipient's own UID must be refused
+	// before the payload is even read. The refusal may surface either as a
+	// write failure (the peer already closed) or as a read failure.
+	foreign := uint32(os.Geteuid()) + 1
+	consumer, sock := server(t, []uint32{foreign})
+	conn := dialRecipient(t, sock)
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	payload := []byte("payload")
+	_, _ = writeRequestTolerant(conn, map[string]interface{}{
+		"v": 1, "op_id": "opdenied", "digest": PayloadDigest(payload), "payload": string(payload),
+	})
+	var lenBuf [4]byte
+	if _, err := readFullN(conn, lenBuf[:]); err == nil {
+		t.Fatal("untrusted caller received a response instead of being refused")
+	}
+	_ = conn.Close()
+	if records, _ := consumer.journal.List(); len(records) != 0 {
+		t.Fatalf("untrusted caller's delivery was journalled: %+v", records)
+	}
+
+	// Listing the caller's real identity is the positive control: the same
+	// frame is accepted.
+	consumer2, sock2 := server(t, []uint32{uint32(os.Geteuid())})
+	conn2 := dialRecipient(t, sock2)
+	writeRequest(t, conn2, map[string]interface{}{
+		"v": 1, "op_id": "opallowed", "digest": PayloadDigest(payload), "payload": string(payload),
+	})
+	resp := readResponse(t, conn2)
+	if resp["accepted"] != true {
+		t.Fatalf("allowlisted caller refused: %+v", resp)
+	}
+	_ = conn2.Close()
+	if records, _ := consumer2.journal.List(); len(records) != 1 {
+		t.Fatalf("allowlisted delivery not journalled: %+v", records)
+	}
+}
+
+// Accept backoff is bounded and resets, so a saturated accept loop cannot
+// spin at full speed.
+func TestNextAcceptBackoffBounded(t *testing.T) {
+	d := time.Duration(0)
+	prev := time.Duration(0)
+	for i := 0; i < 40; i++ {
+		d = nextAcceptBackoff(d)
+		if d <= 0 {
+			t.Fatalf("backoff not positive at step %d", i)
+		}
+		if d > time.Second {
+			t.Fatalf("backoff exceeded its bound: %v", d)
+		}
+		if i > 0 && d < prev {
+			t.Fatalf("backoff decreased without a successful accept: %v -> %v", prev, d)
+		}
+		prev = d
+	}
+	if nextAcceptBackoff(time.Second) != time.Second {
+		t.Fatal("backoff did not saturate at its bound")
 	}
 }
 

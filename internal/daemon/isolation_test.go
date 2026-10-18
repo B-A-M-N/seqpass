@@ -8,6 +8,7 @@ import (
 
 	"github.com/secretbridge/secretbridge/internal/harness"
 	"github.com/secretbridge/secretbridge/internal/intake"
+	"github.com/secretbridge/secretbridge/internal/isolation"
 )
 
 // Objective 4.1: a production (AegisKeys) installation defaults to strict
@@ -111,5 +112,117 @@ func TestAssuranceLabelMapping(t *testing.T) {
 	}
 	if AssuranceLabel(AssuranceIsolated) == "unverified" {
 		t.Fatal("isolated topology labelled unverified")
+	}
+}
+
+// Objective 4.2: the refusal must come from the LIVE boundary check, not only
+// from configuration validation. The doctor is stubbed here so the refusal
+// path is provable without a privileged multi-UID host.
+func TestIsolatedRefusalComesFromTheLiveBoundaryCheck(t *testing.T) {
+	original := isolationDoctor
+	t.Cleanup(func() { isolationDoctor = original })
+
+	unverified := isolation.Report{
+		Mode: isolation.ModeIsolated,
+		Checks: []isolation.Check{
+			{Name: "agent_denied_broker_database", OK: false, Detail: "agent uid 65533 can access /db (world readable)"},
+			{Name: "identity_disjoint", OK: true, Detail: "ok"},
+		},
+		Verified: false,
+	}
+	isolationDoctor = func(isolation.Config) (*isolation.Report, error) { return &unverified, nil }
+
+	label, err := assessIsolation(Config{AssuranceMode: AssuranceIsolated})
+	if err == nil {
+		t.Fatalf("unverified live topology was accepted (label %q)", label)
+	}
+	if !strings.Contains(err.Error(), "live isolation check failed") {
+		t.Fatalf("refusal does not name the live check: %v", err)
+	}
+	if !strings.Contains(err.Error(), "agent_denied_broker_database") {
+		t.Fatalf("refusal does not name the failing boundary: %v", err)
+	}
+	if label != "" {
+		t.Fatalf("a refused startup published an assurance label: %q", label)
+	}
+
+	// The positive control: only a verified report yields the verified label.
+	verified := unverified
+	verified.Verified = true
+	verified.Checks = []isolation.Check{{Name: "identity_disjoint", OK: true}}
+	isolationDoctor = func(isolation.Config) (*isolation.Report, error) { return &verified, nil }
+	label, err = assessIsolation(Config{AssuranceMode: AssuranceIsolated})
+	if err != nil {
+		t.Fatalf("verified topology refused: %v", err)
+	}
+	if label != string(intake.AssuranceVerified) {
+		t.Fatalf("verified topology labelled %q", label)
+	}
+}
+
+// A diagnostic that cannot run is fatal too: an unproven boundary must never
+// be treated as a pass.
+func TestIsolationDiagnosticErrorRefusesStartup(t *testing.T) {
+	original := isolationDoctor
+	t.Cleanup(func() { isolationDoctor = original })
+	isolationDoctor = func(isolation.Config) (*isolation.Report, error) {
+		return nil, errBoom
+	}
+	if _, err := assessIsolation(Config{AssuranceMode: AssuranceIsolated}); err == nil {
+		t.Fatal("a failing diagnostic was treated as a verified boundary")
+	} else if !strings.Contains(err.Error(), "isolation diagnostic failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+var errBoom = &boomError{}
+
+type boomError struct{}
+
+func (e *boomError) Error() string { return "cannot evaluate topology" }
+
+// Objective 4.1: a production vault must not be paired with a topology it
+// cannot prove, even when the operator asks for it explicitly.
+func TestProductionVaultRefusesBestEffort(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := New(Config{
+		DBPath:        filepath.Join(dir, "m.db"),
+		SocketPath:    filepath.Join(dir, "b.sock"),
+		VaultType:     "aegiskeys",
+		AssuranceMode: AssuranceBestEffort,
+	})
+	if err == nil {
+		t.Fatal("production vault started on an unverifiable best-effort topology")
+	}
+	if !strings.Contains(err.Error(), "best-effort is development-only") {
+		t.Fatalf("error does not explain why best-effort is refused: %v", err)
+	}
+}
+
+// The development vault keeps working, but is always reported unverified.
+func TestDevelopmentVaultAllowsBestEffort(t *testing.T) {
+	if sandboxAncestorUntrusted() {
+		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	d, err := New(Config{
+		DBPath:        filepath.Join(dir, "m.db"),
+		SocketPath:    filepath.Join(dir, "a.sock"),
+		AdminSocket:   filepath.Join(dir, "a.sock.admin"),
+		VaultType:     "memory-test",
+		AssuranceMode: AssuranceBestEffort,
+	})
+	if err != nil {
+		t.Fatalf("development vault refused: %v", err)
+	}
+	defer d.Shutdown()
+	if got := d.svc.HostInputAssurance(); got != string(intake.AssuranceUnverified) {
+		t.Fatalf("development assurance = %q, want unverified", got)
 	}
 }

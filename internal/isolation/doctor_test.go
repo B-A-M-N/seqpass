@@ -3,6 +3,7 @@ package isolation
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -126,6 +127,69 @@ func TestDoctorDetectsAccessibleProtectedObject(t *testing.T) {
 	}
 	if rep.Verified {
 		t.Fatal("accessible protected object still reported verified")
+	}
+}
+
+// A broker-owned protected object that does not exist must not be scored as
+// though the agent were denied access to it.
+func TestDoctorMissingBrokerOwnedObjectFails(t *testing.T) {
+	dir := mkPublicTempDir(t)
+	agent := uint32(65533)
+	if agent == uint32(os.Geteuid()) {
+		t.Skip("agent uid collides with the test identity")
+	}
+	rep, err := Doctor(Config{
+		AssuranceMode: ModeIsolated,
+		BrokerUID:     uint32(os.Geteuid()),
+		AgentUIDs:     []uint32{agent},
+		AdminSocket:   filepath.Join(dir, "does-not-exist.sock"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkByName(rep, "agent_denied_admin_socket") {
+		t.Fatalf("absent broker-owned socket reported as protected: %+v", rep.Checks)
+	}
+	if rep.Verified {
+		t.Fatal("missing broker-owned protected object still reported verified")
+	}
+}
+
+// An external endpoint that is merely idle is reported as absent truthfully,
+// without claiming protection was proven, and without failing the topology.
+func TestDoctorAbsentRecipientEndpointIsReportedNotClaimedProtected(t *testing.T) {
+	dir := mkPublicTempDir(t)
+	agent := uint32(65533)
+	if agent == uint32(os.Geteuid()) {
+		t.Skip("agent uid collides with the test identity")
+	}
+	sock := filepath.Join(dir, "idle-recipient.sock")
+	rep, err := Doctor(Config{
+		AssuranceMode:      ModeIsolated,
+		BrokerUID:          uint32(os.Geteuid()),
+		AgentUIDs:          []uint32{agent},
+		RecipientEndpoints: []string{sock},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, detail := "", ""
+	for _, c := range rep.Checks {
+		if c.Name == "agent_denied_recipient_socket" {
+			ok, detail = c.Name, c.Detail
+			if !c.OK {
+				t.Fatalf("idle recipient endpoint failed the topology: %+v", c)
+			}
+		}
+	}
+	if ok == "" {
+		t.Fatalf("recipient endpoint was not evaluated: %+v", rep.Checks)
+	}
+	if detail == "protected" {
+		t.Fatalf("absent endpoint reported as protected: %q", detail)
+	}
+	if !strings.Contains(detail, "absent") {
+		t.Fatalf("absent endpoint detail not truthful: %q", detail)
 	}
 }
 

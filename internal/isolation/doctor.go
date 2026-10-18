@@ -139,9 +139,16 @@ func Doctor(cfg Config) (*Report, error) {
 		add("process_inspection_denied", ok, detail)
 	}
 
+	// Objective 4.3: report only what this doctor actually verified. The
+	// doctor proves the boundaries it can observe from the agent's point of
+	// view (intake reachability, process inspection, transcript/DB reads)
+	// but it cannot establish terminal isolation, which is a property of the
+	// specific terminal the human types into and is decided by the host
+	// qualification. Claiming it here would let VerifiedProperties.Complete()
+	// report agent_isolated from an unverified fact, so it stays false.
 	rep.Properties = intake.VerifiedProperties{
 		IntakeInaccessible: checkByName(rep, "agent_denied_intake_socket"),
-		TerminalIsolated:   true,
+		TerminalIsolated:   false,
 		ProcessIsolated:    checkByName(rep, "process_inspection_denied"),
 		TranscriptIsolated: checkByName(rep, "agent_denied_broker_database"),
 	}
@@ -198,20 +205,39 @@ func collectAccessChecks(cfg Config, add func(string, bool, string)) {
 		path     string
 		write    bool
 		required bool
+		// mustExist marks an object the broker itself is supposed to own and
+		// serve. Its absence is a topology fault, not proof of protection.
+		mustExist bool
 	}
 	targets := []target{
-		{"agent_denied_admin_socket", cfg.AdminSocket, false, cfg.AdminSocket != ""},
-		{"agent_denied_intake_socket", cfg.IntakeSocket, false, cfg.IntakeSocket != ""},
-		{"agent_denied_host_socket", cfg.HostSocket, false, cfg.HostSocket != ""},
-		{"agent_denied_broker_database", cfg.DBPath, false, cfg.DBPath != ""},
-		{"agent_denied_aegiskeys_dir", cfg.AegisKeysDir, false, cfg.AegisKeysDir != ""},
-		{"agent_denied_aegiskeys_socket", cfg.AegisKeysSocket, false, cfg.AegisKeysSocket != ""},
+		{"agent_denied_admin_socket", cfg.AdminSocket, false, cfg.AdminSocket != "", true},
+		{"agent_denied_intake_socket", cfg.IntakeSocket, false, cfg.IntakeSocket != "", true},
+		{"agent_denied_host_socket", cfg.HostSocket, false, cfg.HostSocket != "", true},
+		{"agent_denied_broker_database", cfg.DBPath, false, cfg.DBPath != "", true},
+		{"agent_denied_aegiskeys_dir", cfg.AegisKeysDir, false, cfg.AegisKeysDir != "", false},
+		{"agent_denied_aegiskeys_socket", cfg.AegisKeysSocket, false, cfg.AegisKeysSocket != "", false},
 	}
 	for _, ep := range cfg.RecipientEndpoints {
-		targets = append(targets, target{"agent_denied_recipient_socket", ep, false, true})
+		targets = append(targets, target{"agent_denied_recipient_socket", ep, false, true, false})
 	}
 	for _, t := range targets {
 		if !t.required || t.path == "" {
+			continue
+		}
+		// Objective 4.2: absence is reported for what it is. A missing
+		// protected object must never be scored as though the agent were
+		// denied access to it, and a broker-owned object that does not exist
+		// is a failing check rather than a pass.
+		if _, err := os.Lstat(t.path); err != nil {
+			if os.IsNotExist(err) {
+				if t.mustExist {
+					add(t.name, false, fmt.Sprintf("required protected object %s does not exist", t.path))
+				} else {
+					add(t.name, true, fmt.Sprintf("absent: %s is not currently present, so there is nothing for an agent to reach", t.path))
+				}
+			} else {
+				add(t.name, false, fmt.Sprintf("cannot stat %s: %v", t.path, err))
+			}
 			continue
 		}
 		ok := true

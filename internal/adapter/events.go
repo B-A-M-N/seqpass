@@ -48,7 +48,12 @@ type Event struct {
 }
 
 // Validate enforces the event contract: a known type, a qualified state when
-// one is present, and no sensitive field reachable from the frame.
+// one is present, and no credential material in the free-text fields.
+//
+// The text check inspects VALUES, not field names: a field literally named
+// "message" is expected, but a message that carries a key=value assignment
+// for a sensitive field is refused, because that would put a credential on an
+// agent-visible surface.
 func (e Event) Validate() error {
 	if !eventTypes[e.Type] {
 		return fmt.Errorf("unknown event type %q", e.Type)
@@ -59,16 +64,36 @@ func (e Event) Validate() error {
 	if e.Type == EventStateChanged && e.State == "" {
 		return fmt.Errorf("state_changed event without a state")
 	}
-	if _, bad := SensitiveField(map[string]interface{}{
-		"outcome": e.Outcome, "message": e.Message, "code": e.Code,
-	}); bad {
-		return fmt.Errorf("event carries a sensitive field")
+	for _, text := range []string{e.Outcome, e.Message, e.Code} {
+		if carriesCredential(text) {
+			return fmt.Errorf("event text carries credential material")
+		}
 	}
 	return nil
 }
 
+// Sanitized returns a copy of the event with credential-looking assignments
+// removed from its free-text fields. Use it on broker-supplied text that the
+// adapter cannot prove is clean; the result always passes Validate.
+func (e Event) Sanitized() Event {
+	e.Outcome = RedactMessage(e.Outcome)
+	e.Message = RedactMessage(e.Message)
+	e.Code = RedactMessage(e.Code)
+	return e
+}
+
+// carriesCredential reports whether text assigns a value to a sensitive
+// field name (for example "token=abc" or "secret: abc").
+func carriesCredential(text string) bool {
+	if text == "" {
+		return false
+	}
+	return RedactMessage(text) != text
+}
+
 // Encode validates and marshals an event. A frame that fails validation is
-// never emitted.
+// never emitted, so credential-bearing text is refused rather than leaked.
+// Call Sanitized first when the text comes from an untrusted source.
 func Encode(e Event) ([]byte, error) {
 	if e.At.IsZero() {
 		e.At = time.Now().UTC()

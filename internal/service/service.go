@@ -34,6 +34,12 @@ type Config struct {
 	// AegisKeysSocket is the existing AegisKeys broker socket path.
 	AegisKeysSocket string
 	AegisKeysDir    string
+	// RequireVerifiedHostIsolation, when set by the broker for a verified
+	// isolated deployment, withholds inline native host capture unless every
+	// agent-observable boundary property has been independently verified
+	// (objective 4.3). It can only decline to offer the stronger surface; it
+	// never upgrades assurance.
+	RequireVerifiedHostIsolation bool
 }
 
 type Service struct {

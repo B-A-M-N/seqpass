@@ -43,7 +43,12 @@ harness (Codex / Claude / Hermes)
 | **Native protected-input isolation** | **Not yet production-qualified** | Requires live multi-UID topology + AegisKeys qualification |
 | **AegisKeys production resolution** | **Not yet production-qualified** | Requires live dedicated-UID grant + rotation tests |
 | Recipient durability contract | Implemented, tested | `internal/transfer/recipient_test.go` + `recipient_server_test.go` |
+| Real credential consumer (`SecretConsumer`) | Implemented, tested | `internal/transfer/consumer.go` + `internal/service/real_consumer_test.go` (delivery → commit → verified `applied`) |
+| Generic agent adapter (MCP + CLI) | Implemented, tested | `internal/adapter/` + `cmd/seqpass/agent.go` |
+| Live isolation boundary check + drift revocation | Implemented, tested | `internal/isolation/` + `internal/daemon/isolation_test.go` |
+| `seqpass recipient` (deployable consumer endpoint) | Implemented, tested | `cmd/seqpass/recipient.go` |
 | **Recipient live-socket integration** | **Not yet production-qualified** | Requires real recipient process + privileged Unix-socket topology |
+| **Multi-UID isolation qualification (G2–G8)** | **Not yet production-qualified** | Requires separate agent/operator/broker/recipient UIDs; see `qual/PRIVILEGED.md` |
 
 A capability is **implemented** when code exists and tests pass. A capability
 is **production-qualified** only after the required live deployment,
@@ -62,14 +67,18 @@ go build -o seqpass ./cmd/seqpass
 ## Run
 
 ```bash
-# 1. Development or local single-user setup (best-effort only):
-# ./seqpass broker --vault aegiskeys --assurance best-effort
+# 1. Development or local single-user setup (best-effort only).
+#    best-effort is development-only and is always reported as unverified;
+#    a production vault refuses it outright, so development uses the
+#    ephemeral memory vault and must opt in with --dev:
+# ./seqpass broker --vault memory-test --dev --assurance best-effort
 #
 # Production topology: broker and AegisKeys use a dedicated service UID;
 # each agent runs as a different UID. The trusted terminal/admin CLI runs as
 # the service UID because the admin and intake sockets are owner-only.
-# --vault is required: aegiskeys for production; memory-test --dev is for
-# development only and never holds production credentials.
+# --vault is required: aegiskeys for production. A production vault defaults
+# to --assurance isolated and refuses to start unless the live boundary
+# check passes.
 sudo -u seqpass ./seqpass broker --vault aegiskeys --assurance isolated \
   --socket /run/seqpass/agents/broker.sock \
   --admin-socket /run/seqpass/admin/broker.sock \
@@ -196,10 +205,13 @@ audit, status and the SQLite file never contain plaintext.
 
 Identity caveat: intake authorizes by UID and the socket is owner-only.
 `best-effort` supports local development and makes no strict process
-isolation claim. `isolated` refuses broker/agent and trusted/agent UID
-overlap, requires an explicit agent socket group whose membership includes
-every configured agent, and requires distinct agent versus admin/intake
-socket directories. The trusted operator runs the intake CLI as the broker
+isolation claim; it is available only with the development memory vault, and
+a production (`aegiskeys`) installation refuses it outright. `isolated`
+refuses broker/agent and trusted/agent UID overlap, requires an explicit
+agent socket group whose membership includes every configured agent, and
+requires distinct agent versus admin/intake socket directories. A production
+installation defaults to `isolated` and refuses to start unless the live
+boundary check passes. The trusted operator runs the intake CLI as the broker
 service UID. This validates the configured topology; a strict AI-blind
 claim still requires a passing multi-process qualification run and review of
 filesystem ACLs, supplementary groups, executable permissions, and AegisKeys
@@ -227,11 +239,21 @@ status, _ := c.Status("use", opID)
 | Tool | Behavior |
 | ---- | -------- |
 | `secret_catalog` | References + capabilities for the authenticated identity |
+| `secret_capabilities` | Discovery: allowlisted operations, accepted data kinds, the closed request-state vocabulary, and the broker's honest input-assurance facts. Never secret material |
 | `secret_use` | Submit allowlisted op; returns opaque op ID |
 | `secret_transfer` | Request broker→recipient transfer; returns opaque op ID |
 | `secret_status` | Caller's own status + durable sanitized receipt when completed |
 | `relay_request` | Request protected user input for a registered recipient; returns an opaque ID for trusted-terminal fulfillment |
-| `relay_status` | Own relay request state: awaiting_user, authorized, delivered, uncertain, rejected, expired, cancelled, unavailable, failed — never the secret |
+| `relay_status` | Own relay request state, normalized to the closed vocabulary (awaiting_user, authorized, dispatching, accepted, applied, uncertain, rejected, expired, unavailable) — never the secret |
+| `relay_cancel` | Withdraw your own relay request before fulfillment; safe to repeat |
+
+An unqualified or unknown broker state is refused rather than reported to the
+agent. `accepted` means the recipient durably stored the delivery; only
+`applied` means the consumer verified the intended effect.
+
+The same contract is available without MCP as
+`seqpass agent capabilities|request|status|cancel`, for harnesses that speak
+CLI instead of MCP.
 
 ## Security model
 
@@ -288,6 +310,26 @@ Recipient obligations (SC-06):
   of the payload. "Applied" state needs independent outcome verification.
 - Memory vault is a test fixture; production credentials live in AegisKeys.
 - `Vault.Get` exists only inside the trusted executor.
+
+### Running a recipient
+
+```bash
+seqpass recipient --socket /run/seqpass/recipient/cred.sock \
+  --journal /var/lib/seqpass-recipient/journal \
+  --consumer file --consumer-dir /var/lib/seqpass-recipient/destination \
+  --trust-broker-uid $(id -u seqpass) --socket-mode 0600
+```
+
+`--consumer file` commits the credential to `--consumer-dir` and verifies the
+intended effect by reading it back before reporting `applied`.
+`--consumer reference` is the metadata-only fixture: it journals durable
+acceptance but applies nothing, and is for wire tests and development only.
+There is no default consumer, and no mode prints the secret to stdout.
+
+`--trust-broker-uid` is the server-side allowlist: the recipient verifies the
+connecting peer's OS identity BEFORE reading any frame, with
+`SO_PEERCRED`, and refuses any unlisted caller. Omitting it allows only the
+recipient's own UID.
 
 ## Deployment requirements (isolation must be proven, not assumed)
 
@@ -366,6 +408,24 @@ test runtime directory itself is correctly owned. The broker refuses such
 ancestors by design. In those environments, socket-based tests will skip
 automatically; use a normal host or container where `/home` is broker-owned
 to exercise the full Unix-socket coverage.
+
+## Testing
+
+```bash
+go test ./...                                  # portable; socket suites skip
+SEQPASS_TEST_RUNTIME_DIR=/run/seqpass-test go test ./...   # full coverage
+```
+
+`SEQPASS_TEST_RUNTIME_DIR` names a directory with trusted ancestors (owned by
+the test identity, not group- or world-writable) under which the Unix-socket
+suites create their fixtures. It must be set to exercise the socket-based
+coverage. Without it those suites skip, which keeps `go test ./...` portable
+but silently reduces coverage — so CI and release verification set it
+explicitly and treat a skip as a gap.
+
+Some tests do not need a trusted ancestor and instead create their own
+owner-only directory under `/tmp` (which is world-traversable and therefore a
+valid ancestor for a socket fixture). Those run everywhere.
 
 ## Relay request contract
 

@@ -176,7 +176,16 @@ func (s *Service) HostSessionAuth(sessionID, token string) (*types.HostSession, 
 // SelectNativeModeForRegistration evaluates this exact registration against
 // the broker-held qualification snapshot. It is per-session evidence, never
 // shared Service state.
+//
+// For a verified isolated deployment the broker requires every
+// agent-observable boundary property to be proven before inline native
+// capture is offered (objective 4.3). The strict selector can only decline
+// the stronger surface; it never widens what is offered and never upgrades
+// assurance.
 func (s *Service) SelectNativeModeForRegistration(hostKind harness.HostSessionKind, hostVersion, adapterVersion, topology string, securityConfig map[string]string) (harness.NativeModeDecision, error) {
+	if s.cfg.RequireVerifiedHostIsolation {
+		return harness.SelectNativeModeRequiringIsolation(s.hostQualification, hostKind, hostVersion, adapterVersion, topology, securityConfig, time.Now())
+	}
 	return harness.SelectNativeMode(s.hostQualification, hostKind, hostVersion, adapterVersion, topology, securityConfig, time.Now())
 }
 

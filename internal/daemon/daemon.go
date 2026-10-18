@@ -181,6 +181,13 @@ func New(cfg Config) (*Daemon, error) {
 	if cfg.AssuranceMode != AssuranceBestEffort && cfg.AssuranceMode != AssuranceIsolated {
 		return nil, fmt.Errorf("unknown assurance mode %q (want %s or %s)", cfg.AssuranceMode, AssuranceBestEffort, AssuranceIsolated)
 	}
+	// Objective 4.1: a production installation must not run on a topology it
+	// cannot prove. best-effort exists only for the development vault, so a
+	// production vault paired with best-effort is refused outright rather
+	// than started with an unverified boundary.
+	if isProductionVault(cfg.VaultType) && cfg.AssuranceMode != AssuranceIsolated {
+		return nil, fmt.Errorf("production vault %q requires %s assurance: best-effort is development-only and does not establish a boundary against an agent with local shell access", cfg.VaultType, AssuranceIsolated)
+	}
 	if cfg.AssuranceMode == AssuranceIsolated {
 		if runtime.GOOS != "linux" {
 			return nil, fmt.Errorf("isolated assurance requires Linux peer credentials")
@@ -256,6 +263,11 @@ func New(cfg Config) (*Daemon, error) {
 		AegisKeysDir:     cfg.AegisKeysDir,
 		DefaultOpTTL:     cfg.DefaultOpTTL,
 		MaxConcurrentOps: cfg.MaxConcurrentOps,
+		// Objective 4.3: an isolated deployment withholds inline native
+		// capture unless every boundary property is proven. A best-effort
+		// deployment keeps the historic selector because it makes no
+		// isolation claim to begin with.
+		RequireVerifiedHostIsolation: cfg.AssuranceMode == AssuranceIsolated,
 	})
 	if err != nil {
 		lease.Release()
@@ -440,22 +452,16 @@ func New(cfg Config) (*Daemon, error) {
 	// Objective 4.2: verify the ACTIVE boundary before serving traffic, not
 	// only the configured values. In isolated mode a failure is fatal.
 	if cfg.AssuranceMode == AssuranceIsolated {
-		rep, derr := isolation.Doctor(d.isolationConfig())
-		if derr != nil {
+		label, aerr := assessIsolation(cfg)
+		if aerr != nil {
 			_ = srv.Close()
 			_ = svc.Close()
 			lease.Release()
-			return nil, fmt.Errorf("isolation diagnostic failed: %w", derr)
-		}
-		if !rep.Verified {
-			_ = srv.Close()
-			_ = svc.Close()
-			lease.Release()
-			return nil, fmt.Errorf("broker refused to start: live isolation check failed (%v)", rep.FailedNames())
+			return nil, aerr
 		}
 		// The running topology is verified: the honest label may now be
 		// upgraded, and remains revocable if the boundary later drifts.
-		srv.AssuranceLabel = string(intake.AssuranceVerified)
+		srv.AssuranceLabel = label
 	} else {
 		// best-effort is never advertised as verified (objective 4.1).
 		svc.SetHostInputUnverified("best-effort topology: same-UID operation does not establish a boundary against an agent with local shell access")
@@ -480,7 +486,17 @@ func New(cfg Config) (*Daemon, error) {
 	}
 	if cfg.AutoExecute {
 		ctx, cancel := context.WithCancel(context.Background())
-		d.worker = cancel
+		// Compose with any existing worker cancel rather than replacing it,
+		// so a previously installed supervisor (for example the security
+		// drift monitor) is still canceled and its goroutine group is not
+		// left blocking shutdown.
+		prevWorker := d.worker
+		d.worker = func() {
+			cancel()
+			if prevWorker != nil {
+				prevWorker()
+			}
+		}
 		d.workerWg.Add(1)
 		go func() {
 			defer d.workerWg.Done()
@@ -513,7 +529,9 @@ func New(cfg Config) (*Daemon, error) {
 		prevRelay := d.worker
 		d.worker = func() {
 			relayCancel()
-			prevRelay()
+			if prevRelay != nil {
+				prevRelay()
+			}
 		}
 		d.workerWg.Add(1)
 		go func() {
@@ -548,23 +566,44 @@ func (d *Daemon) protectedPaths() []string {
 }
 
 // isolationConfig builds the live doctor input for this broker.
-func (d *Daemon) isolationConfig() isolation.Config {
+func isolationConfigFor(cfg Config) isolation.Config {
 	return isolation.Config{
-		AssuranceMode:   d.cfg.AssuranceMode,
+		AssuranceMode:   cfg.AssuranceMode,
 		BrokerUID:       uint32(os.Geteuid()),
 		BrokerGID:       uint32(os.Getegid()),
-		AgentUIDs:       d.cfg.AgentUIDs,
-		IntakeUIDs:      d.cfg.IntakeUIDs,
-		AdminUIDs:       d.cfg.AdminUIDs,
-		AgentSocket:     d.cfg.SocketPath,
-		AdminSocket:     d.cfg.AdminSocket,
-		IntakeSocket:    d.cfg.IntakeSocket,
-		HostSocket:      d.cfg.HostSocket,
-		DBPath:          d.cfg.DBPath,
-		AegisKeysDir:    d.cfg.AegisKeysDir,
-		AegisKeysSocket: d.cfg.AegisKeysSocket,
+		AgentUIDs:       cfg.AgentUIDs,
+		IntakeUIDs:      cfg.IntakeUIDs,
+		AdminUIDs:       cfg.AdminUIDs,
+		AgentSocket:     cfg.SocketPath,
+		AdminSocket:     cfg.AdminSocket,
+		IntakeSocket:    cfg.IntakeSocket,
+		HostSocket:      cfg.HostSocket,
+		DBPath:          cfg.DBPath,
+		AegisKeysDir:    cfg.AegisKeysDir,
+		AegisKeysSocket: cfg.AegisKeysSocket,
 		BrokerPID:       os.Getpid(),
 	}
+}
+
+// isolationDoctor runs the live boundary check. It is a package variable so
+// the refusal path can be proven without a privileged multi-UID host, and so
+// a future re-implementation is a single substitution.
+var isolationDoctor = isolation.Doctor
+
+// assessIsolation performs the objective-4.2 live check for an isolated
+// deployment and returns the assurance label to publish. An unverified
+// topology is fatal: the broker must never serve an unproven boundary, and
+// the label may only read "verified" once the running topology has been
+// checked.
+func assessIsolation(cfg Config) (string, error) {
+	rep, err := isolationDoctor(isolationConfigFor(cfg))
+	if err != nil {
+		return "", fmt.Errorf("isolation diagnostic failed: %w", err)
+	}
+	if !rep.Verified {
+		return "", fmt.Errorf("broker refused to start: live isolation check failed (%v)", rep.FailedNames())
+	}
+	return string(intake.AssuranceVerified), nil
 }
 
 // VerifySecurityBoundary re-runs the live doctor and compares the running
@@ -573,7 +612,7 @@ func (d *Daemon) isolationConfig() isolation.Config {
 func (d *Daemon) VerifySecurityBoundary() []string {
 	var drift []string
 	if d.cfg.AssuranceMode == AssuranceIsolated {
-		if rep, err := isolation.Doctor(d.isolationConfig()); err == nil && !rep.Verified {
+		if rep, err := isolation.Doctor(isolationConfigFor(d.cfg)); err == nil && !rep.Verified {
 			drift = append(drift, rep.FailedNames()...)
 		}
 	}

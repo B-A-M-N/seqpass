@@ -121,6 +121,10 @@ func (r *RecipientServer) SocketPath() string { return r.cfg.SocketPath }
 
 // Serve accepts connections until Close is called.
 func (r *RecipientServer) Serve() {
+	// A transient accept failure (EMFILE/ENFILE/ECONNABORTED) must not spin
+	// the loop at full speed; the delay grows to a bound and resets as soon
+	// as a connection is accepted.
+	backoff := time.Duration(0)
 	for {
 		conn, err := r.listener.Accept()
 		if err != nil {
@@ -128,9 +132,16 @@ func (r *RecipientServer) Serve() {
 			case <-r.closed:
 				return
 			default:
-				continue
 			}
+			backoff = nextAcceptBackoff(backoff)
+			select {
+			case <-r.closed:
+				return
+			case <-time.After(backoff):
+			}
+			continue
 		}
+		backoff = 0
 		select {
 		case r.sem <- struct{}{}:
 		case <-r.closed:
@@ -148,6 +159,23 @@ func (r *RecipientServer) Serve() {
 			r.handleConn(conn)
 		}()
 	}
+}
+
+// nextAcceptBackoff returns the bounded retry delay for a failed accept:
+// 5ms doubling to at most 1s.
+func nextAcceptBackoff(current time.Duration) time.Duration {
+	const (
+		base = 5 * time.Millisecond
+		max  = time.Second
+	)
+	if current <= 0 {
+		return base
+	}
+	next := current * 2
+	if next > max {
+		return max
+	}
+	return next
 }
 
 // Close stops accepting new connections.

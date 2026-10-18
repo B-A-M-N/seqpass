@@ -15,7 +15,22 @@ type DB struct {
 }
 
 func NewDB(path string) (*DB, error) {
-	db, err := sql.Open("sqlite3", path+"?cache=shared&mode=rwc&_journal_mode=WAL&_busy_timeout=5000")
+	// The connection string matters for correctness, not just performance.
+	//
+	// cache=shared is deliberately NOT used: with a shared page cache SQLite
+	// takes table-level locks, and a conflict between two connections in the
+	// same process is reported as SQLITE_LOCKED, which the busy handler does
+	// not retry. Combined with a deferred transaction that reads before it
+	// writes, that produced an immediate, intermittent "database is locked"
+	// right after broker start.
+	//
+	// _txlock=immediate makes every database/sql transaction BEGIN IMMEDIATE,
+	// so a writer takes the write lock up front instead of upgrading from
+	// SHARED to RESERVED mid-transaction. SQLite refuses that upgrade
+	// immediately when another connection in the same process holds SHARED,
+	// again bypassing the busy handler. With an immediate begin the busy
+	// timeout applies and the writer waits its turn.
+	db, err := sql.Open("sqlite3", path+"?mode=rwc&_journal_mode=WAL&_busy_timeout=5000&_txlock=immediate")
 	if err != nil {
 		return nil, err
 	}

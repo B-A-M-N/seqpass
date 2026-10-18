@@ -180,6 +180,27 @@ func TestEventRejectsUnqualifiedStateAndUnknownFields(t *testing.T) {
 	}
 }
 
+// A free-text field carrying a credential assignment is refused outright,
+// and the explicit sanitizer removes it for text the adapter cannot vouch
+// for.
+func TestEventRefusesCredentialBearingText(t *testing.T) {
+	dirty := Event{Type: EventError, Code: "bad_input", Message: "broker said token=synthetic-secret-abc"}
+	if _, err := Encode(dirty); err == nil {
+		t.Fatal("event with credential-bearing text was emitted")
+	}
+	clean := dirty.Sanitized()
+	frame, err := Encode(clean)
+	if err != nil {
+		t.Fatalf("sanitized event rejected: %v", err)
+	}
+	if strings.Contains(string(frame), "synthetic-secret-abc") {
+		t.Fatalf("sanitized event still leaks a credential: %s", frame)
+	}
+	if !strings.Contains(string(frame), "[redacted]") {
+		t.Fatalf("sanitized event lost the redaction marker: %s", frame)
+	}
+}
+
 func TestReceiptCarriesNoValue(t *testing.T) {
 	frame, err := Encode(Receipt("op-1", StateAccepted, "Registered Recipient", 42))
 	if err != nil {
