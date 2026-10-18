@@ -302,13 +302,11 @@ func New(cfg Config) (*Daemon, error) {
 		}
 	}
 	srv.AssuranceMode = cfg.AssuranceMode
-	// Objective 4.1: the honest assurance label is unverified until the live
-	// boundary check proves otherwise. The isolated branch below upgrades it
-	// only after the running topology is verified.
-	srv.AssuranceLabel = AssuranceLabel(cfg.AssuranceMode)
-	if cfg.AssuranceMode != AssuranceIsolated {
-		srv.AssuranceLabel = isolation.LabelUnverified
-	}
+	// Objective 4.1: the honest assurance label starts unverified and is
+	// upgraded only after the live boundary check below proves the running
+	// topology. This closes the window between binding sockets and verifying
+	// them, during which a health call must not read a guarantee.
+	srv.AssuranceLabel = isolation.LabelUnverified
 	// HI-05: qualification is accepted only as a complete record. Empty
 	// configuration remains fail-closed external TTY/model-blind.
 	if !cfg.HostQualification.QualifiedAt.IsZero() || cfg.HostQualification.Status != "" {
