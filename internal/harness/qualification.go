@@ -112,12 +112,66 @@ func (q *AdapterQualification) ValidFor(hostKind HostSessionKind, hostVersion, a
 
 // NativeModeDecision is the fail-closed result of matching a registration
 // against the broker's accepted qualification snapshot.
+//
+// Presentation and isolation are deliberately separate claims (HI-01/4.3):
+// Presentation says WHERE a value is typed (external trusted terminal vs an
+// in-host native surface); IsolationAssurance says WHICH agent-observable
+// boundaries have been independently verified. A native UI that keeps the
+// value out of model messages is model-blind, not agent-isolated, and the
+// two must never be conflated.
 type NativeModeDecision struct {
 	Mode       SecureInputMode
 	Assurance  string
 	Reason     string
 	Qualified  bool
 	RecordUsed bool
+
+	// Presentation is the surface that would carry the value. It equals Mode.
+	Presentation SecureInputMode
+	// PresentationAssurance describes only model-visibility: "model_blind"
+	// when the value never enters model messages or agent-visible results.
+	PresentationAssurance string
+	// IsolationAssurance is "agent_isolated" only when every required
+	// boundary property is verified; otherwise "unverified".
+	IsolationAssurance string
+	// BoundariesVerified reports whether process, terminal, transcript and
+	// intake boundaries were all verified for this decision.
+	BoundariesVerified bool
+	// MissingBoundaries lists the unverified boundary properties, empty when
+	// BoundariesVerified is true.
+	MissingBoundaries []string
+}
+
+// AgentIsolated reports whether the stronger, verified guarantee holds.
+func (d NativeModeDecision) AgentIsolated() bool { return d.IsolationAssurance == "agent_isolated" }
+
+// boundaryProperties are the independently verified boundaries required
+// before any decision may advertise the agent-isolated guarantee.
+var boundaryProperties = []string{
+	"process_isolated", "terminal_isolated", "transcript_isolated", "intake_inaccessible",
+}
+
+// fallbackDecision is the safe external-TTY/model-blind result. It never
+// claims isolation.
+func fallbackDecision(reason string) NativeModeDecision {
+	return NativeModeDecision{
+		Mode:                  InputExternalTTY,
+		Assurance:             "model_blind",
+		Reason:                reason,
+		Presentation:          InputExternalTTY,
+		PresentationAssurance: "model_blind",
+		IsolationAssurance:    "unverified",
+	}
+}
+
+func missingBoundaries(props map[string]bool) []string {
+	var missing []string
+	for _, p := range boundaryProperties {
+		if !props[p] {
+			missing = append(missing, p)
+		}
+	}
+	return missing
 }
 
 // SelectNativeMode matches the registration's exact host kind, version,
@@ -127,35 +181,19 @@ type NativeModeDecision struct {
 // external_tty/model_blind, not to host-native.
 func SelectNativeMode(snapshot *QualificationSnapshot, hostKind HostSessionKind, hostVersion, adapterVersion, topology string, securityConfig map[string]string, now time.Time) (NativeModeDecision, error) {
 	if snapshot == nil {
-		return NativeModeDecision{
-			Mode:      InputExternalTTY,
-			Assurance: "model_blind",
-			Reason:    "no accepted qualification; using external trusted terminal",
-		}, nil
+		return fallbackDecision("no accepted qualification; using external trusted terminal"), nil
 	}
 	digest, err := SecurityConfigDigest(hostKind, hostVersion, adapterVersion, topology, securityConfig)
 	if err != nil {
-		return NativeModeDecision{
-			Mode:      InputExternalTTY,
-			Assurance: "model_blind",
-			Reason:    "qualification inputs invalid; using external trusted terminal",
-		}, err
+		return fallbackDecision("qualification inputs invalid; using external trusted terminal"), err
 	}
 	if err := snapshot.Record.ValidFor(snapshot.HostKind, snapshot.HostVersion, snapshot.AdapterVersion, snapshot.InputMode, snapshot.Topology, snapshot.ConfigDigest, now); err != nil {
-		return NativeModeDecision{
-			Mode:      InputExternalTTY,
-			Assurance: "model_blind",
-			Reason:    "qualification snapshot invalid; using external trusted terminal",
-		}, fmt.Errorf("qualification mismatch: %w", err)
+		return fallbackDecision("qualification snapshot invalid; using external trusted terminal"), fmt.Errorf("qualification mismatch: %w", err)
 	}
 	if snapshot.HostKind != hostKind || snapshot.HostVersion != hostVersion ||
 		snapshot.AdapterVersion != adapterVersion || snapshot.Topology != topology ||
 		snapshot.ConfigDigest != digest {
-		return NativeModeDecision{
-			Mode:      InputExternalTTY,
-			Assurance: "model_blind",
-			Reason:    "qualification mismatch or expiry; using external trusted terminal",
-		}, fmt.Errorf("qualification mismatch: %w", err)
+		return fallbackDecision("qualification mismatch or expiry; using external trusted terminal"), fmt.Errorf("qualification mismatch: %w", err)
 	}
 	mode := InputExternalTTY
 	assurance := "model_blind"
@@ -163,17 +201,60 @@ func SelectNativeMode(snapshot *QualificationSnapshot, hostKind HostSessionKind,
 		mode = InputHostNative
 		assurance = "model_blind"
 	}
-	if snapshot.Record.VerifiedProperties["process_isolated"] &&
-		snapshot.Record.VerifiedProperties["terminal_isolated"] &&
-		snapshot.Record.VerifiedProperties["transcript_isolated"] &&
-		snapshot.Record.VerifiedProperties["intake_inaccessible"] {
+	missing := missingBoundaries(snapshot.Record.VerifiedProperties)
+	isolation := "unverified"
+	if len(missing) == 0 {
 		assurance = "agent_isolated"
+		isolation = "agent_isolated"
 	}
 	return NativeModeDecision{
-		Mode:       mode,
-		Assurance:  assurance,
-		Reason:     "accepted qualification matched exact host/adapter/topology/config",
-		Qualified:  true,
-		RecordUsed: true,
+		Mode:                  mode,
+		Assurance:             assurance,
+		Reason:                "accepted qualification matched exact host/adapter/topology/config",
+		Qualified:             true,
+		RecordUsed:            true,
+		Presentation:          mode,
+		PresentationAssurance: "model_blind",
+		IsolationAssurance:    isolation,
+		BoundariesVerified:    len(missing) == 0,
+		MissingBoundaries:     missing,
 	}, nil
+}
+
+// SelectNativeModeRequiringIsolation is the fail-closed variant used when a
+// deployment requires the verified boundary before offering inline native
+// capture (objective 4.3). When the accepted record is host-native but not
+// every required boundary property is verified, inline capture is WITHHELD
+// and the decision falls back to the external trusted terminal. It never
+// upgrades assurance; it can only decline to advertise it.
+func SelectNativeModeRequiringIsolation(snapshot *QualificationSnapshot, hostKind HostSessionKind, hostVersion, adapterVersion, topology string, securityConfig map[string]string, now time.Time) (NativeModeDecision, error) {
+	decision, err := SelectNativeMode(snapshot, hostKind, hostVersion, adapterVersion, topology, securityConfig, now)
+	if err != nil {
+		return decision, err
+	}
+	if decision.Mode != InputHostNative || decision.BoundariesVerified {
+		return decision, nil
+	}
+	// Native capture withheld: fall back to the external trusted terminal
+	// while reporting exactly which boundaries were unproven.
+	decision.Mode = InputExternalTTY
+	decision.Presentation = InputExternalTTY
+	decision.Assurance = "model_blind"
+	decision.IsolationAssurance = "unverified"
+	decision.Reason = "native capture withheld: unverified boundaries " + joinStrings(decision.MissingBoundaries) + "; using external trusted terminal"
+	return decision, nil
+}
+
+func joinStrings(items []string) string {
+	out := ""
+	for i, s := range items {
+		if i > 0 {
+			out += ", "
+		}
+		out += s
+	}
+	if out == "" {
+		return "none"
+	}
+	return out
 }

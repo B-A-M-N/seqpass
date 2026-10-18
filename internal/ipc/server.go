@@ -108,6 +108,11 @@ type Server struct {
 	// AssuranceMode is a validated topology label set by daemon.New.
 	// Standalone test/dev servers report best-effort by default.
 	AssuranceMode string
+	// AssuranceLabel is the honest assurance classification for that
+	// topology: "verified" only for a live-verified isolated deployment,
+	// otherwise "unverified". It is reported alongside the topology so a
+	// caller can never read a best-effort mode as a security guarantee.
+	AssuranceLabel string
 	// IntakeSocket, when non-empty, serves the trusted human-side
 	// intake domain on its own owner-only socket (QR-02/SP-TUI-04).
 	// Set before Start, like AgentGID.
@@ -587,8 +592,12 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 		if mode == "" {
 			mode = "best-effort"
 		}
+		label := s.AssuranceLabel
+		if label == "" {
+			label = "unverified"
+		}
 		return Response{OK: true, Data: map[string]string{
-			"status": "ok", "assurance_mode": mode,
+			"status": "ok", "assurance_mode": mode, "assurance": label,
 		}}
 	case MethodCatalog:
 		refs, err := s.svc.Catalog(principal)

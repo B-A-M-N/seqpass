@@ -43,6 +43,9 @@ type Service struct {
 	// cannot set or override them.
 	hostInputMode string
 	hostAssurance string
+	// hostReason is set when a trusted wiring path (best-effort downgrade
+	// or security drift) has an explicit explanation to report.
+	hostReason string
 	// hostQualification is the broker-accepted qualification snapshot used
 	// to derive per-registration session assurance (S3/S7). It is not
 	// copied to global host state.
@@ -172,6 +175,9 @@ func (s *Service) HostInputAssurance() string { return s.hostAssurance }
 // HostInputReason explains why that label was assigned without exposing
 // or depending on agent claims.
 func (s *Service) HostInputReason() string {
+	if s.hostReason != "" {
+		return s.hostReason
+	}
 	if s.hostAssurance == string(intake.AssuranceAgentIsolated) {
 		if s.hostInputMode == string(harness.InputHostNative) {
 			return "qualified native host adapter with all agent boundaries verified"
@@ -179,6 +185,16 @@ func (s *Service) HostInputReason() string {
 		return "external trusted input with all agent boundaries verified"
 	}
 	return "protected transport verified; full agent process/tool/transcript isolation is not proven"
+}
+
+// SetHostInputUnverified downgrades the trusted-input presentation to the
+// honest "unverified" label (objective 4.1). It is used for best-effort
+// topologies and when security drift revokes a previously verified host
+// capability. It never enables native mode.
+func (s *Service) SetHostInputUnverified(reason string) {
+	s.hostInputMode = string(harness.InputExternalTTY)
+	s.hostAssurance = string(intake.AssuranceUnverified)
+	s.hostReason = reason
 }
 
 // SetHostQualification installs the broker-accepted qualification snapshot.

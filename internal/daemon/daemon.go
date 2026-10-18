@@ -17,9 +17,11 @@ import (
 	"github.com/secretbridge/secretbridge/internal/harness"
 	"github.com/secretbridge/secretbridge/internal/intake"
 	"github.com/secretbridge/secretbridge/internal/ipc"
+	"github.com/secretbridge/secretbridge/internal/isolation"
 	"github.com/secretbridge/secretbridge/internal/metadata"
 	"github.com/secretbridge/secretbridge/internal/secureops"
 	"github.com/secretbridge/secretbridge/internal/service"
+	"github.com/secretbridge/secretbridge/internal/types"
 )
 
 // shutdownWorkerTimeout bounds the wait for in-flight execution to
@@ -27,10 +29,24 @@ import (
 // can compress the terminal failure path without waiting it out.
 var shutdownWorkerTimeout = 90 * time.Second
 
+// driftInterval is how often the broker re-verifies its security boundary
+// (objective 4.4). It is a variable so tests can compress it.
+var driftInterval = 30 * time.Second
+
 const (
 	AssuranceBestEffort = "best-effort"
 	AssuranceIsolated   = "isolated"
 )
+
+// AssuranceLabel is the honest assurance label for a topology: only
+// "isolated" topology that has been verified may claim anything else than
+// unverified. best-effort is always labelled "unverified" (objective 4.1).
+func AssuranceLabel(mode string) string {
+	if mode == AssuranceIsolated {
+		return string(intake.AssuranceVerified)
+	}
+	return isolation.LabelUnverified
+}
 
 // Config for the privileged broker. No TCP listeners, no HTTP, no browser UI.
 // AdminUIDs is the explicit administrator allowlist: only these UIDs may use
@@ -116,6 +132,17 @@ type Daemon struct {
 	// broker lifetime (G05). A second broker on the same store is
 	// refused before it can reconcile the live broker's work.
 	lease *metadata.DBLock
+	// securityFP is the verified topology fingerprint; drift from it
+	// revokes the affected host capability (objective 4.4).
+	securityFP isolation.Fingerprint
+	// hostPresentation is true when the broker enabled a native host
+	// presentation surface, so drift has something to revoke.
+	hostPresentation bool
+}
+
+// isProductionVault reports whether the vault type is a production store.
+func isProductionVault(vaultType string) bool {
+	return vaultType == "aegiskeys"
 }
 
 // lookupGroupGID resolves a group name to its numeric GID. Fail closed:
@@ -141,7 +168,15 @@ func New(cfg Config) (*Daemon, error) {
 		return nil, fmt.Errorf("explicit vault type required: aegiskeys (production) or memory-test (dev only)")
 	}
 	if cfg.AssuranceMode == "" {
-		cfg.AssuranceMode = AssuranceBestEffort
+		// Objective 4.1: a production (AegisKeys) installation defaults to
+		// strict isolation and refuses to start unless the topology is
+		// actually isolated. The development memory vault keeps the
+		// compatible local setup, always labelled unverified.
+		if isProductionVault(cfg.VaultType) {
+			cfg.AssuranceMode = AssuranceIsolated
+		} else {
+			cfg.AssuranceMode = AssuranceBestEffort
+		}
 	}
 	if cfg.AssuranceMode != AssuranceBestEffort && cfg.AssuranceMode != AssuranceIsolated {
 		return nil, fmt.Errorf("unknown assurance mode %q (want %s or %s)", cfg.AssuranceMode, AssuranceBestEffort, AssuranceIsolated)
@@ -267,6 +302,13 @@ func New(cfg Config) (*Daemon, error) {
 		}
 	}
 	srv.AssuranceMode = cfg.AssuranceMode
+	// Objective 4.1: the honest assurance label is unverified until the live
+	// boundary check proves otherwise. The isolated branch below upgrades it
+	// only after the running topology is verified.
+	srv.AssuranceLabel = AssuranceLabel(cfg.AssuranceMode)
+	if cfg.AssuranceMode != AssuranceIsolated {
+		srv.AssuranceLabel = isolation.LabelUnverified
+	}
 	// HI-05: qualification is accepted only as a complete record. Empty
 	// configuration remains fail-closed external TTY/model-blind.
 	if !cfg.HostQualification.QualifiedAt.IsZero() || cfg.HostQualification.Status != "" {
@@ -396,6 +438,48 @@ func New(cfg Config) (*Daemon, error) {
 		}
 	}
 	d := &Daemon{cfg: cfg, svc: svc, srv: srv, lease: lease}
+	d.hostPresentation = cfg.HostSocket != ""
+	// Objective 4.2: verify the ACTIVE boundary before serving traffic, not
+	// only the configured values. In isolated mode a failure is fatal.
+	if cfg.AssuranceMode == AssuranceIsolated {
+		rep, derr := isolation.Doctor(d.isolationConfig())
+		if derr != nil {
+			_ = srv.Close()
+			_ = svc.Close()
+			lease.Release()
+			return nil, fmt.Errorf("isolation diagnostic failed: %w", derr)
+		}
+		if !rep.Verified {
+			_ = srv.Close()
+			_ = svc.Close()
+			lease.Release()
+			return nil, fmt.Errorf("broker refused to start: live isolation check failed (%v)", rep.FailedNames())
+		}
+		// The running topology is verified: the honest label may now be
+		// upgraded, and remains revocable if the boundary later drifts.
+		srv.AssuranceLabel = string(intake.AssuranceVerified)
+	} else {
+		// best-effort is never advertised as verified (objective 4.1).
+		svc.SetHostInputUnverified("best-effort topology: same-UID operation does not establish a boundary against an agent with local shell access")
+	}
+	// Objective 4.4: record the verified topology so later drift can revoke
+	// the affected host capability instead of silently degrading.
+	d.securityFP = isolation.CaptureFingerprint(uint32(os.Geteuid()), uint32(os.Getegid()), d.protectedPaths())
+	if d.hostPresentation {
+		ctx, cancel := context.WithCancel(context.Background())
+		prevDrift := d.worker
+		d.worker = func() {
+			cancel()
+			if prevDrift != nil {
+				prevDrift()
+			}
+		}
+		d.workerWg.Add(1)
+		go func() {
+			defer d.workerWg.Done()
+			d.monitorSecurityDrift(ctx)
+		}()
+	}
 	if cfg.AutoExecute {
 		ctx, cancel := context.WithCancel(context.Background())
 		d.worker = cancel
@@ -440,6 +524,111 @@ func New(cfg Config) (*Daemon, error) {
 		}()
 	}
 	return d, nil
+}
+
+// protectedPaths lists every object whose identity or permissions must not
+// change under a verified boundary.
+func (d *Daemon) protectedPaths() []string {
+	paths := []string{d.cfg.AdminSocket, d.cfg.IntakeSocket}
+	if d.cfg.HostSocket != "" {
+		paths = append(paths, d.cfg.HostSocket)
+	}
+	if d.cfg.DBPath != "" {
+		paths = append(paths, d.cfg.DBPath)
+	}
+	if d.cfg.AegisKeysDir != "" {
+		paths = append(paths, d.cfg.AegisKeysDir)
+	}
+	if d.cfg.AegisKeysSocket != "" {
+		paths = append(paths, d.cfg.AegisKeysSocket)
+	}
+	return paths
+}
+
+// isolationConfig builds the live doctor input for this broker.
+func (d *Daemon) isolationConfig() isolation.Config {
+	return isolation.Config{
+		AssuranceMode:   d.cfg.AssuranceMode,
+		BrokerUID:       uint32(os.Geteuid()),
+		BrokerGID:       uint32(os.Getegid()),
+		AgentUIDs:       d.cfg.AgentUIDs,
+		IntakeUIDs:      d.cfg.IntakeUIDs,
+		AdminUIDs:       d.cfg.AdminUIDs,
+		AgentSocket:     d.cfg.SocketPath,
+		AdminSocket:     d.cfg.AdminSocket,
+		IntakeSocket:    d.cfg.IntakeSocket,
+		HostSocket:      d.cfg.HostSocket,
+		DBPath:          d.cfg.DBPath,
+		AegisKeysDir:    d.cfg.AegisKeysDir,
+		AegisKeysSocket: d.cfg.AegisKeysSocket,
+		BrokerPID:       os.Getpid(),
+	}
+}
+
+// VerifySecurityBoundary re-runs the live doctor and compares the running
+// topology against the verified fingerprint. It returns the list of drift
+// reasons (empty when the boundary is intact).
+func (d *Daemon) VerifySecurityBoundary() []string {
+	var drift []string
+	if d.cfg.AssuranceMode == AssuranceIsolated {
+		if rep, err := isolation.Doctor(d.isolationConfig()); err == nil && !rep.Verified {
+			drift = append(drift, rep.FailedNames()...)
+		}
+	}
+	now := isolation.CaptureFingerprint(uint32(os.Geteuid()), uint32(os.Getegid()), d.protectedPaths())
+	drift = append(drift, d.securityFP.Drift(now)...)
+	return drift
+}
+
+// monitorSecurityDrift periodically re-verifies the boundary and revokes the
+// host capability when it drifts, falling back to the external trusted
+// terminal (objective 4.4). It never terminates already-committed external
+// operations: only presentation assurance is withdrawn.
+func (d *Daemon) monitorSecurityDrift(ctx context.Context) {
+	ticker := time.NewTicker(driftInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if drift := d.VerifySecurityBoundary(); len(drift) > 0 {
+				d.revokeOnDrift(drift)
+			}
+		}
+	}
+}
+
+// revokeOnDrift withdraws the verified host capability and records why.
+func (d *Daemon) revokeOnDrift(drift []string) {
+	reason := "security drift detected: " + joinDrift(drift)
+	d.svc.SetHostQualification(nil)
+	d.svc.SetHostInputUnverified(reason)
+	if d.srv != nil {
+		d.srv.AssuranceLabel = isolation.LabelUnverified
+	}
+	if db := d.svc.DB(); db != nil {
+		_ = db.WriteAuditLog(&types.AuditLog{
+			OperationID: "", Action: "security_drift_revocation", Actor: "broker",
+			Outcome: reason,
+		})
+	}
+	// Refresh the fingerprint so one drift event does not repeatedly fire.
+	d.securityFP = isolation.CaptureFingerprint(uint32(os.Geteuid()), uint32(os.Getegid()), d.protectedPaths())
+}
+
+func joinDrift(drift []string) string {
+	out := ""
+	for i, s := range drift {
+		if i > 0 {
+			out += "; "
+		}
+		out += s
+	}
+	if out == "" {
+		return "unspecified"
+	}
+	return out
 }
 
 func validateIsolationTopology(cfg Config, brokerUID uint32) error {
