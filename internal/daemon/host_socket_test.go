@@ -8,9 +8,7 @@ import (
 
 // SP-01: daemon startup must succeed with no HostSocket configured.
 func TestDaemonStartupWithoutHostSocket(t *testing.T) {
-	if sandboxAncestorUntrusted() {
-		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
-	}
+	requireSocketFixture(t)
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Skipf("sandbox does not support trusted socket dir: %v", err)
@@ -33,9 +31,7 @@ func TestDaemonStartupWithoutHostSocket(t *testing.T) {
 
 // SP-01: a configured but nonexistent host socket must fail startup.
 func TestDaemonStartupWithInvalidHostSocket(t *testing.T) {
-	if sandboxAncestorUntrusted() {
-		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
-	}
+	requireSocketFixture(t)
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Skipf("sandbox does not support trusted socket dir: %v", err)

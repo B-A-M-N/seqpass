@@ -16,7 +16,7 @@ import (
 func TestAdminHostBindingCreate(t *testing.T) {
 	dir, err := testruntime.Dir(t)
 	if err != nil {
-		t.Skipf("socket fixture unavailable: %v", err)
+		testruntime.Skip(t, err)
 		return
 	}
 	if err := os.Chmod(dir, 0700); err != nil {
@@ -118,7 +118,7 @@ func TestHostBindingAgentDomainDenied(t *testing.T) {
 	// umask is.
 	sockDir, err := os.MkdirTemp("/tmp", "seqpass-hostbinding-")
 	if err != nil {
-		t.Skipf("socket fixture unavailable: %v", err)
+		testruntime.Skip(t, err)
 		return
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
@@ -135,7 +135,7 @@ func TestHostBindingAgentDomainDenied(t *testing.T) {
 	}
 	srv := NewServer(svc, agentSock, "", nil, auth)
 	if err := srv.Start(); err != nil {
-		t.Skipf("socket fixture unavailable: %v", err)
+		testruntime.Skip(t, err)
 		return
 	}
 	defer srv.Close()

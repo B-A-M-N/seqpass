@@ -11,27 +11,32 @@ import (
 	"github.com/secretbridge/secretbridge/internal/testruntime"
 )
 
-// sandboxAncestorUntrusted reports whether this sandbox exposes a
-// high-level ancestor (e.g. /home) as nobody:nogroup. The broker refuses
-// such ancestors by design, so socket-based tests must skip there.
-//
-// It probes by asking for a real test runtime directory, then removes it: a
-// probe must not leak the directory it created.
-func sandboxAncestorUntrusted() bool {
-	dir, err := testruntime.Dir(testruntime.NamedFunc("sandboxAncestorUntrusted"))
+// probeSocketFixture reports whether this sandbox can host a trusted Unix
+// socket fixture. The probe directory is removed either way: a probe must not
+// leak the directory it created.
+func probeSocketFixture() error {
+	dir, err := testruntime.Dir(testruntime.NamedFunc("socketFixtureProbe"))
 	if err != nil {
-		return true
+		return err
 	}
 	_ = os.RemoveAll(dir)
-	return false
+	return nil
+}
+
+// requireSocketFixture skips a socket test the sandbox cannot host, and fails
+// it under SEQPASS_REQUIRE_RUNTIME. A coverage run must not pass while
+// silently omitting the socket suites, which is what a plain t.Skip allowed.
+func requireSocketFixture(t *testing.T) {
+	t.Helper()
+	if err := probeSocketFixture(); err != nil {
+		testruntime.Skip(t, err)
+	}
 }
 
 // G05: two brokers cannot own one database. The second is refused before
 // it can reconcile the live first broker's operations into failure.
 func TestSecondBrokerRefused(t *testing.T) {
-	if sandboxAncestorUntrusted() {
-		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
-	}
+	requireSocketFixture(t)
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Fatal(err)
@@ -57,9 +62,7 @@ func TestSecondBrokerRefused(t *testing.T) {
 // P1-2: a second broker through a pathname alias to the same database
 // is refused — alias spellings never yield a second ownership.
 func TestSecondBrokerViaAliasRefused(t *testing.T) {
-	if sandboxAncestorUntrusted() {
-		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
-	}
+	requireSocketFixture(t)
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Fatal(err)
@@ -93,9 +96,7 @@ func TestSecondBrokerViaAliasRefused(t *testing.T) {
 // not a graceful result — and the database lease is retained so no
 // successor can reconcile the still-live work as its own.
 func TestShutdownTimeoutRetainsLease(t *testing.T) {
-	if sandboxAncestorUntrusted() {
-		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
-	}
+	requireSocketFixture(t)
 	old := shutdownWorkerTimeout
 	shutdownWorkerTimeout = 50 * time.Millisecond
 	defer func() { shutdownWorkerTimeout = old }()
@@ -135,9 +136,7 @@ func TestShutdownTimeoutRetainsLease(t *testing.T) {
 // QR-02: the broker serves the trusted intake domain on its own
 // owner-only socket alongside agent and admin.
 func TestIntakeSocketServed(t *testing.T) {
-	if sandboxAncestorUntrusted() {
-		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
-	}
+	requireSocketFixture(t)
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Fatal(err)

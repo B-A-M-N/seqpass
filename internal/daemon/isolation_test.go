@@ -35,9 +35,7 @@ func TestProductionVaultDefaultsToIsolated(t *testing.T) {
 // Objective 4.1: a best-effort deployment is labelled unverified, never
 // presented as protected.
 func TestBestEffortReportsUnverified(t *testing.T) {
-	if sandboxAncestorUntrusted() {
-		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
-	}
+	requireSocketFixture(t)
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Fatal(err)
@@ -65,9 +63,7 @@ func TestBestEffortReportsUnverified(t *testing.T) {
 // the label and the service's host facts are published safely rather than
 // torn. It is the regression test for the unsynchronized assurance fields.
 func TestDriftRevocationIsSafeUnderConcurrentReads(t *testing.T) {
-	if sandboxAncestorUntrusted() {
-		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
-	}
+	requireSocketFixture(t)
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Fatal(err)
@@ -123,9 +119,7 @@ func TestDriftRevocationIsSafeUnderConcurrentReads(t *testing.T) {
 // Objective 4.4: changing a protected socket's permissions is detected as
 // drift and revokes the host capability, without touching external work.
 func TestSecurityDriftRevokesHostCapability(t *testing.T) {
-	if sandboxAncestorUntrusted() {
-		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
-	}
+	requireSocketFixture(t)
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Fatal(err)
@@ -265,9 +259,7 @@ func TestProductionVaultRefusesBestEffort(t *testing.T) {
 
 // The development vault keeps working, but is always reported unverified.
 func TestDevelopmentVaultAllowsBestEffort(t *testing.T) {
-	if sandboxAncestorUntrusted() {
-		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
-	}
+	requireSocketFixture(t)
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Fatal(err)

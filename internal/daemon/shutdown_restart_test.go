@@ -11,9 +11,7 @@ import (
 // is held, and after the old broker shuts down, the new broker reconciles
 // correctly.
 func TestDaemonShutdownRestartCycle(t *testing.T) {
-	if sandboxAncestorUntrusted() {
-		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
-	}
+	requireSocketFixture(t)
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Skipf("sandbox does not support trusted socket dir: %v", err)
@@ -41,9 +39,7 @@ func TestDaemonShutdownRestartCycle(t *testing.T) {
 // SP-20: two simultaneous brokers on the same DB are refused — the first
 // broker's lease prevents a successor from reconciling live work.
 func TestDaemonSimultaneousStartupRefused(t *testing.T) {
-	if sandboxAncestorUntrusted() {
-		t.Skip("sandbox reports an untrusted ancestor; Unix socket fixture needs trusted ancestors")
-	}
+	requireSocketFixture(t)
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Skipf("sandbox does not support trusted socket dir: %v", err)
