@@ -413,15 +413,19 @@ to exercise the full Unix-socket coverage.
 
 ```bash
 go test ./...                                  # portable; socket suites skip
-SEQPASS_TEST_RUNTIME_DIR=/run/seqpass-test go test ./...   # full coverage
+SEQPASS_TEST_RUNTIME_DIR=/tmp go test ./...    # full socket coverage
+SEQPASS_TEST_RUNTIME_DIR=/tmp SEQPASS_REQUIRE_RUNTIME=1 go test ./...  # as CI
 ```
 
 `SEQPASS_TEST_RUNTIME_DIR` names a directory with trusted ancestors (owned by
 the test identity, not group- or world-writable) under which the Unix-socket
 suites create their fixtures. It must be set to exercise the socket-based
 coverage. Without it those suites skip, which keeps `go test ./...` portable
-but silently reduces coverage — so CI and release verification set it
-explicitly and treat a skip as a gap.
+but silently reduces coverage.
+
+`SEQPASS_REQUIRE_RUNTIME=1` turns a blocked prerequisite into a test failure
+instead of a skip, so a coverage run cannot pass while omitting the socket
+suites. Use it in CI and release verification.
 
 Some tests do not need a trusted ancestor and instead create their own
 owner-only directory under `/tmp` (which is world-traversable and therefore a

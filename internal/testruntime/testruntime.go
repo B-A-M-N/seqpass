@@ -8,6 +8,7 @@ package testruntime
 import (
 	"fmt"
 	"os"
+	"strings"
 	"syscall"
 )
 
@@ -50,7 +51,10 @@ func Dir(t interface{ Name() string }) (string, error) {
 			return "", &BlockedError{Path: root, Err: fmt.Errorf("trusted root is group/other-writable without sticky bit")}
 		}
 	}
-	dir, err := os.MkdirTemp(root, "seqpass-test-"+t.Name()+"-")
+	// t.Name() contains "/" for subtests, which MkdirTemp rejects as a
+	// pattern, so a subtest could never obtain a runtime directory and would
+	// silently skip even when the socket suites are required to run.
+	dir, err := os.MkdirTemp(root, "seqpass-test-"+strings.ReplaceAll(t.Name(), "/", "_")+"-")
 	if err != nil {
 		return "", &BlockedError{Path: root, Err: err}
 	}
@@ -59,10 +63,20 @@ func Dir(t interface{ Name() string }) (string, error) {
 
 // Skip records a structured blocked result for Unix-socket fixtures whose
 // trusted runtime prerequisites are unavailable.
-func Skip(t interface{ Skipf(format string, args ...interface{}) }, err error) {
+//
+// A coverage run must not pass while silently omitting the socket suites, so
+// SEQPASS_REQUIRE_RUNTIME turns a blocked prerequisite into a failure. The
+// default stays portable: without the variable the suite skips.
+func Skip(t interface {
+	Skipf(format string, args ...interface{})
+	Fatalf(format string, args ...interface{})
+}, err error) {
+	if os.Getenv("SEQPASS_REQUIRE_RUNTIME") != "" {
+		t.Fatalf("REQUIRED: %v (SEQPASS_REQUIRE_RUNTIME is set, so this suite must run)", err)
+		return
+	}
 	t.Skipf("BLOCKED: %v", err)
 }
-
 
 // DirOrTemp is for service-level tests that do not bind sockets: it uses
 // the configured trusted root when available, and otherwise falls back to
@@ -79,7 +93,6 @@ func DirOrTemp(t interface {
 	}
 	return t.TempDir()
 }
-
 
 // NamedFunc adapts a plain function name to the Dir helper's minimal
 // naming interface. It is not used for socket tests that need real
