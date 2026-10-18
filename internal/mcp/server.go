@@ -7,6 +7,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+	"github.com/secretbridge/secretbridge/internal/adapter"
 	"github.com/secretbridge/secretbridge/internal/ipc"
 )
 
@@ -74,10 +75,21 @@ func (s *Server) registerTools() {
 	s.mcp.AddTool(relayReqTool, s.handleRelayRequest)
 
 	relayStatusTool := mcp.NewTool("relay_status",
-		mcp.WithDescription("Check your own relay request: awaiting_user, authorized, delivered, uncertain, rejected, expired, cancelled, unavailable, or failed. Never contains the secret."),
+		mcp.WithDescription("Check your own relay request: awaiting_user, authorized, dispatching, accepted, applied, uncertain, rejected, expired, or unavailable. Never contains the secret."),
 		mcp.WithString("request_id", mcp.Required(), mcp.Description("Relay request ID from relay_request")),
 	)
 	s.mcp.AddTool(relayStatusTool, s.handleRelayStatus)
+
+	relayCancelTool := mcp.NewTool("relay_cancel",
+		mcp.WithDescription("Withdraw your own relay request before it is fulfilled; safe to repeat"),
+		mcp.WithString("request_id", mcp.Required(), mcp.Description("Relay request ID from relay_request")),
+	)
+	s.mcp.AddTool(relayCancelTool, s.handleRelayCancel)
+
+	capabilitiesTool := mcp.NewTool("secret_capabilities",
+		mcp.WithDescription("Discover what you may request: allowlisted operations, accepted data kinds, the closed request-state vocabulary, and the broker's honest input-assurance facts. Never contains secret material"),
+	)
+	s.mcp.AddTool(capabilitiesTool, s.handleCapabilities)
 }
 
 func (s *Server) call(ctx context.Context, method string, params map[string]interface{}) (interface{}, error) {
@@ -168,8 +180,89 @@ func (s *Server) handleRelayStatus(ctx context.Context, req mcp.CallToolRequest)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	raw, _ := json.Marshal(data)
+	out, err := normalizeRelayStatus(data)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	outJSON, _ := json.Marshal(out)
+	return mcp.NewToolResultText(string(outJSON)), nil
+}
+
+// normalizeRelayStatus maps a broker relay-status payload onto the closed
+// adapter vocabulary and scrubs anything sensitive. An unqualified broker
+// state is refused rather than reported (objective 5).
+func normalizeRelayStatus(data interface{}) (map[string]interface{}, error) {
+	m, ok := data.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("broker returned an unusable status")
+	}
+	raw, _ := m["status"].(string)
+	state, err := adapter.Normalize(raw)
+	if err != nil {
+		return nil, fmt.Errorf("broker reported an unqualified request state")
+	}
+	out := adapter.Scrub(m)
+	out["status"] = string(state)
+	out["settled"] = state.Settled()
+	out["succeeded"] = state.Succeeded()
+	return out, nil
+}
+
+func (s *Server) handleRelayCancel(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	data, err := s.call(ctx, ipc.MethodRelayCancel, map[string]interface{}{
+		"request_id": argStr(req, "request_id"),
+	})
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	out := adapter.Scrub(asMap(data))
+	frame, _ := adapter.Encode(adapter.StateChanged(argStr(req, "request_id"), adapter.StateRejected, "cancelled_by_agent", ""))
+	var event map[string]interface{}
+	if err := json.Unmarshal(frame, &event); err == nil {
+		out["event"] = event
+	}
+	outJSON, _ := json.Marshal(out)
+	return mcp.NewToolResultText(string(outJSON)), nil
+}
+
+// handleCapabilities answers discovery without probing: the allowlisted
+// operations come from the broker's policy-filtered catalog and the
+// assurance facts are broker-owned. No value, hint or length is included.
+func (s *Server) handleCapabilities(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	health, err := s.call(ctx, ipc.MethodHealth, nil)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	catalog, err := s.call(ctx, ipc.MethodCatalog, nil)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	hm := asMap(health)
+	cap := adapter.NewCapability(
+		adapter.TransportMCP,
+		strField(hm, "assurance"),
+		strField(hm, "input_mode"),
+		strField(hm, "input_reason"),
+		adapter.OperationFromCatalog(catalog),
+	)
+	raw, err := json.Marshal(cap)
+	if err != nil {
+		return mcp.NewToolResultError("capability encoding failed"), nil
+	}
 	return mcp.NewToolResultText(string(raw)), nil
+}
+
+func asMap(v interface{}) map[string]interface{} {
+	m, _ := v.(map[string]interface{})
+	if m == nil {
+		return map[string]interface{}{}
+	}
+	return m
+}
+
+func strField(m map[string]interface{}, key string) string {
+	s, _ := m[key].(string)
+	return s
 }
 
 // handleRelayRequest creates a handoff request and returns its opaque ID.

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/secretbridge/secretbridge/internal/approval"
@@ -47,6 +48,10 @@ func main() {
 		statusCmd(os.Args[2:])
 	case "relay":
 		relayCmd(os.Args[2:])
+	case "agent":
+		agentCmd(os.Args[2:])
+	case "recipient":
+		recipientCmd(os.Args[2:])
 	case "tui":
 		tuiCmd(os.Args[2:])
 	default:
@@ -63,6 +68,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  seqpass mcp [--socket PATH]   # stdio adapter; register in Codex/Claude/Hermes")
 	fmt.Fprintln(os.Stderr, "  seqpass admin <catalog|pending|show|approve|reject|add-secret|add-dest|add-policy|set-policy|update-dest|execute|host-binding> ...")
 	fmt.Fprintln(os.Stderr, "  seqpass relay <inbox|fulfill|status|cancel|request> ...  # trusted human handoff (intake socket)")
+	fmt.Fprintln(os.Stderr, "  seqpass agent <capabilities|request|status|cancel> ...  # generic agent adapter over the broker socket")
+	fmt.Fprintln(os.Stderr, "  seqpass recipient --socket PATH --journal DIR [--consumer-dir DIR]  # trusted credential consumer endpoint")
 	fmt.Fprintln(os.Stderr, "  seqpass tui [--intake-socket PATH]  # persistent native inbox TUI (own terminal, never the agent's)")
 	fmt.Fprintln(os.Stderr, "  seqpass status")
 	fmt.Fprintln(os.Stderr, "")
@@ -92,7 +99,7 @@ func brokerCmd(args []string) {
 	sockGroup := fs.String("socket-group", "", "agent Unix group owning the agent socket+dir (required for multi-user deployments)")
 	opTTL := fs.Duration("default-op-ttl", 0, "approval window for new requests (default 5m, clamped 1m-24h)")
 	maxConc := fs.Int("max-concurrent-ops", 4, "auto-worker execution pool size (1-32)")
-	assurance := fs.String("assurance", daemon.AssuranceBestEffort, "topology label: best-effort or isolated (Linux, dedicated broker UID and separate agent UIDs)")
+	assurance := fs.String("assurance", "", "topology label: empty (production default: isolated), isolated, or best-effort (development only, always reported unverified)")
 	_ = fs.Parse(args)
 
 	// Explicit provider configuration (C14): no silent ephemeral vault.
@@ -109,6 +116,11 @@ func brokerCmd(args []string) {
 	}
 
 	_ = os.MkdirAll(filepath.Dir(*dbF), 0700)
+	// Objective 8: UID lists fail closed. A malformed or duplicated UID is a
+	// startup error, never a silently narrowed identity set.
+	intakeUIDList := mustUIDs("intake-uid", *intakeUIDs)
+	adminUIDList := mustUIDs("admin-uid", *adminUIDs)
+	agentUIDList := mustUIDs("agent-uid", *agentUIDs)
 	d, err := daemon.New(daemon.Config{
 		AssuranceMode: *assurance,
 		DBPath:        *dbF,
@@ -117,9 +129,9 @@ func brokerCmd(args []string) {
 		AdminSocket:   *adminF,
 		IntakeSocket:  *intakeF,
 		HostSocket:    *hostF,
-		IntakeUIDs:    parseUIDs(*intakeUIDs),
-		AdminUIDs:     parseUIDs(*adminUIDs),
-		AgentUIDs:     parseUIDs(*agentUIDs), SocketGroup: *sockGroup, AegisKeysSocket: *aegisSock,
+		IntakeUIDs:    intakeUIDList,
+		AdminUIDs:     adminUIDList,
+		AgentUIDs:     agentUIDList, SocketGroup: *sockGroup, AegisKeysSocket: *aegisSock,
 		IntakeGroup:        *intakeGroup,
 		NoRelayAutoDeliver: *noRelayF,
 		AegisKeysDir:       *aegisDir,
@@ -131,7 +143,11 @@ func brokerCmd(args []string) {
 		fmt.Fprintf(os.Stderr, "broker failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Fprintf(os.Stderr, "seqpass broker uid=%d assurance=%s on %s (admin %s admin-uids=%v agent-uids=%v op-ttl=%s max-concurrent-ops=%d)\n", os.Geteuid(), *assurance, *sockF, *adminF, parseUIDs(*adminUIDs), parseUIDs(*agentUIDs), (*opTTL).String(), *maxConc)
+	label := daemon.AssuranceLabel(d.AssuranceMode())
+	if *assurance == "" {
+		label += " (default)"
+	}
+	fmt.Fprintf(os.Stderr, "seqpass broker uid=%d assurance=%s (%s) on %s (admin %s admin-uids=%v agent-uids=%v op-ttl=%s max-concurrent-ops=%d)\n", os.Geteuid(), d.AssuranceMode(), label, *sockF, *adminF, adminUIDList, agentUIDList, (*opTTL).String(), *maxConc)
 	if err := d.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "broker error: %v\n", err)
 		os.Exit(1)
@@ -441,9 +457,15 @@ func hostBindingCmd(args []string, cli *ipc.Client) {
 	ttl := fs.Int("ttl-seconds", 0, "binding TTL in seconds (required for create/renew)")
 	_ = fs.Parse(args[1:])
 	params := map[string]interface{}{"action": action, "host_kind": *kind}
-	if *human != "" { params["human_principal"] = *human }
-	if *agent != "" { params["agent_principal"] = *agent }
-	if *ttl > 0 { params["ttl_seconds"] = uint64(*ttl) }
+	if *human != "" {
+		params["human_principal"] = *human
+	}
+	if *agent != "" {
+		params["agent_principal"] = *agent
+	}
+	if *ttl > 0 {
+		params["ttl_seconds"] = uint64(*ttl)
+	}
 	data, err := cli.Call(ipc.MethodHostBindingCreate, params)
 	must(err)
 	printJSON(data)
@@ -491,18 +513,42 @@ func runTUI(intakeSock string) error {
 	return tui.Run(tui.Config{IntakeSocket: intakeSock})
 }
 
-func parseUIDs(s string) []uint32 {
-	if s == "" {
-		return nil
+// parseUIDs parses a comma-separated UID list. It fails closed: an invalid
+// token is a startup error, never silently dropped, because dropping a
+// --agent-uid would quietly widen who may reach the broker (objective 8).
+func parseUIDs(s string) ([]uint32, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
 	}
 	var out []uint32
+	seen := map[uint32]bool{}
 	for _, part := range strings.Split(s, ",") {
-		var u uint32
-		if _, err := fmt.Sscanf(strings.TrimSpace(part), "%d", &u); err == nil {
-			out = append(out, u)
+		token := strings.TrimSpace(part)
+		if token == "" {
+			return nil, fmt.Errorf("empty UID in list %q", s)
 		}
+		n, err := strconv.ParseUint(token, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid UID %q in list %q", token, s)
+		}
+		uid := uint32(n)
+		if seen[uid] {
+			return nil, fmt.Errorf("duplicate UID %d in list %q", uid, s)
+		}
+		seen[uid] = true
+		out = append(out, uid)
 	}
-	return out
+	return out, nil
+}
+
+// mustUIDs parses a UID list for CLI use, exiting on malformed input.
+func mustUIDs(flagName, s string) []uint32 {
+	uids, err := parseUIDs(s)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid --%s: %v\n", flagName, err)
+		os.Exit(2)
+	}
+	return uids
 }
 
 func printJSON(v interface{}) {

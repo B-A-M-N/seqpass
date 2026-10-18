@@ -1,4 +1,6 @@
 .tmp/
 node_modules/
 *.test
-seqpass
+# The built binary. Anchored to the repository root so it does not also
+# ignore the cmd/seqpass package directory.
+/seqpass

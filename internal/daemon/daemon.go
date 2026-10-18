@@ -526,6 +526,10 @@ func New(cfg Config) (*Daemon, error) {
 	return d, nil
 }
 
+// AssuranceMode returns the effective, validated topology label chosen at
+// construction (including the production default).
+func (d *Daemon) AssuranceMode() string { return d.cfg.AssuranceMode }
+
 // protectedPaths lists every object whose identity or permissions must not
 // change under a verified boundary.
 func (d *Daemon) protectedPaths() []string {

@@ -598,6 +598,7 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 		}
 		return Response{OK: true, Data: map[string]string{
 			"status": "ok", "assurance_mode": mode, "assurance": label,
+			"input_mode": s.svc.HostInputMode(), "input_reason": s.svc.HostInputReason(),
 		}}
 	case MethodCatalog:
 		refs, err := s.svc.Catalog(principal)
