@@ -42,7 +42,38 @@ func NewDB(path string) (*DB, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	// The database holds protected metadata, and its permissions are a
+	// security property: the isolation doctor refuses to verify a topology in
+	// which an agent identity can read it. SQLite creates the file with the
+	// process umask, so the mode is tightened explicitly, including the WAL
+	// sidecars that exist at this point. A file that cannot be restricted is
+	// fatal: the broker must not serve from a readable store.
+	if err := restrictDatabaseFiles(path); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return d, nil
+}
+
+// restrictDatabaseFiles forces the SQLite database and its sidecars to owner
+// only. It is called after the schema exists so every sidecar that can be
+// created eagerly has been created and is covered.
+func restrictDatabaseFiles(path string) error {
+	if path == "" || path == ":memory:" {
+		return nil
+	}
+	for _, p := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
+		if _, err := os.Stat(p); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("cannot inspect database file %s: %w", p, err)
+		}
+		if err := os.Chmod(p, 0600); err != nil {
+			return fmt.Errorf("cannot restrict database file %s to 0600: %w", p, err)
+		}
+	}
+	return nil
 }
 
 func (d *DB) initSchema() error {

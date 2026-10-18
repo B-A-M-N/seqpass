@@ -17,19 +17,22 @@ import (
 	"strings"
 
 	"github.com/secretbridge/secretbridge/internal/approval"
+	"github.com/secretbridge/secretbridge/internal/config"
 	"github.com/secretbridge/secretbridge/internal/daemon"
 	"github.com/secretbridge/secretbridge/internal/ipc"
+	"github.com/secretbridge/secretbridge/internal/isolation"
 	mcpserver "github.com/secretbridge/secretbridge/internal/mcp"
+	"github.com/secretbridge/secretbridge/internal/metadata"
 	"github.com/secretbridge/secretbridge/internal/service"
 	"github.com/secretbridge/secretbridge/internal/tui"
 	"github.com/secretbridge/secretbridge/internal/types"
 )
 
+// defaultPaths is the single source of default endpoints, shared by every
+// command so a client cannot talk to a different installation than the
+// broker it was started with.
 func defaultPaths() (db, sock, admin, intake string) {
-	home, _ := os.UserHomeDir()
-	base := filepath.Join(home, ".seqpass")
-	sock = filepath.Join(base, "broker.sock")
-	return filepath.Join(base, "metadata.db"), sock, sock + ".admin", sock + ".intake"
+	return config.Paths()
 }
 
 func main() {
@@ -54,6 +57,10 @@ func main() {
 		recipientCmd(os.Args[2:])
 	case "tui":
 		tuiCmd(os.Args[2:])
+	case "doctor":
+		doctorCmd(os.Args[2:])
+	case "init":
+		initCmd(os.Args[2:])
 	default:
 		usage()
 		os.Exit(1)
@@ -71,6 +78,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  seqpass agent <capabilities|request|status|cancel> ...  # generic agent adapter over the broker socket")
 	fmt.Fprintln(os.Stderr, "  seqpass recipient --socket PATH --journal DIR [--consumer-dir DIR]  # trusted credential consumer endpoint")
 	fmt.Fprintln(os.Stderr, "  seqpass tui [--intake-socket PATH]  # persistent native inbox TUI (own terminal, never the agent's)")
+	fmt.Fprintln(os.Stderr, "  seqpass doctor [--topology]  # honest health + live isolation boundary report")
+	fmt.Fprintln(os.Stderr, "  seqpass init [--vault aegiskeys] ...  # create the 0700 state dir + database, print next steps")
 	fmt.Fprintln(os.Stderr, "  seqpass status")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "MCP registration:")
@@ -513,32 +522,221 @@ func runTUI(intakeSock string) error {
 	return tui.Run(tui.Config{IntakeSocket: intakeSock})
 }
 
-// parseUIDs parses a comma-separated UID list. It fails closed: an invalid
-// token is a startup error, never silently dropped, because dropping a
-// --agent-uid would quietly widen who may reach the broker (objective 8).
-func parseUIDs(s string) ([]uint32, error) {
-	if strings.TrimSpace(s) == "" {
-		return nil, nil
-	}
-	var out []uint32
-	seen := map[uint32]bool{}
-	for _, part := range strings.Split(s, ",") {
-		token := strings.TrimSpace(part)
-		if token == "" {
-			return nil, fmt.Errorf("empty UID in list %q", s)
-		}
-		n, err := strconv.ParseUint(token, 10, 32)
+// doctorCmd reports the honest state of an installation. Without --topology
+// it asks a running broker; with --topology it evaluates the configured
+// boundary live, before anything is started.
+func doctorCmd(args []string) {
+	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	_, sock, admin, intake := defaultPaths()
+	topology := fs.Bool("topology", false, "evaluate the configured topology live instead of asking a running broker")
+	requireVerified := fs.Bool("require-verified", false, "exit non-zero unless the boundary is verified")
+	sockF := fs.String("socket", sock, "broker socket")
+	adminF := fs.String("admin-socket", admin, "admin socket")
+	intakeF := fs.String("intake-socket", intake, "trusted intake socket")
+	dbF := fs.String("db", "", "database path (defaults to the standard location)")
+	vaultF := fs.String("vault", "", "vault type: aegiskeys|memory-test")
+	devF := fs.Bool("dev", false, "memory-test vault acknowledgement (development only)")
+	assuranceF := fs.String("assurance", "", "topology claim: isolated|best-effort (default: derived from the vault)")
+	agentUIDsF := fs.String("agent-uid", "", "comma-separated approved agent UIDs")
+	adminUIDsF := fs.String("admin-uid", "", "comma-separated admin UIDs")
+	intakeUIDsF := fs.String("intake-uid", "", "comma-separated trusted intake UIDs")
+	groupF := fs.String("socket-group", "", "agent socket group")
+	intakeGroupF := fs.String("intake-group", "", "trusted intake socket group")
+	hostF := fs.String("host-socket", "", "display-only native-host adapter socket")
+	aegisSock := fs.String("aegiskeys-socket", "", "AegisKeys broker socket")
+	aegisDir := fs.String("aegiskeys-dir", "", "AegisKeys config dir")
+	_ = fs.Parse(args)
+
+	if !*topology {
+		cli, err := ipc.Dial(*sockF)
 		if err != nil {
-			return nil, fmt.Errorf("invalid UID %q in list %q", token, s)
+			fmt.Fprintf(os.Stderr, "doctor: broker unreachable at %s: %v\n", *sockF, err)
+			os.Exit(1)
 		}
-		uid := uint32(n)
-		if seen[uid] {
-			return nil, fmt.Errorf("duplicate UID %d in list %q", uid, s)
+		defer cli.Close()
+		data, err := cli.Call(ipc.MethodHealth, nil)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "doctor: health call failed: %v\n", err)
+			os.Exit(1)
 		}
-		seen[uid] = true
-		out = append(out, uid)
+		printJSON(data)
+		// A running broker's own health is the honest source. Only the
+		// explicit requirement turns an unverified label into a failure,
+		// because best-effort is unverified by design.
+		if *requireVerified && !healthVerified(data) {
+			fmt.Fprintln(os.Stderr, "doctor: boundary is not verified")
+			os.Exit(1)
+		}
+		return
 	}
-	return out, nil
+
+	db, _, _, _ := defaultPaths()
+	if *dbF != "" {
+		db = *dbF
+	}
+	d := config.Defaults()
+	d.DBPath = db
+	d.SocketPath = *sockF
+	d.AdminSocket = *adminF
+	d.IntakeSocket = *intakeF
+	d.HostSocket = *hostF
+	d.VaultType = *vaultF
+	d.Dev = *devF
+	d.AssuranceMode = *assuranceF
+	d.SocketGroup = *groupF
+	d.IntakeGroup = *intakeGroupF
+	d.AegisKeysSocket = *aegisSock
+	d.AegisKeysDir = *aegisDir
+	d.AgentUIDs = mustUIDs("agent-uid", *agentUIDsF)
+	d.AdminUIDs = mustUIDs("admin-uid", *adminUIDsF)
+	d.IntakeUIDs = mustUIDs("intake-uid", *intakeUIDsF)
+
+	if err := d.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "doctor: configuration is not usable: %v\n", err)
+		os.Exit(2)
+	}
+	// BrokerPID is 0 and the check is a preflight: this is before the broker
+	// starts, so there is no process to inspect and the objects it will
+	// create do not exist yet. The report says so rather than pretending
+	// those checks passed.
+	rep, err := isolation.Doctor(d.IsolationPreflight())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "doctor: cannot evaluate the topology: %v\n", err)
+		os.Exit(2)
+	}
+	printJSON(rep)
+
+	// A preflight verdict is "nothing is provably wrong", never "verified":
+	// the broker is not serving, so the process boundary could not be
+	// inspected. Exit non-zero only for a real problem, or when the caller
+	// explicitly demanded a verified boundary that only a running broker can
+	// demonstrate.
+	if rep.AnyFailed() {
+		fmt.Fprintf(os.Stderr, "doctor: the topology would not satisfy the %s claim: %s\n", d.EffectiveAssurance(), strings.Join(rep.FailedNames(), ", "))
+		os.Exit(1)
+	}
+	if *requireVerified {
+		fmt.Fprintln(os.Stderr, "doctor: --require-verified cannot be satisfied by a preflight check; query the running broker (drop --topology)")
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "doctor: preflight found no boundary problem for the %s claim; the running broker must confirm it\n", d.EffectiveAssurance())
+}
+
+// healthVerified reports whether a broker health response carries the
+// verified assurance label. Anything else, including a missing field, is
+// unverified: absence of evidence is not evidence of a boundary.
+func healthVerified(data interface{}) bool {
+	m, ok := data.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	label, _ := m["assurance"].(string)
+	return label == "verified"
+}
+
+// initCmd creates the installation's state directory and database with
+// restrictive permissions, then prints the exact command to start the
+// broker. It never generates, stores or prints a credential.
+func initCmd(args []string) {
+	fs := flag.NewFlagSet("init", flag.ExitOnError)
+	dbDefault, sock, admin, intake := defaultPaths()
+	dbF := fs.String("db", dbDefault, "database path")
+	vaultF := fs.String("vault", config.VaultAegisKeys, "vault type: aegiskeys (production) or memory-test (development, requires --dev)")
+	devF := fs.Bool("dev", false, "development-only acknowledgement for the memory-test vault")
+	assuranceF := fs.String("assurance", "", "topology claim: isolated|best-effort (default: derived from the vault)")
+	agentUIDsF := fs.String("agent-uid", "", "comma-separated approved agent UIDs (required for a production vault)")
+	adminUIDsF := fs.String("admin-uid", "", "comma-separated admin UIDs")
+	intakeUIDsF := fs.String("intake-uid", "", "comma-separated trusted intake UIDs")
+	groupF := fs.String("socket-group", "", "agent socket group (required for a production vault)")
+	_ = fs.Parse(args)
+
+	d := config.Defaults()
+	d.DBPath = *dbF
+	d.VaultType = *vaultF
+	d.Dev = *devF
+	d.AssuranceMode = *assuranceF
+	d.SocketGroup = *groupF
+	d.AgentUIDs = mustUIDs("agent-uid", *agentUIDsF)
+	d.AdminUIDs = mustUIDs("admin-uid", *adminUIDsF)
+	d.IntakeUIDs = mustUIDs("intake-uid", *intakeUIDsF)
+	if err := d.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "init: %v\n", err)
+		os.Exit(2)
+	}
+
+	dir := d.StateDir()
+	// The state directory holds the database and the sockets. It must not be
+	// group- or world-accessible: the broker refuses untrusted ancestors, and
+	// a world-writable parent would let another identity replace a socket.
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		fmt.Fprintf(os.Stderr, "init: cannot create %s: %v\n", dir, err)
+		os.Exit(1)
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		fmt.Fprintf(os.Stderr, "init: cannot restrict %s: %v\n", dir, err)
+		os.Exit(1)
+	}
+	if fi, err := os.Stat(dir); err != nil {
+		fmt.Fprintf(os.Stderr, "init: cannot inspect %s: %v\n", dir, err)
+		os.Exit(1)
+	} else if fi.Mode().Perm()&0077 != 0 {
+		fmt.Fprintf(os.Stderr, "init: refusing: %s is accessible to other identities (%v)\n", dir, fi.Mode().Perm())
+		os.Exit(1)
+	}
+
+	db, err := metadata.NewDB(d.DBPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "init: cannot initialize the database: %v\n", err)
+		os.Exit(1)
+	}
+	if err := db.Close(); err != nil {
+		fmt.Fprintf(os.Stderr, "init: cannot close the database cleanly: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("state directory: %s (0700)\n", dir)
+	fmt.Printf("database:        %s\n", d.DBPath)
+	fmt.Printf("assurance:       %s%s\n", d.EffectiveAssurance(), map[bool]string{true: " (default)", false: ""}[*assuranceF == ""])
+	fmt.Println()
+	fmt.Println("Next steps (run the broker as the dedicated service UID):")
+	var idFlags string
+	if d.SocketGroup != "" {
+		idFlags += " --socket-group " + d.SocketGroup
+	}
+	if len(d.AgentUIDs) > 0 {
+		idFlags += " --agent-uid " + joinUIDs(d.AgentUIDs)
+	}
+	if len(d.IntakeUIDs) > 0 {
+		idFlags += " --intake-uid " + joinUIDs(d.IntakeUIDs)
+	}
+	if len(d.AdminUIDs) > 0 {
+		idFlags += " --admin-uid " + joinUIDs(d.AdminUIDs)
+	}
+	if d.EffectiveAssurance() == config.AssuranceIsolated {
+		fmt.Printf("  seqpass broker --vault %s --assurance isolated --db %s --socket %s \\\n", d.VaultType, d.DBPath, sock)
+		fmt.Printf("    --admin-socket %s --intake-socket %s%s\n", admin, intake, idFlags)
+	} else {
+		fmt.Printf("  seqpass broker --vault %s --dev --assurance best-effort --db %s --socket %s\n", d.VaultType, d.DBPath, sock)
+	}
+	fmt.Printf("  seqpass doctor --topology --vault %s%s --db %s%s\n", d.VaultType,
+		map[bool]string{true: " --dev", false: ""}[d.VaultType == config.VaultMemoryTest], d.DBPath, idFlags)
+	fmt.Println()
+	fmt.Println("Then register the adapter: seqpass mcp (Codex/Claude/Hermes) or seqpass agent.")
+}
+
+// joinUIDs renders a UID list the way the flags accept it.
+func joinUIDs(uids []uint32) string {
+	parts := make([]string, 0, len(uids))
+	for _, u := range uids {
+		parts = append(parts, strconv.FormatUint(uint64(u), 10))
+	}
+	return strings.Join(parts, ",")
+}
+
+// parseUIDs delegates to the single shared parser so the CLI, the doctor and
+// the broker cannot disagree about what an identity list means.
+func parseUIDs(s string) ([]uint32, error) {
+	return config.ParseUIDs(s)
 }
 
 // mustUIDs parses a UID list for CLI use, exiting on malformed input.

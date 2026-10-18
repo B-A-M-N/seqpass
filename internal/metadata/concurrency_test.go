@@ -3,13 +3,46 @@ package metadata
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 )
 
-// Two connections in the same process doing a read-then-write transaction
+// The database carries protected metadata; a world-readable store would be a
+// boundary failure, so the file (and any sidecar present) must be owner-only
+// as soon as the schema exists, whatever the process umask was.
+func TestNewDBRestrictsDatabaseFilePermissions(t *testing.T) {
+	old := syscall.Umask(0)
+	t.Cleanup(func() { syscall.Umask(old) })
+
+	path := filepath.Join(t.TempDir(), "meta.db")
+	db, err := NewDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm&0077 != 0 {
+		t.Fatalf("database mode = %v, want owner-only", perm)
+	}
+	for _, sidecar := range []string{path + "-wal", path + "-shm"} {
+		st, err := os.Stat(sidecar)
+		if err != nil {
+			continue // not created yet; SQLite inherits the database mode
+		}
+		if perm := st.Mode().Perm(); perm&0077 != 0 {
+			t.Fatalf("%s mode = %v, want owner-only", sidecar, perm)
+		}
+	}
+}
+
 // must not fail immediately with "database is locked".
 //
 // SQLite detects the shared-to-reserved lock upgrade conflict within one

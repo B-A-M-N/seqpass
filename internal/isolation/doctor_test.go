@@ -130,6 +130,80 @@ func TestDoctorDetectsAccessibleProtectedObject(t *testing.T) {
 	}
 }
 
+// A preflight check of a topology that has not started must not fail merely
+// because the broker has not created its own objects yet -- while still
+// failing on an object that exists and is reachable.
+func TestDoctorPreflightTreatsMissingOwnedObjectsAsInformational(t *testing.T) {
+	dir := mkPublicTempDir(t)
+	if err := os.Chmod(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	agent := uint32(65533)
+	if agent == uint32(os.Geteuid()) {
+		t.Skip("agent uid collides with the test identity")
+	}
+
+	// Nothing exists yet: no failure, but no false claim of protection either.
+	rep, err := Doctor(Config{
+		AssuranceMode: ModeIsolated,
+		BrokerUID:     uint32(os.Geteuid()),
+		AgentUIDs:     []uint32{agent},
+		DBPath:        filepath.Join(dir, "not-created-yet.db"),
+		Preflight:     true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !checkByName(rep, "agent_denied_broker_database") {
+		t.Fatalf("preflight failed on an object that does not exist yet: %+v", rep.Checks)
+	}
+	for _, c := range rep.Checks {
+		if c.Name == "agent_denied_broker_database" && c.Detail == "protected" {
+			t.Fatalf("preflight claimed protection for an object that does not exist: %q", c.Detail)
+		}
+	}
+	// A preflight verdict is provisional, never verified: the boundary was
+	// not observed while serving.
+	if rep.Verified || rep.Label != LabelProvisional {
+		t.Fatalf("preflight verdict = verified=%v label=%q, want provisional", rep.Verified, rep.Label)
+	}
+	if rep.AnyFailed() {
+		t.Fatalf("preflight reported a failure when nothing exists yet: %v", rep.FailedNames())
+	}
+	// Properties must not be claimed from absence: the missing database and
+	// the un-inspected process boundary prove nothing.
+	if rep.Properties.IntakeInaccessible || rep.Properties.TranscriptIsolated ||
+		rep.Properties.ProcessIsolated || rep.Properties.Complete() {
+		t.Fatalf("preflight claimed properties from absence: %+v", rep.Properties)
+	}
+
+	// A world-readable object that DOES exist must still fail in preflight:
+	// preflight relaxes absence, never reachability.
+	db := filepath.Join(dir, "readable.db")
+	if err := os.WriteFile(db, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rep, err = Doctor(Config{
+		AssuranceMode: ModeIsolated,
+		BrokerUID:     uint32(os.Geteuid()),
+		AgentUIDs:     []uint32{agent},
+		DBPath:        db,
+		Preflight:     true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkByName(rep, "agent_denied_broker_database") {
+		t.Fatalf("preflight passed a world-readable database: %+v", rep.Checks)
+	}
+	if !rep.AnyFailed() {
+		t.Fatal("preflight did not report the world-readable database as a problem")
+	}
+	if rep.Verified {
+		t.Fatal("preflight reported verified while a check failed")
+	}
+}
+
 // The doctor must not claim terminal isolation: that is a property of the
 // specific terminal the human types into, decided by host qualification, and
 // it cannot be observed from the agent's process. Claiming it would let
