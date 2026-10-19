@@ -186,33 +186,10 @@ func runPrivilegedBoundary(t *testing.T, h *harness) (ready bool, blocked string
 		return true, ""
 	}
 
-	stateDir := filepath.Join(root, "state")
-	agentDir := filepath.Join(root, "agent")
-	adminDir := filepath.Join(root, "admin")
-	intakeDir := filepath.Join(root, "intake")
-	for _, dir := range []struct {
-		path string
-		uid  uint32
-		gid  uint32
-		mode os.FileMode
-	}{
-		{stateDir, serviceUID, serviceIdentity.gid, 0700},
-		{agentDir, serviceUID, agentGID, 0710},
-		{adminDir, serviceUID, serviceIdentity.gid, 0700},
-		{intakeDir, serviceUID, serviceIdentity.gid, 0700},
-	} {
-		if err := os.Mkdir(dir.path, 0700); err != nil {
-			h.recordTier("privileged-runtime", tierSystem, "create disjoint broker runtime directories", "all dirs created with isolated ownership", err.Error(), false)
-			return true, ""
-		}
-		if err := os.Chown(dir.path, int(dir.uid), int(dir.gid)); err != nil {
-			h.recordTier("privileged-runtime", tierSystem, "assign runtime directory ownership", "service owner and intended group", err.Error(), false)
-			return true, ""
-		}
-		if err := os.Chmod(dir.path, dir.mode); err != nil {
-			h.recordTier("privileged-runtime", tierSystem, "assign runtime directory permissions", fmt.Sprintf("mode %o", dir.mode), err.Error(), false)
-			return true, ""
-		}
+	stateDir, agentDir, adminDir, intakeDir, dirErr := createBrokerRuntimeDirs(root, serviceIdentity, agentGID)
+	if dirErr != nil {
+		h.recordTier("privileged-runtime", tierSystem, "create disjoint broker runtime directories", "all dirs created with isolated ownership", dirErr.Error(), false)
+		return true, ""
 	}
 
 	bin := buildBinary(t, root)
@@ -426,6 +403,40 @@ func runPrivilegedBoundary(t *testing.T, h *harness) (ready bool, blocked string
 		h.topology["broker_log"] = brokerLogName
 	}
 	return true, ""
+}
+
+// createBrokerRuntimeDirs builds the disjoint broker runtime tree shared by
+// the process-boundary and synthetic-credential tiers: a root-owned
+// traversal skeleton with a private state/admin/intake area owned by the
+// service identity and an agent area group-accessible only through the
+// dedicated agent socket group.
+func createBrokerRuntimeDirs(root string, serviceIdentity privilegedIdentity, agentGID uint32) (stateDir, agentDir, adminDir, intakeDir string, err error) {
+	stateDir = filepath.Join(root, "state")
+	agentDir = filepath.Join(root, "agent")
+	adminDir = filepath.Join(root, "admin")
+	intakeDir = filepath.Join(root, "intake")
+	for _, dir := range []struct {
+		path string
+		uid  uint32
+		gid  uint32
+		mode os.FileMode
+	}{
+		{stateDir, serviceIdentity.uid, serviceIdentity.gid, 0700},
+		{agentDir, serviceIdentity.uid, agentGID, 0710},
+		{adminDir, serviceIdentity.uid, serviceIdentity.gid, 0700},
+		{intakeDir, serviceIdentity.uid, serviceIdentity.gid, 0700},
+	} {
+		if err = os.Mkdir(dir.path, 0700); err != nil {
+			return "", "", "", "", err
+		}
+		if err = os.Chown(dir.path, int(dir.uid), int(dir.gid)); err != nil {
+			return "", "", "", "", err
+		}
+		if err = os.Chmod(dir.path, dir.mode); err != nil {
+			return "", "", "", "", err
+		}
+	}
+	return stateDir, agentDir, adminDir, intakeDir, nil
 }
 
 func parseUIDEnv(name string) (uint32, error) {

@@ -10,8 +10,11 @@ or read protected files. It also runs the real MCP adapter under the agent UID,
 creates a relay request, fulfills it through trusted intake under the service
 UID, and observes durable recipient acceptance without disclosing the
 synthetic value through MCP, process metadata/memory, logs, or broker receipts.
-It does not run a credentialed provider operation and must not be cited as full
-cross-broker or AI-blind qualification.
+`TestQualPrivilegedSyntheticUse` (below) additionally runs the credentialed
+scenarios against protocol-faithful in-process mocks of AegisKeys and the
+consuming provider. A real AegisKeys deployment is still required before any
+cross-broker interop claim, and a full AI-blind claim still requires a
+protected live run.
 
 ## Executable process-boundary tier
 
@@ -65,6 +68,58 @@ for the value. If `/proc/<pid>/mem` cannot be read, memory observation is
 recorded as blocked and cannot support a strict isolation claim. The value is
 retained only as a SHA-256 digest in the manifest. A failure is recorded as
 `failed`; missing identities, paths, or listeners are `blocked`.
+
+## Synthetic AegisKeys credential tier
+
+`TestQualPrivilegedSyntheticUse` (opt-in with the same
+`SEQPASS_QUAL_PRIVILEGED=1`) runs the credentialed scenarios in any
+disposable multi-UID Linux lab without a real AegisKeys installation. It
+starts two stdlib in-process fixtures: an AegisKeys mock that serves the
+same HTTP-over-Unix `/v1/status` and `/v2/resolve` contract (rotating the
+synthetic value once after the first authorized resolve and logging
+binding identities — never values), and a real credential-consuming
+provider on loopback TCP that admits only the currently authorized bearer
+value, rejects rotated-away values with 401, and echoes the credential
+both literally and JSON-escaped so the closed response projection must
+drop them. The mock socket and its vault/metadata files are root-owned
+with the service group only, so the kernel denies the agent exactly as in
+a live topology.
+
+The tier launches the real broker under the dedicated service UID with
+`--vault aegiskeys --aegiskeys-socket <mock> --assurance isolated`,
+registers the secret ref, pinned provider origin, and a scoped
+`no_approval` policy through the trusted admin IPC under the service UID,
+then drives the real MCP adapter under the agent UID through:
+`secret_catalog` discovery, one authorized `http.request` use executed by
+the trusted admin surface, an unauthorized `process.run` submission, a
+second authorized use after rotation, and a resubmission after the policy
+is disabled. It records: provider receipt of the exact current bearer
+value, exactly-one/authorized-only resolve counts, echo-field rejection,
+credential absence from MCP traffic, agent argv/environ/memory, broker
+logs, and the SeqPass database/WAL (digests only in the manifest), plus
+kernel denials for the agent on trusted sockets and protected files.
+Scenario aggregates are recorded under their PRIVILEGED scenario names
+(`authorized-credentialed-read`, `adversarial-credential-echo`,
+`unauthorized-operation`, `credential-rotation`, `revocation-barrier`);
+the remaining scenarios stay `not_exercised` and still require a live
+deployment run. Post-dispatch revocation (in-flight semantics), lost
+acknowledgment, restart, and config overlay are not covered by this tier.
+
+```sh
+export SEQPASS_QUAL_PRIVILEGED=1
+export SEQPASS_QUAL_SERVICE_UID='<dedicated SeqPass service UID>'
+export SEQPASS_QUAL_AGENT_UID='<dedicated untrusted agent UID>'
+export SEQPASS_QUAL_AGENT_GROUP='<agent socket group name>'
+export SEQPASS_QUAL_ARTIFACT_DIR='/secure/qualification-evidence'
+go test ./qual -run '^TestQualPrivilegedSyntheticUse$' -count=1 -v
+```
+
+The agent UID must not be a member of the service account's primary
+group: the mock AegisKeys socket is isolated through that group, and the
+tier refuses to run (blocked, not failed) when the groups overlap, rather
+than under-check the boundary. The fixture itself is unit-validated
+without root by `TestMockUpstreamContract`, including negative controls
+for vault-to-credential binding and post-rotation rejection.
 
 ## Full cross-broker tier still required
 
@@ -122,7 +177,9 @@ it from a green local test suite.
 
 ## Current evidence
 
-The executable boundary and protected-relay harness is implemented, but no
+The executable boundary and protected-relay harness is implemented, and the
+synthetic AegisKeys credential tier is implemented and unit-validated at the
+fixture level (`TestMockUpstreamContract`, including negative controls), but no
 dedicated-UID live run has been performed in the current workspace. The full
-credentialed/provider scenarios remain unverified until a protected run record
-passes every remaining scenario above.
+cross-broker scenarios against a real AegisKeys deployment remain unverified
+until a protected run record passes every remaining scenario above.
