@@ -357,15 +357,15 @@ func TestMockUpstreamContract(t *testing.T) {
 	if _, err := cli.Status(ctx); err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	mat1, err := cli.Resolve(ctx, "qual/synthetic", "op-1")
+	mat1, err := cli.Resolve(ctx, "qual/synthetic", "http.request", "op-1")
 	if err != nil || mat1.Value != cred1 {
 		t.Fatalf("first resolve = %q, %v", mat1.Value, err)
 	}
-	mat2, err := cli.Resolve(ctx, "qual/synthetic", "op-2")
+	mat2, err := cli.Resolve(ctx, "qual/synthetic", "http.request", "op-2")
 	if err != nil || mat2.Value != cred2 {
 		t.Fatalf("second resolve = %q, %v, want rotated value", mat2.Value, err)
 	}
-	if _, err := cli.Resolve(ctx, "qual/other", "op-3"); !errors.Is(err, aegiskeys.ErrAccessDenied) {
+	if _, err := cli.Resolve(ctx, "qual/other", "http.request", "op-3"); !errors.Is(err, aegiskeys.ErrAccessDenied) {
 		t.Fatalf("unknown binding = %v, want access denied", err)
 	}
 

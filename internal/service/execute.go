@@ -15,7 +15,12 @@ import (
 
 // resolveCredentialMaterial resolves plaintext inside the trusted executor only.
 // AegisKeys is authoritative; the ephemeral spool covers trusted-intake payloads.
-func (s *Service) resolveCredentialMaterial(ctx context.Context, src types.SecretSource, opID string) (secureops.Credential, error) {
+// operation is the logical driver operation (ur.Operation for approved uses,
+// "transfer" for transfers) — it is bound into the broker's operation-scoped
+// authorization and audit path. The approval hash (UseOpHash) pins
+// ur.Operation, so an agent cannot claim a different operation than the one
+// the operator approved.
+func (s *Service) resolveCredentialMaterial(ctx context.Context, src types.SecretSource, operation, opID string) (secureops.Credential, error) {
 	switch src.Kind {
 	case types.SourceAegisKeys:
 		socket := s.cfg.AegisKeysSocket
@@ -29,7 +34,7 @@ func (s *Service) resolveCredentialMaterial(ctx context.Context, src types.Secre
 		if err != nil {
 			return secureops.Credential{}, err
 		}
-		mat, err := cli.Resolve(ctx, src.Binding, opID)
+		mat, err := cli.Resolve(ctx, src.Binding, operation, opID)
 		if err != nil {
 			return secureops.Credential{}, err
 		}
@@ -170,7 +175,7 @@ func (s *Service) ExecuteUse(ctx context.Context, useID, worker string) (map[str
 			input.Dest = dest
 		}
 	}
-	cred, err := s.resolveCredentialMaterial(ctx, ur.Source, ur.ID)
+	cred, err := s.resolveCredentialMaterial(ctx, ur.Source, ur.Operation, ur.ID)
 	if err != nil {
 		s.audit(ur.ID, "secret_use_failed", ur.RequestedBy, ur.Target, "resolve-failed")
 		_ = s.db.FinalizeOp("use", ur.ID, attemptID, types.StatusFailed, "", nil)
@@ -397,7 +402,7 @@ func (s *Service) ExecuteTransfer(ctx context.Context, transferID, worker string
 		}
 		return nil, fmt.Errorf("%s", outcome)
 	}
-	cred, err := s.resolveCredentialMaterial(ctx, tr.Source, tr.ID)
+	cred, err := s.resolveCredentialMaterial(ctx, tr.Source, "transfer", tr.ID)
 	if err != nil {
 		_ = s.db.FinalizeOp("transfer", tr.ID, attemptID, types.StatusFailed, "", nil)
 		s.audit(tr.ID, "secret_transfer_failed", tr.RequestedBy, tr.DestinationID, "resolve-failed")

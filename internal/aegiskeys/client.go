@@ -30,6 +30,7 @@ var (
 	ErrAccessDenied         = errors.New("access_denied")
 	ErrTransportUnavailable = errors.New("transport_unavailable")
 	ErrProtocolMismatch     = errors.New("protocol_mismatch")
+	ErrRequestInvalid       = errors.New("request_invalid")
 )
 
 // ResolveResponse mirrors the AegisKeys ResolvedCredential wire format.
@@ -74,8 +75,25 @@ type BrokerStatus struct {
 	Locked   bool
 }
 
+// Client resolves credentials from an AegisKeys broker over HTTP-over-Unix.
+// Resolve speaks the v2 wire contract by default; legacy brokers that only
+// implement v1 resolve semantics require the explicit legacy opt-in
+// (SetLegacyProtocol). There is never an automatic version downgrade: a
+// missing binding must not be misread as proof that v2 is unsupported.
 type Client struct {
-	http *http.Client
+	http   *http.Client
+	legacy bool
+}
+
+// SetLegacyProtocol opts this client into the v1 resolve endpoint and its
+// legacy response-key semantics. It exists for explicitly configured legacy
+// installations only; new installations use v2 (stable logical component
+// keys) and must not silently downgrade.
+func (c *Client) SetLegacyProtocol(legacy bool) {
+	if c == nil {
+		return
+	}
+	c.legacy = legacy
 }
 
 func socketPath(configDir string) string {
@@ -137,8 +155,59 @@ func (c *Client) Status(ctx context.Context) (BrokerStatus, error) {
 	return BrokerStatus{Protocol: st.Protocol, Locked: st.Locked}, nil
 }
 
-// Resolve fetches one explicitly approved binding. Trusted executor only.
-// Response bodies are never logged; strict size limits + unknown-field rejection.
+// ResolveRequest is the operation-aware resolve body. Operation names the
+// logical driver operation the credential is consumed by (git.fetch,
+// git.push, http.request, process.run, transfer); operation-scoped
+// bindings reject any other operation. OperationID is an opaque correlation
+// token carried into the broker audit log only — it never widens
+// authorization.
+type ResolveRequest struct {
+	Binding     string `json:"binding"`
+	Operation   string `json:"operation,omitempty"`
+	OperationID string `json:"operation_id,omitempty"`
+}
+
+// validOperationName mirrors the broker grammar ([a-z0-9._-], 1..64 chars)
+// so malformed operations fail locally instead of producing a confusing
+// remote denial.
+func validOperationName(op string) bool {
+	if len(op) == 0 || len(op) > 64 {
+		return false
+	}
+	for _, r := range op {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9':
+		case r == '.' || r == '_' || r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// validOperationID mirrors the broker correlation-token grammar
+// ([A-Za-z0-9._-], 1..128 chars).
+func validOperationID(id string) bool {
+	if len(id) == 0 || len(id) > 128 {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '.' || r == '_' || r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// Resolve fetches one explicitly approved binding under a specific logical
+// operation. Trusted executor only. Response bodies are never logged;
+// strict size limits + unknown-field rejection.
 //
 // Version semantics (SC-13): both contracts resolve the CURRENT authorized
 // value of a stable binding (latest_authorized). The approval binds the
@@ -146,40 +215,59 @@ func (c *Client) Status(ctx context.Context) (BrokerStatus, error) {
 // and execution changes the resolved material by design. Exact_version
 // (pinned-payload) semantics are NOT supported by this contract: do not
 // claim a transfer carries the reviewed byte value, only the reviewed
-// binding. V2 component selectors use stable logical keys; the compatibility
-// v1 fallback uses response-map keys, historically environment-variable names.
+// binding. V2 component selectors use stable logical keys; legacy v1
+// response-key semantics require SetLegacyProtocol(true) — there is no
+// automatic downgrade, because a 404 on an unknown binding is not proof
+// that v2 is unsupported.
 // AegisKeys Lock() prevents subsequent resolutions; it cannot retract
 // plaintext already resolved.
-func (c *Client) Resolve(ctx context.Context, binding, correlationID string) (CredentialMaterial, error) {
+func (c *Client) Resolve(ctx context.Context, binding, operation, operationID string) (CredentialMaterial, error) {
 	if c == nil || c.http == nil {
 		return CredentialMaterial{}, ErrTransportUnavailable
 	}
 	if binding == "" {
 		return CredentialMaterial{}, ErrBindingUnavailable
 	}
-	material, err := c.resolveV2(ctx, binding, correlationID)
+	if !validOperationName(operation) {
+		return CredentialMaterial{}, fmt.Errorf("%w: operation", ErrRequestInvalid)
+	}
+	if operationID != "" && !validOperationID(operationID) {
+		return CredentialMaterial{}, fmt.Errorf("%w: operation_id", ErrRequestInvalid)
+	}
+	req := ResolveRequest{Binding: binding, Operation: operation, OperationID: operationID}
+	if c.legacy {
+		return c.resolveV1(ctx, req)
+	}
+	material, err := c.resolveV2(ctx, req)
 	if errors.Is(err, errResolveV2Unsupported) {
-		return c.resolveV1(ctx, binding, correlationID)
+		// Fail closed with an actionable error: the operator must either
+		// fix the broker or explicitly configure legacy v1 mode. Falling
+		// back here would mask missing bindings and scoped-authorization
+		// refusals as version problems.
+		return CredentialMaterial{}, fmt.Errorf("%w: %v (broker lacks /v2/resolve; configure legacy mode explicitly if required)", ErrProtocolMismatch, err)
 	}
 	return material, err
 }
 
 var errResolveV2Unsupported = errors.New("resolve v2 unsupported")
 
-func (c *Client) resolveV2(ctx context.Context, binding, correlationID string) (CredentialMaterial, error) {
-	body, err := json.Marshal(map[string]string{"binding": binding})
+func (c *Client) resolveV2(ctx context.Context, req ResolveRequest) (CredentialMaterial, error) {
+	body, err := json.Marshal(req)
 	if err != nil {
 		return CredentialMaterial{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://aegiskeys.local/v2/resolve", bytes.NewReader(body))
+	reqURL := "http://aegiskeys.local/v2/resolve"
+	req2, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body))
 	if err != nil {
 		return CredentialMaterial{}, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if correlationID != "" {
-		req.Header.Set("X-Seqpass-Op", correlationID)
+	req2.Header.Set("Content-Type", "application/json")
+	if req.OperationID != "" {
+		// Diagnostics/correlation header; the operation_id body field is
+		// what the broker writes to its audit log.
+		req2.Header.Set("X-Seqpass-Op", req.OperationID)
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.http.Do(req2)
 	if err != nil {
 		return CredentialMaterial{}, fmt.Errorf("%w: %v", ErrTransportUnavailable, err)
 	}
@@ -210,7 +298,7 @@ func (c *Client) resolveV2(ctx context.Context, binding, correlationID string) (
 	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return CredentialMaterial{}, fmt.Errorf("%w: trailing data", ErrProtocolMismatch)
 	}
-	if raw.Protocol != "v2" || raw.Binding != binding {
+	if raw.Protocol != "v2" || raw.Binding != req.Binding {
 		return CredentialMaterial{}, fmt.Errorf("%w: version or binding mismatch", ErrProtocolMismatch)
 	}
 	if raw.Kind != "" && !validKind(raw.Kind) {
@@ -237,27 +325,28 @@ func (c *Client) resolveV2(ctx context.Context, binding, correlationID string) (
 
 // resolveV1 preserves the legacy response-key semantics: component selectors
 // match the keys of the v1 Components map (historically environment names).
-func (c *Client) resolveV1(ctx context.Context, binding, correlationID string) (CredentialMaterial, error) {
+// Reachable only through SetLegacyProtocol(true).
+func (c *Client) resolveV1(ctx context.Context, req ResolveRequest) (CredentialMaterial, error) {
 	if c == nil || c.http == nil {
 		return CredentialMaterial{}, ErrTransportUnavailable
 	}
-	if binding == "" {
+	if req.Binding == "" {
 		return CredentialMaterial{}, ErrBindingUnavailable
 	}
-	body, err := json.Marshal(map[string]string{"binding": binding})
+	body, err := json.Marshal(req)
 	if err != nil {
 		return CredentialMaterial{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://aegiskeys.local/v1/resolve", bytes.NewReader(body))
+	r, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://aegiskeys.local/v1/resolve", bytes.NewReader(body))
 	if err != nil {
 		return CredentialMaterial{}, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if correlationID != "" {
+	r.Header.Set("Content-Type", "application/json")
+	if req.OperationID != "" {
 		// Diagnostics only; must not influence authorization (server ignores it).
-		req.Header.Set("X-Seqpass-Op", correlationID)
+		r.Header.Set("X-Seqpass-Op", req.OperationID)
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.http.Do(r)
 	if err != nil {
 		return CredentialMaterial{}, fmt.Errorf("%w: %v", ErrTransportUnavailable, err)
 	}
@@ -288,7 +377,7 @@ func (c *Client) resolveV1(ctx context.Context, binding, correlationID string) (
 		return CredentialMaterial{}, fmt.Errorf("%w: trailing data", ErrProtocolMismatch)
 	}
 	// Binding must equal the request, not merely be nonempty.
-	if raw.Binding != binding {
+	if raw.Binding != req.Binding {
 		return CredentialMaterial{}, fmt.Errorf("%w: binding mismatch", ErrProtocolMismatch)
 	}
 	if raw.Kind != "" && !validKind(raw.Kind) {
