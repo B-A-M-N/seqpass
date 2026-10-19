@@ -132,10 +132,25 @@ describe("SeqPass Pi adapter contract", () => {
     expect(renders[renders.length - 1]).toContain("***");
   });
 
-  it("does not mark descriptor objects as native protected input", () => {
-    const fake = { masked: true };
-    expect("value" in fake).toBe(false);
-    expect("submit" in fake).toBe(false);
+  it("fallback result exposes no credential-collection affordances", () => {
+    // The external_tty fallback is display-only: it never installs a key
+    // handler (no collection path), and the returned result carries no
+    // value/submit affordances. A mutated component that started
+    // collecting in fallback mode would trip either check.
+    const keyHandlerInstalled = { current: false };
+    const client = {} as any;
+    const ui = {
+      render: () => {},
+      setKeyHandler: () => { keyHandlerInstalled.current = true; },
+      close: () => {},
+    };
+    const result = ProtectedInput(baseNotice, client, ui) as any;
+    expect(result.fallback).toBe(true);
+    expect(keyHandlerInstalled.current).toBe(false);
+    for (const forbidden of ["value", "submit", "setKeyHandler", "onKey", "handleKey"]) {
+      expect(forbidden in result).toBe(false);
+    }
+    expect(typeof result.close).toBe("function");
   });
 });
 

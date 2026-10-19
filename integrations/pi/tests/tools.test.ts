@@ -64,7 +64,7 @@ describe("SeqPass Pi tool contract", () => {
     const payload = JSON.parse(result.content[0].text);
     expect(payload.status).toBe("error");
     expect(payload.error).toContain("destination_id is required");
-    expect(client.calls).not.toContain("requestRelay");
+    expect(client.calls.some(c => c.startsWith("requestRelay"))).toBe(false);
   });
 
   it("rejects relay_request without data_kind before any broker call", async () => {
@@ -73,7 +73,7 @@ describe("SeqPass Pi tool contract", () => {
     const payload = JSON.parse(result.content[0].text);
     expect(payload.status).toBe("error");
     expect(payload.error).toContain("data_kind is required");
-    expect(client.calls).not.toContain("requestRelay");
+    expect(client.calls.some(c => c.startsWith("requestRelay"))).toBe(false);
   });
 
   it("rejects relay_status without request_id before any broker call", async () => {
@@ -82,16 +82,18 @@ describe("SeqPass Pi tool contract", () => {
     const payload = JSON.parse(result.content[0].text);
     expect(payload.status).toBe("error");
     expect(payload.error).toContain("request_id is required");
-    expect(client.calls).not.toContain("getStatus");
+    expect(client.calls.some(c => c.startsWith("getStatus"))).toBe(false);
   });
 
-  it("passes validated relay args through to the client", async () => {
+  it("passes validated relay args through to the client unmodified", async () => {
     const { tools, client } = harness({ sessionID: "s", sessionToken: "t" });
-    const result = await tools.relay_request.handler({ destination_id: "d1", data_kind: "api_key", purpose: "deploy" });
+    const args = { destination_id: "d1", data_kind: "api_key", purpose: "deploy", ttl_seconds: 300 };
+    const result = await tools.relay_request.handler(args);
     const payload = JSON.parse(result.content[0].text);
     expect(payload.request_id).toBe("req-1");
     expect(payload.status).toBe("pending");
-    expect(client.calls.some(c => c.startsWith("requestRelay:"))).toBe(true);
+    // The full validated arg object reaches the client verbatim.
+    expect(client.calls.some(c => c === `requestRelay:${JSON.stringify(args)}`)).toBe(true);
   });
 
   it("adopts broker session credentials only as a pair", async () => {
