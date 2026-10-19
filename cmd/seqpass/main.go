@@ -398,8 +398,8 @@ func adminCmd(args []string) {
 	case "add-dest":
 		fs := flag.NewFlagSet("add-dest", flag.ExitOnError)
 		name := fs.String("name", "", "name")
-		typ := fs.String("type", "recipient-socket", "recipient-socket | http-pinned | process-pinned")
-		ep := fs.String("endpoint", "", "recipient-socket: unix socket path; http-pinned: pinned origin (https://host[:port]); process-pinned: absolute executable path")
+		typ := fs.String("type", "recipient-socket", "recipient-socket | http-pinned | process-pinned | git-pinned")
+		ep := fs.String("endpoint", "", "recipient-socket: unix socket path; http-pinned: pinned origin (https://host[:port]); process-pinned: absolute executable path; git-pinned: pinned git remote URL (https://host[:port]/path.git)")
 		expectUID := fs.Int("expect-uid", -1, "pinned recipient UID (recipient-socket only)")
 		expectGID := fs.Int("expect-gid", -1, "pinned recipient GID (optional, recipient-socket only)")
 		_ = fs.Parse(args[1:])
@@ -420,6 +420,10 @@ func adminCmd(args []string) {
 		case "process-pinned":
 			if *name == "" || *ep == "" {
 				fatal("add-dest --name N --type process-pinned --endpoint /absolute/executable (pin fixed flags with a wrapper script)")
+			}
+		case "git-pinned":
+			if *name == "" || *ep == "" {
+				fatal("add-dest --name N --type git-pinned --endpoint https://host[:port]/path.git (remote pinned at registration; agents only choose the branch)")
 			}
 		default:
 			fatal("add-dest: unsupported type " + *typ)

@@ -426,10 +426,11 @@ func (s *Service) AddSecretRef(sr *types.SecretReference) error {
 }
 
 // AddDestination is admin-only (trusted operator terminal, never MCP).
-// Pinned operation profiles (http-pinned, process-pinned) are validated
-// against their strict registration grammar here, at the authoritative
-// broker boundary: a malformed pin must be refused at registration, not
-// discovered as an execution failure after an approval exists.
+// Pinned operation profiles (http-pinned, process-pinned, git-pinned) are
+// validated against their strict registration grammar here, at the
+// authoritative broker boundary: a malformed pin must be refused at
+// registration, not discovered as an execution failure after an approval
+// exists.
 func (s *Service) AddDestination(d *types.Destination) error {
 	switch d.Type {
 	case secureops.DestTypeHTTPPinned:
@@ -438,6 +439,10 @@ func (s *Service) AddDestination(d *types.Destination) error {
 		}
 	case secureops.DestTypeProcessPinned:
 		if err := secureops.ValidateProcessPinned(d); err != nil {
+			return err
+		}
+	case secureops.DestTypeGitPinned:
+		if _, err := secureops.ParseGitRemote(d.Endpoint); err != nil {
 			return err
 		}
 	}
