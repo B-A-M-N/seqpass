@@ -466,8 +466,8 @@ func (s *Service) ExecuteTransfer(ctx context.Context, transferID, worker string
 		}
 		// §10: an authenticated, digest-bound refusal is a deterministic
 		// recipient application failure. Finalize as clean failed — the
-		// settle path then refunds the reservation so the operator can
-		// fix the recipient and submit a fresh request. Never reported as
+		// settle path marks the grant's history truthful and never
+		// refunds budget (dispatch was committed). Never reported as
 		// uncertain: the broker KNOWS no acceptance occurred.
 		if err == transfer.ErrRecipientRejected {
 			s.audit(tr.ID, "secret_transfer_failed", tr.RequestedBy, tr.DestinationID, "recipient-rejected")

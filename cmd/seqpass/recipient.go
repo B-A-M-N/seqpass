@@ -35,6 +35,12 @@ func recipientCmd(args []string) {
 	trusted := fs.String("trust-broker-uid", "", "comma-separated broker UIDs permitted to connect (default: this process's UID only)")
 	_ = fs.Parse(args)
 
+	// §11: the recipient holds plaintext in memory during commit; a
+	// core dump would persist it outside the journal's guards.
+	if err := disableCoreDumps(); err != nil {
+		fmt.Fprintf(os.Stderr, "WARNING: could not disable core dumps: %v (ensure ulimit -c 0)\n", err)
+	}
+
 	if *sock == "" || *journalDir == "" {
 		fmt.Fprintln(os.Stderr, "recipient: --socket and --journal are required")
 		os.Exit(2)

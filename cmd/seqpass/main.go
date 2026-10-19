@@ -536,6 +536,11 @@ func tuiCmd(args []string) {
 	}
 	intakeF := fs.String("intake-socket", di, "Broker intake socket")
 	_ = fs.Parse(args)
+	// §11: the TUI transiently holds the user's credential during entry;
+	// a core dump would persist it in terminal-adjacent crash output.
+	if err := disableCoreDumps(); err != nil {
+		fmt.Fprintf(os.Stderr, "WARNING: could not disable core dumps: %v (ensure ulimit -c 0)\n", err)
+	}
 	if err := runTUI(*intakeF); err != nil {
 		var ie *tui.InterruptError
 		if errors.As(err, &ie) {

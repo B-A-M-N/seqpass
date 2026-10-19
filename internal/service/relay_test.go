@@ -490,7 +490,7 @@ func TestRelayRefusedDeliveryIsFailedNotUncertain(t *testing.T) {
 	}
 	// Poison the recipient's digest verification so it refuses with a
 	// well-formed, envelope-bound rejection ack.
-	r.refuseDigestMismatch = true
+	r.setRefuse(true)
 	svc.runWorkerOnce(context.Background())
 	tr, _ := svc.DB().GetTransfer(opID)
 	if tr.Status != types.StatusFailed {

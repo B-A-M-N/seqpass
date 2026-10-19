@@ -121,8 +121,22 @@ type storeRecipient struct {
 	// produces a well-formed envelope-bound refusal ack even when the
 	// digest actually matches — simulating a recipient application
 	// failure that the broker must classify as deterministic rejected,
-	// not uncertain.
+	// not uncertain. Guarded by mu: the handler goroutines read it.
 	refuseDigestMismatch bool
+}
+
+// setRefuse flips the refusal knob under the fixture lock so the write
+// is ordered against handler-goroutine reads.
+func (r *storeRecipient) setRefuse(v bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.refuseDigestMismatch = v
+}
+
+func (r *storeRecipient) wantsRefusal() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.refuseDigestMismatch
 }
 
 func startStoreRecipient(t *testing.T, dropAck bool) *storeRecipient {
@@ -203,7 +217,7 @@ func (r *storeRecipient) handle(c net.Conn) {
 	if json.Unmarshal(buf, &env) != nil {
 		return
 	}
-	if shaHex(env.Payload) != env.Digest || r.refuseDigestMismatch {
+	if shaHex(env.Payload) != env.Digest || r.wantsRefusal() {
 		raw, _ := json.Marshal(map[string]interface{}{"accepted": false, "op_id": env.OpID, "digest": env.Digest, "bytes": len(env.Payload)})
 		binary.BigEndian.PutUint32(lb[:], uint32(len(raw)))
 		_, _ = c.Write(lb[:])
