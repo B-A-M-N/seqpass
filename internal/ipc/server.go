@@ -864,7 +864,7 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 			if d.ExpectedUID == nil {
 				return Response{OK: false, Error: "expected_uid is required for recipient-socket"}
 			}
-		case secureops.DestTypeHTTPPinned, secureops.DestTypeProcessPinned:
+		case secureops.DestTypeHTTPPinned, secureops.DestTypeProcessPinned, secureops.DestTypeGitPinned:
 			// Pinned operation profiles carry no identity pin; their
 			// security is the strict endpoint grammar, which
 			// AddDestination enforces at the broker boundary.
