@@ -3,39 +3,26 @@
 package main
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
 )
 
-// dumpableStatus reads the core-dump disposition from /proc/self/status.
-// Older kernels expose "Dumpable:"; the CoreDumping field (Linux 4.12+)
-// reflects the live gate ("1" while a dump is possible, 0 when refused
-// by dumpable=0 or rlimit). Both spell a non-dumpable process as 0.
+// dumpableStatus reads the per-process dumpable flag via
+// prctl(PR_GET_DUMPABLE). 0 = SUID_DUMP_DISABLE (PR_SET_DUMPABLE 0 took
+// effect). The /proc/self/status "CoreDumping" field is NOT suitable:
+// it reads 1 only while a dump is in progress, not whether dumps are
+// permitted.
 func dumpableStatus(t *testing.T) int {
 	t.Helper()
-	data, err := os.ReadFile("/proc/self/status")
+	d, err := unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
 	if err != nil {
-		t.Skipf("cannot read /proc/self/status: %v", err)
+		t.Skipf("prctl PR_GET_DUMPABLE unavailable: %v", err)
 	}
-	for _, key := range []string{"Dumpable:", "CoreDumping:"} {
-		for _, line := range strings.Split(string(data), "\n") {
-			if strings.HasPrefix(line, key) {
-				n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, key)))
-				if err != nil {
-					t.Fatalf("unparseable %s line %q: %v", key, line, err)
-				}
-				return n
-			}
-		}
-	}
-	t.Fatal("no Dumpable/CoreDumping line in /proc/self/status")
-	return -1
+	return d
 }
 
 // §11 crash outputs: the broker stages relay payloads in memory, so a
