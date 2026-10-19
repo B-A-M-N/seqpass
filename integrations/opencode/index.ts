@@ -2,16 +2,21 @@
  * SeqPass OpenCode V2 CLI plugin entry point.
  *
  * Implements the `@opencode-ai/plugin` TuiPluginModule contract for
- * OpenCode v2.0.x. The protected input path submits through SeqPass's
- * trusted intake socket, never through OpenCode's model-facing session
- * APIs or composer.
+ * OpenCode v2.0.x. The adapter surfaces broker-verified request status
+ * in-host (display-only inbox footer + review command); credential bytes
+ * are typed on the external trusted terminal (`seqpass tui`) and submit
+ * through SeqPass's trusted intake socket — never through OpenCode's
+ * model-facing session APIs or composer.
  */
 import type { TuiPluginModule, TuiPluginApi } from "@opencode-ai/plugin/tui";
-import type { JSX } from "@opentui/solid";
+import type { ProtectedInputNotice } from "./types";
 import { SeqPassHostClient } from "./lib/client";
 import { SeqPassProtectedInputDialog } from "./components/SeqPassProtectedInput";
+import { seqPassFooter } from "./components/SeqPassFooter";
 
 export const id = "seqpass";
+
+const pollIntervalMs = 5_000;
 
 export const tui: TuiPluginModule["tui"] = async (
   api: TuiPluginApi,
@@ -34,30 +39,73 @@ export const tui: TuiPluginModule["tui"] = async (
   try {
     await client.connect();
     await client.register();
-  } catch (err) {
+  } catch {
     api.ui.toast({ title: "SeqPass", message: "SeqPass broker unavailable", variant: "error" });
     return;
   }
+
+  // SP-02: keep the display-only inbox count current. The poll only
+  // refreshes broker-verified pending metadata; nothing here touches
+  // credential bytes.
+  const poll = setInterval(() => {
+    client.listPendingRequests().then(() => {
+      api.renderer.requestRender();
+    }).catch(() => {
+      // Broker temporarily unreachable: keep the last verified count.
+    });
+  }, pollIntervalMs);
+  api.lifecycle.onDispose(() => {
+    clearInterval(poll);
+    void client.close();
+  });
+
+  // Open the review flow for one broker-verified notice. The dialog
+  // component owns the SP-05 gating: this adapter build has no masked
+  // native field, so it routes to the external trusted terminal.
+  const openReview = (notice: ProtectedInputNotice) => {
+    try {
+      SeqPassProtectedInputDialog(notice, client, api.ui);
+    } catch (err) {
+      api.ui.toast({ title: "SeqPass", message: err instanceof Error ? err.message : String(err), variant: "error" });
+    }
+  };
+
+  const showInbox = async () => {
+    const pending = await client.listPendingRequests();
+    if (pending.length === 0) {
+      api.ui.toast({ title: "SeqPass", message: "No pending request" });
+      return;
+    }
+    if (pending.length === 1) {
+      openReview(pending[0]);
+      return;
+    }
+    // Display-only inbox: list broker-verified requests and let the
+    // operator pick one to review. Only notice metadata is shown.
+    api.ui.dialog.replace(() => api.ui.DialogSelect<ProtectedInputNotice>({
+      title: "SeqPass — pending requests",
+      options: pending.map(n => ({
+        title: `${n.recipient_label} — ${n.data_kind}`,
+        value: n,
+        description: n.consumption,
+      })),
+      onSelect: (option) => {
+        api.ui.dialog.clear();
+        openReview(option.value);
+      },
+    }));
+  };
 
   api.keymap.registerLayer({
     commands: [
       {
         name: "seqpass.review",
-        description: "Open broker-verified SeqPass relay review",
+        description: "Open the SeqPass display-only inbox and review pending relay requests",
         category: "SeqPass",
         slash: { name: "seqpass", aliases: [] },
-        run: async (ctx: any) => {
-          const notice = await client.getPendingRequest();
-          if (!notice) {
-            api.ui.toast({ title: "SeqPass", message: "No pending request" });
-            return;
-          }
-          await client.refresh(notice.request_id);
-          // SP-05: use the protected input component, which handles the
-          // external-tty fallback and gates native input on broker
-          // qualification. The raw DialogPrompt is never opened directly.
+        run: async () => {
           try {
-            SeqPassProtectedInputDialog(notice, client, api.ui);
+            await showInbox();
           } catch (err) {
             api.ui.toast({ title: "SeqPass", message: err instanceof Error ? err.message : String(err), variant: "error" });
           }
@@ -69,15 +117,7 @@ export const tui: TuiPluginModule["tui"] = async (
     ],
   });
 
-  api.slots.register({
-    slots: {
-      home_footer: () => {
-        const count = client.pendingCount();
-        if (count <= 0) return null;
-        return { jsx: `SeqPass: ${count} pending` };
-      },
-    },
-  } as any);
+  api.slots.register(seqPassFooter(() => client.pendingCount()));
 };
 
 // Re-export the protected-input component so tests can exercise it without

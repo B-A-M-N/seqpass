@@ -23,6 +23,54 @@ describe("SeqPass Pi adapter contract", () => {
     client.close();
   });
 
+  it("fails relay RPCs closed when no agent socket is configured", async () => {
+    // SP-07: without an explicitly configured agent socket the adapter
+    // must not guess a dial target — agent-domain calls are refused
+    // outright instead of silently hitting a foreign allowlist domain.
+    const client = new SeqPassClient({
+      intakeSocket: "/tmp/test.intake",
+      hostSocket: "/tmp/test.host",
+      sessionID: "host-1",
+      sessionToken: "tok-test",
+    });
+    expect((client as any).agent).toBeNull();
+    const relay = await client.requestRelay({ destination_id: "d1", data_kind: "api_key" });
+    expect(relay.status).toBe("error");
+    expect(relay.error).toContain("agentSocket is not configured");
+    const status = await client.getStatus("req-1");
+    expect(status.status).toBe("error");
+    expect(status.error).toContain("agentSocket is not configured");
+    client.close();
+  });
+
+  it("registers honestly as a status-only presentation surface", async () => {
+    const client = new SeqPassClient({
+      intakeSocket: "/tmp/test.intake",
+      hostSocket: "/tmp/test.host",
+      agentSocket: "/tmp/test.agent",
+      sessionID: "host-1",
+      sessionToken: "tok-test",
+    });
+    const captured: Array<Record<string, unknown> | null> = [null];
+    // Stub the dial so the payload can be inspected without a broker.
+    (client as any).intake.connect = async () => {};
+    (client as any).host.connect = async () => {};
+    (client as any).intake.call = async (method: string, params?: Record<string, unknown>) => {
+      if (method === "host.register") captured[0] = { ...params };
+      throw new Error("not connected (expected in this test)");
+    };
+    try {
+      await client.register();
+    } catch {
+      // The write itself may fail against a stubbed transport; only the
+      // registration payload matters here.
+    }
+    expect(captured[0]).not.toBeNull();
+    expect(captured[0]!.presentation).toBe("request_status");
+    expect(captured[0]!.input_transport).toBe("external_tty");
+    expect(captured[0]!.host_kind).toBe("pi");
+  });
+
   it("records protected input qualification as blocked without a real Pi terminal", () => {
     const reason = "real Pi ctx.ui.custom() terminal qualification unavailable in CI";
     const result = {

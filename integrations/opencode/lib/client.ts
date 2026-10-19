@@ -13,7 +13,7 @@
  * operation without proving complete memory isolation from other code in
  * the host process.
  */
-import { SeqPassIpcClient } from "./ipc";
+import { SeqPassIpcClient } from "../../shared/ipc";
 import type { ProtectedInputNotice } from "../types";
 
 export interface SeqPassHostClientConfig {
@@ -52,8 +52,14 @@ export class SeqPassHostClient {
       host_kind: "opencode",
       host_version: "2.0.27",
       adapter_version: "0.1.0",
-      presentation: "native",
-      input_transport: "protected_intake",
+      // Presentation honestly describes what this adapter offers: it
+      // surfaces broker-verified request status only. Credential bytes
+      // are typed on the external trusted terminal, which owns the
+      // protected-intake transport. The broker never trusts these flags
+      // as security evidence (qualification decides the input mode) —
+      // and this build has no masked native field (lib/nativeInput).
+      presentation: "request_status",
+      input_transport: "external_tty",
       supports_resume: "true",
       supports_cancel_prompt: "true",
       supports_multiple_pending: "true",
@@ -105,10 +111,13 @@ export class SeqPassHostClient {
   }
 
   async fulfill(requestID: string, revision: number, value: string): Promise<void> {
-    await this.connect();
+    // Validate before dialing: an oversized payload must be refused even
+    // when the broker is unreachable, and dialing must not be the error
+    // surfaced to the operator.
     if (Buffer.byteLength(value, "utf-8") > maxPayloadBytes) {
       throw new Error("payload exceeds 64 KiB limit");
     }
+    await this.connect();
     await this.intake.call("intake.fulfill", {
       request_id: requestID,
       request_revision: revision,

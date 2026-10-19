@@ -13,7 +13,7 @@
  * operation without proving complete memory isolation from other code in
  * the Pi host process.
  */
-import { SeqPassIpcClient } from "../opencode/lib/ipc";
+import { SeqPassIpcClient } from "../shared/ipc";
 import type { SeqPassExtensionConfig } from "./seqpass";
 import type { ProtectedInputNotice } from "./types";
 
@@ -22,7 +22,11 @@ const maxPayloadBytes = 64 * 1024;
 export class SeqPassClient {
   private intake: SeqPassIpcClient;
   private host: SeqPassIpcClient;
-  private agent: SeqPassIpcClient;
+  // SP-07: agent-domain RPCs use a dedicated agent socket, not the
+  // intake socket, which has a different authorization allowlist.
+  // It is null until the operator configures an explicit path; relay
+  // calls fail closed rather than guessing a socket to dial.
+  private agent: SeqPassIpcClient | null;
   private sessionID: string;
   private sessionToken: string;
   private pending: ProtectedInputNotice[] = [];
@@ -30,9 +34,7 @@ export class SeqPassClient {
   constructor(config: SeqPassExtensionConfig & { agentSocket?: string }) {
     this.intake = new SeqPassIpcClient(config.intakeSocket);
     this.host = new SeqPassIpcClient(config.hostSocket);
-    // SP-07: agent-domain RPCs use a dedicated agent socket, not the
-    // intake socket, which has a different authorization allowlist.
-    this.agent = new SeqPassIpcClient(config.agentSocket ?? config.intakeSocket.replace(/\.intake$/, ""));
+    this.agent = config.agentSocket ? new SeqPassIpcClient(config.agentSocket) : null;
     // SP-08: sessionID/sessionToken may be empty at startup; register()
     // will populate them when the trusted host bootstraps.
     this.sessionID = config.sessionID ?? "";
@@ -58,8 +60,18 @@ export class SeqPassClient {
     await Promise.all([this.intake.connect(), this.host.connect()]);
   }
 
+  private requireAgent(): SeqPassIpcClient {
+    // SP-07: never fall back to the intake or host socket for agent-domain
+    // RPCs. Dialing the wrong socket would send agent-controllable method
+    // calls to a domain with a different authorization allowlist.
+    if (!this.agent) {
+      throw new Error("agentSocket is not configured; relay RPCs are disabled");
+    }
+    return this.agent;
+  }
+
   async connectAgent(): Promise<void> {
-    await this.agent.connect();
+    await this.requireAgent().connect();
   }
 
   async register(): Promise<unknown> {
@@ -68,8 +80,14 @@ export class SeqPassClient {
       host_kind: "pi",
       host_version: "1.0",
       adapter_version: "0.1.0",
-      presentation: "native",
-      input_transport: "protected_intake",
+      // Presentation honestly describes what this adapter offers: it
+      // surfaces broker-verified request status only. Credential bytes
+      // are typed on the external trusted terminal, which owns the
+      // protected-intake transport. The broker never trusts these flags
+      // as security evidence (qualification decides the input mode).
+      presentation: "request_status",
+      input_transport: "external_tty",
+      supports_resume: "true",
       supports_cancel_prompt: "true",
       supports_multiple_pending: "true",
     });
@@ -77,8 +95,9 @@ export class SeqPassClient {
 
   async requestRelay(args: { destination_id: string; data_kind: string; purpose?: string; ttl_seconds?: number }): Promise<{ request_id?: string; status: string; error?: string }> {
     try {
-      await this.agent.connect();
-      const data = await this.agent.call("relay.request", args);
+      const agent = this.requireAgent();
+      await agent.connect();
+      const data = await agent.call("relay.request", args);
       const result = data as { request_id?: string; status?: string };
       return { request_id: result.request_id, status: result.status ?? "unknown" };
     } catch (err) {
@@ -88,8 +107,9 @@ export class SeqPassClient {
 
   async getStatus(requestID: string): Promise<{ status: string; error?: string }> {
     try {
-      await this.agent.connect();
-      const data = await this.agent.call("relay.status", { request_id: requestID });
+      const agent = this.requireAgent();
+      await agent.connect();
+      const data = await agent.call("relay.status", { request_id: requestID });
       return { status: (data as { status?: string }).status ?? "unknown" };
     } catch (err) {
       return { status: "error", error: err instanceof Error ? err.message : String(err) };
@@ -137,6 +157,6 @@ export class SeqPassClient {
   async close(): Promise<void> {
     await this.intake.close();
     await this.host.close();
-    await this.agent.close();
+    if (this.agent) await this.agent.close();
   }
 }

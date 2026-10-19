@@ -1,16 +1,19 @@
 /**
  * Protected credential entry dialog contract.
  *
- * Must be rendered with a masked field. The value goes to the trusted
- * SeqPass intake socket with the exact reviewed revision; it never
- * enters OpenCode's session state, composer, or model context.
- *
- * Placeholder contract; requires actual OpenCode V2 JSX wiring to
- * complete and qualify.
+ * SP-05: the value goes to the trusted SeqPass intake socket with the
+ * exact reviewed revision; it never enters OpenCode's session state,
+ * composer, or model context. In-host entry is additionally gated by
+ * lib/nativeInput: this adapter build has no verified masked field, so
+ * it always routes to the external trusted terminal regardless of the
+ * broker-issued input mode. The native branch below only activates once
+ * NATIVE_MASKED_INPUT_SUPPORTED is flipped with a masking-capable plugin
+ * API and the deployment is re-qualified.
  */
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui";
 import type { ProtectedInputNotice } from "../types";
 import type { SeqPassHostClient } from "../lib/client";
+import { selectNativeInput, EXTERNAL_TUI_HINT } from "../lib/nativeInput";
 
 export function SeqPassProtectedInputDialog(
   notice: ProtectedInputNotice,
@@ -18,21 +21,18 @@ export function SeqPassProtectedInputDialog(
   ui: TuiPluginApi["ui"],
 ) {
   if (!ui) throw new Error("OpenCode UI API unavailable");
-  // SP-05: when the broker issues external_tty mode, the adapter must
-  // direct the user to the external trusted-terminal flow instead of
-  // rendering a native prompt that cannot prove process isolation.
-  if (notice.input_mode !== "host_native_verified") {
-    return ExternalTTYFallback(notice, ui);
+  const decision = selectNativeInput(notice.input_mode);
+  if (!decision.allowed) {
+    return ExternalTTYFallback(notice, ui, decision.reason);
   }
-  let disposed = false;
   const close = () => {
-    if (disposed) return;
-    disposed = true;
     ui.dialog.clear();
   };
   ui.dialog.replace(() => ui.DialogPrompt({
     title: `Enter ${notice.data_kind} for ${notice.recipient_label}`,
-    description: () => ({ type: "text", text: `Recipient ${notice.recipient_label}; ${notice.consumption}; reviewed revision ${notice.request_revision}.` } as any),
+    description: () => (
+      <text content={`Recipient ${notice.recipient_label}; ${notice.consumption}; reviewed revision ${notice.request_revision}.`} />
+    ),
     placeholder: "Paste the credential; it will not be shown.",
     onConfirm: async (value: string) => {
       try {
@@ -51,10 +51,16 @@ export function SeqPassProtectedInputDialog(
 // ExternalTTYFallback returns a display-only result directing the user to
 // the external trusted terminal. The adapter never collects or renders a
 // credential-bearing input field in this mode.
-function ExternalTTYFallback(notice: ProtectedInputNotice, ui: TuiPluginApi["ui"]) {
+function ExternalTTYFallback(
+  notice: ProtectedInputNotice,
+  ui: TuiPluginApi["ui"],
+  reason: string,
+) {
   ui.toast({
     title: "SeqPass",
-    message: `Request ${notice.request_id} requires external trusted-terminal input.`,
+    message:
+      `Request ${notice.request_id} requires external trusted-terminal input. ` +
+      `Run in your own terminal: ${EXTERNAL_TUI_HINT} (${reason})`,
     variant: "info",
   });
   return {

@@ -1,5 +1,5 @@
 /**
- * SeqPass IPC wire client for OpenCode V2.
+ * SeqPass IPC wire client (shared by all trusted adapters).
  *
  * Implements the Go broker's newline-delimited JSON-over-Unix-socket
  * protocol. Request shape: {"id":"cN","method":"...","params":{...}}.
@@ -7,12 +7,19 @@
  * {"id":"cN","ok":false,"error":"..."}.
  *
  * This is the only module that opens Unix sockets. Credential bytes pass
- * through it only during fulfillment and never enter OpenCode's session
- * state, tool results, or model context.
+ * through it only during fulfillment and never enter host session state,
+ * tool results, or model context. Both the OpenCode V2 and Pi adapters
+ * import this one implementation so wire behavior cannot drift between
+ * hosts (one reviewed transport shared by every trusted surface).
  */
 import { connect } from "node:net";
 
 const defaultCallTimeout = 60_000;
+
+export interface SeqPassIpcClientOptions {
+  /** Per-request deadline in milliseconds (default 60s). */
+  callTimeoutMs?: number;
+}
 
 export interface SeqPassRequest {
   id: string;
@@ -42,8 +49,11 @@ export class SeqPassIpcClient {
     generation: number;
   }>();
   private connecting: Promise<void> | null = null;
+  private callTimeoutMs: number;
 
-  constructor(private socketPath: string) {}
+  constructor(private socketPath: string, options?: SeqPassIpcClientOptions) {
+    this.callTimeoutMs = options?.callTimeoutMs ?? defaultCallTimeout;
+  }
 
   async connect(): Promise<void> {
     if (this.conn && !this.conn.destroyed && this.conn.readyState === "open") return;
@@ -162,7 +172,7 @@ export class SeqPassIpcClient {
           this.pending.delete(id);
           entry.reject(new Error("broker timeout"));
         }
-      }, defaultCallTimeout);
+      }, this.callTimeoutMs);
       this.pending.set(id, { resolve, reject, timeout, generation });
       if (!this.conn || !this.conn.writable) {
         clearTimeout(timeout);

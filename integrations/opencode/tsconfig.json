@@ -3,7 +3,8 @@
     "target": "ES2022",
     "module": "ES2022",
     "moduleResolution": "bundler",
-    "jsx": "preserve",
+    "jsx": "react-jsx",
+    "jsxImportSource": "@opentui/solid",
     "strict": true,
     "skipLibCheck": true,
     "types": [],
@@ -11,5 +12,5 @@
 
     "typeRoots": ["/home/bamn/.bun/install/cache/solid-js@1.9.12@@@1"]
   },
-  "include": ["index.ts", "lib/**/*.ts", "components/**/*.tsx", "types.ts", "tests/**/*.ts", "smoke.ts", "/home/bamn/.bun/install/cache/@types/node@22.20.5@@@1/index.d.ts"]
+  "include": ["index.ts", "lib/**/*.ts", "components/**/*.tsx", "types.ts", "tests/**/*.ts", "smoke.ts", "../shared/ipc.ts", "/home/bamn/.bun/install/cache/@types/node@22.20.5@@@1/index.d.ts"]
 }

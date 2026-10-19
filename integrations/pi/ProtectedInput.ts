@@ -5,6 +5,13 @@
  * handling and explicit cleanup. The value goes through the trusted
  * intake socket with the exact reviewed revision; it never enters
  * session state or tool results.
+ *
+ * The rendered surface only ever shows one asterisk per entered
+ * character — the component has no code path that draws the value.
+ * As with every in-host surface, this supports model-blind operation;
+ * it does not prove that other code in the host process cannot observe
+ * the value. That requires the independently qualified deployment
+ * boundary (SP-05).
  */
 import type { ProtectedInputNotice } from "./types";
 import type { SeqPassClient } from "./client";
@@ -13,6 +20,22 @@ export interface PiCustomUI {
   render: (text: string) => void;
   setKeyHandler: (handler: (key: string) => void) => void;
   close: () => void;
+}
+
+// SP-05: instructions shown for external_tty mode. The external trusted
+// terminal is the operator's own `seqpass tui` session; the notice never
+// carries socket paths (host_session_id is a session identifier, not a
+// filesystem path), so the message only names the command. The TUI
+// resolves the configured intake socket itself.
+export function externalFallbackMessage(notice: ProtectedInputNotice): string {
+  return (
+    `SeqPass request ${notice.request_id} requires external trusted-terminal input.\n` +
+    `Run in your own terminal: seqpass tui`
+  );
+}
+
+export function maskedEcho(length: number): string {
+  return "*".repeat(length);
 }
 
 export function ProtectedInput(
@@ -37,7 +60,10 @@ export function ProtectedInput(
   };
 
   const redraw = () => {
-    ui.render(`SeqPass ${notice.request_id} — enter ${notice.data_kind} for ${notice.recipient_label} (masked)`);
+    // Masked progress only: never render the value itself.
+    ui.render(
+      `SeqPass ${notice.request_id} — enter ${notice.data_kind} for ${notice.recipient_label}: ${maskedEcho(value.length)}`,
+    );
   };
 
   ui.setKeyHandler((key: string) => {
@@ -84,10 +110,7 @@ function ExternalTTYFallback(notice: ProtectedInputNotice) {
   return {
     get masked() { return false; },
     get fallback() { return true; },
-    message: (
-      `SeqPass request ${notice.request_id} requires external trusted-terminal input.\n` +
-      `Run: seqpass relay fulfill ${notice.request_id} --intake-socket ${notice.host_session_id}`
-    ),
+    message: externalFallbackMessage(notice),
     close: () => {},
   };
 }

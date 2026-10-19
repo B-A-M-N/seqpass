@@ -11,5 +11,5 @@
 
     "typeRoots": ["/home/bamn/.bun/install/cache/solid-js@1.9.12@@@1"]
   },
-  "include": ["client.ts", "seqpass.ts", "ProtectedInput.ts", "SeqPassStatus.ts", "types.ts", "tests/**/*.ts", "/home/bamn/.bun/install/cache/@types/node@22.20.5@@@1/index.d.ts", "../opencode/lib/ipc.ts"]
+  "include": ["client.ts", "seqpass.ts", "ProtectedInput.ts", "SeqPassStatus.ts", "types.ts", "tests/**/*.ts", "/home/bamn/.bun/install/cache/@types/node@22.20.5@@@1/index.d.ts", "../shared/ipc.ts"]
 }

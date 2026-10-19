@@ -36,8 +36,16 @@ export function registerSeqPass(config: SeqPassExtensionConfig) {
     const result = await client.register();
     if (result && typeof result === "object") {
       const m = result as { session?: { id?: string }; token?: { token?: string } };
-      if (m.session?.id) client.setSession(m.session.id, m.token?.token ?? "");
-      sessionReady = true;
+      // Adopt the broker-minted credentials only as a pair. A partial
+      // response must not install an unusable session identity that then
+      // fails every host call with an authentication error.
+      if (m.session?.id && m.token?.token) {
+        client.setSession(m.session.id, m.token.token);
+        sessionReady = true;
+      }
+    }
+    if (!sessionReady) {
+      throw new Error("SeqPass host session bootstrap failed");
     }
   };
 
@@ -47,6 +55,14 @@ export function registerSeqPass(config: SeqPassExtensionConfig) {
         description: "Request protected credential handoff for a registered recipient",
         handler: async (args: any) => {
           await ensureSession();
+          // Fail closed on malformed agent input before it reaches the
+          // broker; the sanitized error result keeps the wire contract.
+          if (typeof args?.destination_id !== "string" || !args.destination_id) {
+            return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: "destination_id is required" }) }], details: {} };
+          }
+          if (typeof args?.data_kind !== "string" || !args.data_kind) {
+            return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: "data_kind is required" }) }], details: {} };
+          }
           const result = await client.requestRelay(args);
           return {
             content: [{ type: "text", text: JSON.stringify(result) }],
@@ -58,6 +74,9 @@ export function registerSeqPass(config: SeqPassExtensionConfig) {
         description: "Check sanitized relay request status",
         handler: async (args: any) => {
           await ensureSession();
+          if (typeof args?.request_id !== "string" || !args.request_id) {
+            return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: "request_id is required" }) }], details: {} };
+          }
           const result = await client.getStatus(args.request_id);
           return {
             content: [{ type: "text", text: JSON.stringify(result) }],
