@@ -2,7 +2,9 @@ package secureops
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 )
 
 type fakeDriver struct {
@@ -10,13 +12,13 @@ type fakeDriver struct {
 	mode CompletionMode
 }
 
-func (f fakeDriver) Name() string                 { return f.name }
-func (f fakeDriver) Completion() CompletionMode   { return f.mode }
-func (f fakeDriver) RequiresDestination() bool    { return false }
+func (f fakeDriver) Name() string               { return f.name }
+func (f fakeDriver) Completion() CompletionMode { return f.mode }
+func (f fakeDriver) RequiresDestination() bool  { return false }
 func (f fakeDriver) Describe() DriverInfo {
 	return DriverInfo{Description: "fake", Completion: f.mode}
 }
-func (f fakeDriver) AllowedParams() []string      { return []string{} }
+func (f fakeDriver) AllowedParams() []string { return []string{} }
 func (f fakeDriver) Resource(map[string]string) ResourceDescriptor {
 	return ResourceDescriptor{Kind: "test", Identifier: f.name}
 }
@@ -74,11 +76,15 @@ func TestLiveRegistriesRejectDuplicates(t *testing.T) {
 		Register(fakeDriver{"github.get_repo", ResponseValidated})
 	}()
 	// Duplicate verifier registration is rejected. The probe name has no
-	// driver, so the leftover entry cannot affect driver activation.
-	if err := RegisterVerifierEx("test.dup-probe", "p", "v1", fakeVerifier{OutcomeSatisfied}); err != nil {
+	// driver, so the leftover entry cannot affect driver activation. The
+	// name is unique per invocation: the verifier registry is global and
+	// survives go test -count=N reruns within one process, and the first
+	// registration must succeed on every rerun.
+	dupProbe := fmt.Sprintf("test.dup-probe-%d", time.Now().UnixNano())
+	if err := RegisterVerifierEx(dupProbe, "p", "v1", fakeVerifier{OutcomeSatisfied}); err != nil {
 		t.Fatalf("probe verifier rejected: %v", err)
 	}
-	if err := RegisterVerifierEx("test.dup-probe", "p", "v2", fakeVerifier{OutcomeSatisfied}); err == nil {
+	if err := RegisterVerifierEx(dupProbe, "p", "v2", fakeVerifier{OutcomeSatisfied}); err == nil {
 		t.Fatal("duplicate verifier registration silently accepted")
 	}
 	if err := RegisterVerifierEx("", "p", "v1", fakeVerifier{OutcomeSatisfied}); err == nil {

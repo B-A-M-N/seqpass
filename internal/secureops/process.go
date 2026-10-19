@@ -356,15 +356,23 @@ func (p *processRun) Execute(ctx context.Context, cred Credential, in UseInput) 
 		killProcessGroup(child.Process)
 		return SafeResult{}, errors.New("pinned command exceeded its time budget")
 	}
-	if werr != nil {
-		return SafeResult{}, errors.New("credential handoff to the pinned executable failed")
-	}
+	// The exit status is authoritative once the child has been reaped. A
+	// child that exits without reading its stdin (a pinned wrapper that
+	// ignores the credential slot) races the credential write and can
+	// surface EPIPE here; that must not mask the real exit status, or a
+	// plain failure reads as a credential-handoff incident.
 	if waitErr != nil {
 		// Exit code only — argv, env and stderr are never echoed back.
 		if ee, ok := waitErr.(*exec.ExitError); ok {
 			return SafeResult{}, fmt.Errorf("pinned command exited with code %d", ee.ExitCode())
 		}
 		return SafeResult{}, errors.New("pinned command did not run to completion")
+	}
+	if werr != nil {
+		// Zero exit but the credential write failed: the child may have
+		// acted on a partial value, so the operation must not read as a
+		// clean success.
+		return SafeResult{}, errors.New("credential handoff to the pinned executable failed")
 	}
 	if len(stdoutBytes) == 0 {
 		return SafeResult{
