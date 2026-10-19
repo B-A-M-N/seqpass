@@ -112,6 +112,15 @@ func brokerCmd(args []string) {
 	assurance := fs.String("assurance", "", "topology label: empty (production default: isolated), isolated, or best-effort (development only, always reported unverified)")
 	_ = fs.Parse(args)
 
+	// F15/§11: the broker holds relay payloads in memory. A crash must
+	// never write them to a core file: disable core dumps for this
+	// process and every child (pinned drivers, recipients) it may spawn.
+	// Best effort: an RLIMIT_CORE refusal is a startup warning, not a
+	// hard failure — the deployment's own ulimit may already be 0.
+	if err := disableCoreDumps(); err != nil {
+		fmt.Fprintf(os.Stderr, "WARNING: could not disable core dumps: %v (ensure ulimit -c 0)\n", err)
+	}
+
 	// Explicit provider configuration (C14): no silent ephemeral vault.
 	if *vaultF == "" {
 		fmt.Fprintln(os.Stderr, "broker requires --vault aegiskeys (production) or --vault memory-test --dev (development only)")
