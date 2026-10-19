@@ -856,9 +856,15 @@ func stopSyntheticBroker(
 		"stop the synthetic-tier broker after the credentialed scenarios",
 		"broker exits cleanly on SIGINT", fmt.Sprintf("clean=%t", cleanShutdown), cleanShutdown)
 	// Detect and redact before retention: the retained artifact must not
-	// carry credential values (literal or base64) even on failure.
+	// carry credential values (literal or base64) even on failure. The
+	// empty-value guard is defensive: bytes.ReplaceAll with an empty
+	// needle would splice the replacement everywhere, and Redact's found
+	// check would report a leak for nothing.
 	leaked := false
 	for _, cred := range creds {
+		if cred == "" {
+			continue
+		}
 		if brokerLog.Redact([]byte(cred), []byte("[REDACTED-QUALIFICATION-VALUE]")) {
 			leaked = true
 		}
