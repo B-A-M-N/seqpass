@@ -415,23 +415,39 @@ Rules:
 ### systemd service (recommended for the isolated topology)
 
 `deploy/seqpass-broker.service` runs the broker under the dedicated
-service identity with restart-on-failure, a `seqpass doctor
---topology --require-verified` startup dependency check, restrictive
-filesystem privileges (`ProtectSystem=strict`, `PrivateTmp`,
-`NoNewPrivileges`, writes confined to `/run/seqpass` +
-`/var/lib/seqpass`), and **no credential-bearing environment variables**
-(the optional `/etc/default/seqpass` holds path/UID configuration only).
+service identity with restart-on-failure (bounded by the `[Unit]`
+restart window), restrictive filesystem privileges
+(`ProtectSystem=strict`, `PrivateTmp`, `NoNewPrivileges`, writes
+confined to `/run/seqpass` + `/var/lib/seqpass`), and **no
+credential-bearing environment variables**. Topology configuration
+(paths, UIDs, socket groups, AegisKeys endpoint) comes from the
+mandatory `/etc/default/seqpass` — never credentials.
+
+The unit enforces a two-stage gate:
+
+1. `ExecStartPre` — `seqpass doctor --topology` preflight: validates the
+   expanded configuration and filesystem topology before the broker
+   exists. It deliberately does **not** pass `--require-verified`: a
+   preflight cannot prove the isolation of a broker that has not
+   started, and doctor refuses to claim otherwise.
+2. `ExecStartPost` — bounded readiness gate: verifies the **running**
+   broker's live isolation boundary (`doctor --require-verified`) with
+   retries; the unit fails if the boundary never reports verified.
+
 Install with:
 
 ```bash
 sudo cp deploy/seqpass-broker.service /etc/systemd/system/
+sudo editor /etc/default/seqpass   # required topology keys (see unit header)
 sudo systemctl daemon-reload
 sudo systemctl enable --now seqpass-broker
 ```
 
-Adapt `ExecStart` flags (sockets, UIDs, intake group) to your topology —
-or override via a drop-in unit — and keep the doctor pre-start check so a
-drifted installation refuses to boot.
+Override site-specific settings with a drop-in unit. Directive
+placements and the two-stage gate contract are pinned by
+`deploy/deploy_test.go` (including `systemd-analyze verify` where the
+host has it), so a unit regression fails `go test ./...` rather than
+being silently ignored by systemd.
 
 ## Sandbox note
 

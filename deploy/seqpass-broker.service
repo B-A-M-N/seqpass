@@ -1,20 +1,36 @@
-# SeqPass broker systemd unit (objective §8).
+# SeqPass broker systemd unit (objective §8; corrected per §3.F deployment
+# audit: directive placement, two-stage gate, complete topology arguments).
 #
 # Install:
 #   sudo cp deploy/seqpass-broker.service /etc/systemd/system/
+#   sudo cp /etc default template: see /etc/default/seqpass below
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now seqpass-broker
 #
-# The unit runs the broker under a dedicated service identity (the same
-# UID `seqpass init` provisions) with:
-#   - restart on failure (Restart=on-failure, bounded by StartLimitSec)
-#   - startup dependency checks (network + AegisKeys socket ordering hook)
+# The unit runs the broker under a dedicated service identity with:
+#   - restart on failure, bounded by the [Unit] StartLimit* window
+#   - a two-stage gate:
+#       stage 1 (ExecStartPre)  preflight: validates the expanded site
+#                 configuration and the filesystem topology BEFORE the
+#                 broker exists. It deliberately does NOT pass
+#                 --require-verified: a preflight cannot prove the
+#                 isolation of a broker that has not started, and doctor
+#                 refuses to claim otherwise (it exits non-zero if asked).
+#       stage 2 (ExecStartPost) readiness: bounded post-start verification
+#                 of the RUNNING broker — the only stage that can honestly
+#                 demand --require-verified. If the live boundary is not
+#                 verified within ~30s, the unit fails.
 #   - restrictive filesystem privileges (ProtectSystem=strict, PrivateTmp,
 #     PrivateDevices, NoNewPrivileges, ReadWritePaths limited to the two
 #     SeqPass installation directories)
 #   - NO credential-bearing environment variables: the broker resolves
-#     credentials through its AegisKeys binding at operation time; the
-#     optional EnvironmentFile holds only path/UID configuration.
+#     credentials through its AegisKeys binding at operation time.
+#     /etc/default/seqpass holds path/UID/group configuration only.
+#
+# Site-specific topology lives in /etc/default/seqpass (see the required
+# keys below). A missing or empty key makes the stage-1 preflight fail, so
+# the broker never starts with a silently narrowed identity set. Override
+# individual settings with a systemd drop-in, not by editing this file.
 #
 # After editing /etc/default/seqpass or the unit: systemctl daemon-reload
 # and systemctl restart seqpass-broker.
@@ -24,37 +40,76 @@ Description=SeqPass credential broker
 Documentation=file:///usr/share/doc/seqpass/README.md
 After=network-online.target
 Wants=network-online.target
-# Startup dependency check: refuse a broken installation instead of
-# loop-restarting. The doctor consults the installation-wide configuration
-# file, evaluates the live topology (UID separation, socket ownership,
-# AegisKeys reachability), and exits non-zero unless the boundary is
-# verified. Development installations can override this with a drop-in.
-ExecStartPre=/usr/local/bin/seqpass doctor --topology --require-verified
+# Restart-window directives belong in [Unit]: in [Service] systemd ignores
+# them (systemd-analyze verify flags the placement).
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
 User=seqpass
 Group=seqpass
-# Optional configuration (paths/UIDs only — never credentials):
-EnvironmentFile=-/etc/default/seqpass
+# REQUIRED (no "-" prefix: a missing file fails the unit). Keys (paths,
+# UIDs, groups — NEVER credentials):
+#   SEQPASS_DB                 broker SQLite path        (/var/lib/seqpass/broker.db)
+#   SEQPASS_SOCKET             agent socket              (/run/seqpass/broker.sock)
+#   SEQPASS_ADMIN_SOCKET       admin socket              (/run/seqpass/admin.sock)
+#   SEQPASS_INTAKE_SOCKET      trusted intake socket     (/run/seqpass/intake.sock)
+#   SEQPASS_AGENT_UIDS         approved agent UIDs       (comma-separated; must exclude the broker euid)
+#   SEQPASS_ADMIN_UIDS         admin UIDs                (comma-separated)
+#   SEQPASS_INTAKE_UIDS        trusted intake UIDs       (comma-separated; must exclude agent UIDs)
+#   SEQPASS_SOCKET_GROUP       agent socket group        (own the agent socket+dir)
+#   SEQPASS_INTAKE_GROUP       trusted intake group      (must differ from the agent group)
+#   SEQPASS_AEGISKEYS_SOCKET   AegisKeys broker socket   (HTTP-over-Unix, never TCP)
+EnvironmentFile=/etc/default/seqpass
+
+# Stage 1 — preflight (broker not running yet).
+ExecStartPre=/usr/local/bin/seqpass doctor --topology \
+  --db ${SEQPASS_DB} \
+  --socket ${SEQPASS_SOCKET} \
+  --admin-socket ${SEQPASS_ADMIN_SOCKET} \
+  --intake-socket ${SEQPASS_INTAKE_SOCKET} \
+  --vault aegiskeys \
+  --agent-uid ${SEQPASS_AGENT_UIDS} \
+  --admin-uid ${SEQPASS_ADMIN_UIDS} \
+  --intake-uid ${SEQPASS_INTAKE_UIDS} \
+  --socket-group ${SEQPASS_SOCKET_GROUP} \
+  --intake-group ${SEQPASS_INTAKE_GROUP} \
+  --aegiskeys-socket ${SEQPASS_AEGISKEYS_SOCKET}
 
 ExecStart=/usr/local/bin/seqpass broker \
   --vault aegiskeys \
-  --db /var/lib/seqpass/broker.db \
-  --socket /run/seqpass/broker.sock \
-  --admin-socket /run/seqpass/admin.sock \
-  --intake-socket /run/seqpass/intake.sock
+  --db ${SEQPASS_DB} \
+  --socket ${SEQPASS_SOCKET} \
+  --admin-socket ${SEQPASS_ADMIN_SOCKET} \
+  --intake-socket ${SEQPASS_INTAKE_SOCKET} \
+  --agent-uid ${SEQPASS_AGENT_UIDS} \
+  --admin-uid ${SEQPASS_ADMIN_UIDS} \
+  --intake-uid ${SEQPASS_INTAKE_UIDS} \
+  --socket-group ${SEQPASS_SOCKET_GROUP} \
+  --intake-group ${SEQPASS_INTAKE_GROUP} \
+  --aegiskeys-socket ${SEQPASS_AEGISKEYS_SOCKET}
+
+# Stage 2 — readiness gate (bounded post-start verification). "$$" is the
+# systemd escape for a literal "$": the retry state lives in the shell, not
+# in systemd variable expansion. The gate queries the running broker's
+# health and fails the unit unless the boundary reports verified.
+ExecStartPost=/bin/sh -c 'i=0; while [ "$$i" -lt 60 ]; do if /usr/local/bin/seqpass doctor --require-verified --socket ${SEQPASS_SOCKET} >/dev/null 2>&1; then exit 0; fi; i=$$((i+1)); sleep 0.5; done; echo "seqpass-broker: readiness gate timed out: boundary never reported verified" >&2; exit 1'
 
 Restart=on-failure
 RestartSec=5s
-StartLimitIntervalSec=300
-StartLimitBurst=5
 TimeoutStopSec=15
 
 # Restrictive filesystem / capability profile.
 NoNewPrivileges=yes
 ProtectSystem=strict
-ProtectHome=yes
+# read-only, not yes: the broker must still be able to connect(2) to the
+# AegisKeys broker socket, whose default location is under the service
+# user's home (~/.config/aegiskeys/run/broker.sock). read-only preserves
+# the no-write boundary while permitting the socket dial. Deployments that
+# run AegisKeys with its socket under /run can tighten this to "yes" via a
+# drop-in.
+ProtectHome=read-only
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes
@@ -66,6 +121,11 @@ MemoryDenyWriteExecute=yes
 RestrictNamespaces=yes
 SystemCallArchitectures=native
 # The only writable locations: runtime sockets and broker-owned state.
+# systemd pre-creates both with the service identity.
+RuntimeDirectory=seqpass
+RuntimeDirectoryMode=0750
+StateDirectory=seqpass
+StateDirectoryMode=0700
 ReadWritePaths=/run/seqpass /var/lib/seqpass
 UMask=0077
 
