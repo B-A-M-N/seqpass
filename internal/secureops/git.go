@@ -307,11 +307,16 @@ func (g *gitFetch) Execute(ctx context.Context, cred Credential, in UseInput) (S
 	if token == "" {
 		return SafeResult{}, errors.New("no credential")
 	}
-	if strings.ContainsAny(token, "\x00\n\r") {
-		// Newlines would corrupt the credential-fill response; such a
-		// credential is unusable for this profile and must fail closed,
-		// not truncate silently.
-		return SafeResult{}, errors.New("credential bytes unusable for the git credential protocol")
+	// The credential-fill response is line-oriented: a newline (or NUL)
+	// in either field corrupts it — git stops at the first blank line, so
+	// a username carrying "\npassword=x" would cause git to authenticate
+	// with the injected x while the real token is silently discarded.
+	// Both fields are operator-staged, but integrity here is fail-closed:
+	// an unusable credential is refused, never truncated or reinterpreted.
+	for _, field := range []string{user, token} {
+		if strings.ContainsAny(field, "\x00\n\r") {
+			return SafeResult{}, errors.New("credential bytes unusable for the git credential protocol")
+		}
 	}
 	// The credential-fill response is composed in memory, written to the
 	// controlled file descriptor, and zeroed when execution ends. It never
@@ -405,22 +410,16 @@ func (g *gitFetch) Execute(ctx context.Context, cred Credential, in UseInput) (S
 		return SafeResult{}, errors.New("git fetch failed")
 	}
 
-	// Project: read FETCH_HEAD (broker-owned file), take the leading
-	// object name of the first line. Everything else git printed is
-	// discarded, not redacted.
+	// Project: read FETCH_HEAD (broker-owned file). Empirically, a
+	// single-refspec fetch (`fetch -- <remote> refs/heads/<ref>`, the
+	// only argv this driver composes) writes exactly the requested
+	// branch's line, but the projection must not depend on that git
+	// version detail: selectFetchHead matches the requested branch's
+	// description, so extra lines (a future git, tag auto-following)
+	// cannot make the broker report another ref's tip.
 	head := ""
 	if raw, rerr := os.ReadFile(filepath.Join(mirror, "FETCH_HEAD")); rerr == nil {
-		if len(raw) > gitHeadFileMax {
-			raw = raw[:gitHeadFileMax]
-		}
-		if i := bytes.IndexByte(raw, '\n'); i >= 0 {
-			raw = raw[:i]
-		}
-		if field, _, ok := bytes.Cut(raw, []byte{'\t'}); ok {
-			if oid := string(bytes.TrimSpace(field)); isGitOID(oid) {
-				head = oid
-			}
-		}
+		head = selectFetchHead(raw, ref)
 	}
 
 	data := map[string]interface{}{"fetched": true}
@@ -438,6 +437,39 @@ func (g *gitFetch) Execute(ctx context.Context, cred Credential, in UseInput) (S
 		summary = fmt.Sprintf("git fetch completed (branch %s)", ref)
 	}
 	return SafeResult{Summary: summary, Data: data}, nil
+}
+
+// selectFetchHead extracts the object name of the requested branch from
+// FETCH_HEAD content. Line format: "<oid>\t<flags>\t'branch <ref>' of <url>"
+// (a bare HEAD fetch has no description field). Lines that do not name the
+// requested branch — other refs, auto-followed tags, malformed rows — are
+// never projected, so the DTO's head is always the tip the operator's
+// approval covered, never whichever line git wrote first. Pure function so
+// the selection logic is unit-tested against synthetic multi-line content
+// rather than depending on one git version's line-writing behavior.
+func selectFetchHead(raw []byte, ref string) string {
+	if len(raw) > gitHeadFileMax {
+		raw = raw[:gitHeadFileMax]
+	}
+	want := []byte("branch '" + ref + "' of ")
+	for _, line := range bytes.Split(raw, []byte{'\n'}) {
+		oid, rest, ok := bytes.Cut(line, []byte{'\t'})
+		if !ok {
+			continue
+		}
+		oid = bytes.TrimSpace(oid)
+		if !isGitOID(string(oid)) {
+			continue
+		}
+		// The description after the flags is exactly
+		// "branch '<ref>' of <url>" for a refs/heads/<ref> fetch.
+		// Matching the quoted form (not a raw substring) cannot be
+		// fooled by a ref name that prefixes another branch's name.
+		if bytes.HasPrefix(bytes.TrimSpace(rest), want) {
+			return string(oid)
+		}
+	}
+	return ""
 }
 
 // isGitOID reports whether s is a lowercase hexadecimal object name

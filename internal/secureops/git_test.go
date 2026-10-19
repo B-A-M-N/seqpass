@@ -444,6 +444,156 @@ func TestGitFetchRefusals(t *testing.T) {
 	}
 }
 
+// The credential-fill response is line-oriented: a username carrying a
+// newline could inject a password line that authenticates before the real
+// token — corrupting the handoff silently. The refusal must happen before
+// any I/O, so this runs against a reachable local repository: if the
+// validation were removed (negative control), the fetch would succeed and
+// this test would fail on the missing error instead of passing for the
+// unrelated reason of an unreachable remote.
+func TestGitFetchRefusesCorruptingUsername(t *testing.T) {
+	realGit := hasGit(t)
+	repo, _ := localRepoFixture(t, realGit, "probe")
+	d, err := Lookup("git.fetch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = d.Execute(context.Background(),
+		Credential{Value: gitMarker, Components: map[string]string{"username": "u\npassword=x\n"}},
+		UseInput{Operation: "git.fetch", Target: "dg",
+			Dest:   gitPinnedDest("file://" + repo),
+			Params: map[string]string{"ref": "probe"}})
+	if err == nil {
+		t.Fatal("username with protocol-significant bytes accepted")
+	}
+	if !strings.Contains(err.Error(), "credential bytes unusable") {
+		t.Fatalf("error is not the credential-integrity refusal (fetch may have failed for an unrelated reason): %v", err)
+	}
+}
+
+// selectFetchHead is the projection security boundary: the DTO's head must
+// be the tip of the branch the operator's approval covered, never whichever
+// line git wrote first. Table-tested against synthetic FETCH_HEAD content
+// because the live single-refspec fetch writes exactly one line on current
+// git — a first-line mutant is only distinguishable here. Negative control:
+// mutating selectFetchHead to first-line selection trips
+// TestSelectFetchHeadRejectsForeignLines.
+func TestSelectFetchHeadRejectsForeignLines(t *testing.T) {
+	const (
+		oidFeature = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		oidMain    = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		oidTag     = "cccccccccccccccccccccccccccccccccccccccc"
+	)
+	cases := []struct {
+		name string
+		raw  string
+		ref  string
+		want string
+	}{
+		{
+			name: "requested branch in a multi-ref FETCH_HEAD, requested line second",
+			raw: oidMain + "\t\tbranch 'main' of https://g/r.git\n" +
+				oidFeature + "\t\tbranch 'feature' of https://g/r.git\n",
+			ref:  "feature",
+			want: oidFeature,
+		},
+		{
+			name: "requested branch first among tags",
+			raw: oidFeature + "\t\tbranch 'feature' of https://g/r.git\n" +
+				oidTag + "\tnot-for-merge\ttag 'v1' of https://g/r.git\n",
+			ref:  "feature",
+			want: oidFeature,
+		},
+		{
+			// The quoted description must match in full: a branch named
+			// "feature" must not be satisfied by the line of
+			// "feature-x" (a raw-substring match would project the wrong
+			// tip, and the wrong tip is a false attestation).
+			name: "ref name that prefixes another ref's name",
+			raw:  "dddddddddddddddddddddddddddddddddddddddd\t\tbranch 'feature-x' of https://g/r.git\n",
+			ref:  "feature",
+			want: "",
+		},
+		{
+			name: "malformed first field is skipped",
+			raw:  "not-an-oid\t\tbranch 'feature' of https://g/r.git\n" + oidFeature + "\t\tbranch 'feature' of https://g/r.git\n",
+			ref:  "feature",
+			want: oidFeature,
+		},
+		{
+			name: "no matching line projects nothing",
+			raw:  oidMain + "\t\tbranch 'main' of https://g/r.git\n",
+			ref:  "feature",
+			want: "",
+		},
+		{
+			name: "bare HEAD fetch line has no description to match",
+			raw:  oidMain + "\t\thttps://g/r.git\n",
+			ref:  "main",
+			want: "",
+		},
+		{
+			name: "single line, exact match (current git single-refspec shape)",
+			raw:  oidFeature + "\t\tbranch 'feature' of file:///srv/repo\n",
+			ref:  "feature",
+			want: oidFeature,
+		},
+	}
+	for _, tc := range cases {
+		if got := selectFetchHead([]byte(tc.raw), tc.ref); got != tc.want {
+			t.Errorf("%s: selectFetchHead(ref=%q) = %q, want %q", tc.name, tc.ref, got, tc.want)
+		}
+	}
+}
+
+// Live-path companion: with the driver's real argv against a real
+// repository, the projected head is the requested branch's tip (a
+// non-default branch), and the honest result passes the disclosure gates.
+func TestGitFetchHeadMatchesRequestedBranch(t *testing.T) {
+	realGit := hasGit(t)
+	repo, _ := localRepoFixture(t, realGit, "main")
+
+	env := append(os.Environ(),
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1",
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com")
+	run := func(args ...string) {
+		cmd := exec.Command(realGit, args...)
+		cmd.Env = env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("fixture %v: %v: %s", args, err, out)
+		}
+	}
+	run("-C", repo, "switch", "--quiet", "-c", "feature")
+	run("-C", repo, "commit", "--allow-empty", "-m", "two")
+	sha := strings.TrimSpace(func() string {
+		cmd := exec.Command(realGit, "-C", repo, "rev-parse", "feature")
+		cmd.Env = env
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("rev-parse: %v", err)
+		}
+		return string(out)
+	}())
+
+	d, err := Lookup("git.fetch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := d.Execute(context.Background(), Credential{Value: gitMarker},
+		UseInput{Operation: "git.fetch", Target: "dg", Dest: gitPinnedDest("file://" + repo),
+			Params: map[string]string{"ref": "feature"}})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.Data["head"] != sha {
+		t.Fatalf("head = %v, want the feature tip %s", res.Data["head"], sha)
+	}
+	if err := ValidateCredentialNonDisclosure(res, Credential{Value: gitMarker}); err != nil {
+		t.Fatalf("credential disclosure gate rejected an honest result: %v", err)
+	}
+}
+
 // The agent cannot steer the operation: there is no remote/url parameter
 // at all, the op requires a destination, and no state-changing git
 // operation exists.
