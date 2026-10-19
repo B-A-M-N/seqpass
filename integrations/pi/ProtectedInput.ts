@@ -15,17 +15,18 @@
  */
 import type { ProtectedInputNotice, SeqPassInputClient } from "./types";
 
-// SP-05 parity gate: build-level switch for in-host credential capture.
+// SP-05 parity gate: build-level constant for in-host credential capture.
 // This adapter build has not accumulated independent qualification
 // evidence for host-native masked input (no process isolation from
-// agent-controlled code in the Pi host), so it defaults to false and all
-// requests route to the external trusted terminal. Setting
-// SEQPASS_PI_NATIVE_INPUT=1 is reserved for a build that ships with that
-// qualification evidence — the broker still decides the input mode; this
-// gate only ensures a build never claims more than it proved.
-export function nativeMaskedInputSupported(): boolean {
-  return process.env.SEQPASS_PI_NATIVE_INPUT === "1";
-}
+// agent-controlled code in the Pi host), so it is false and all requests
+// route to the external trusted terminal. Like opencode's
+// NATIVE_MASKED_INPUT_SUPPORTED, this is a compiled constant, not an
+// environment variable: an in-process actor could flip process.env at
+// runtime, but cannot flip a const without rebuilding the adapter. When
+// qualification evidence exists, flip the constant in a dedicated
+// qualified build; the broker still decides the input mode — this gate
+// only ensures a build never claims more than it proved.
+export const NATIVE_MASKED_INPUT_SUPPORTED = false;
 
 export interface PiCustomUI {
   render: (text: string) => void;
@@ -55,12 +56,26 @@ export function ProtectedInput(
   ui: PiCustomUI,
 ) {
   // SP-05: when the broker issues external_tty mode, or when this build
-  // has no qualified native masked input, the adapter must direct the
-  // user to the external trusted-terminal flow instead of rendering a
-  // native prompt that cannot prove process isolation.
-  if (notice.input_mode !== "host_native_verified" || !nativeMaskedInputSupported()) {
+  // has no qualified native masked input (the compiled gate below), the
+  // adapter must direct the user to the external trusted-terminal flow
+  // instead of rendering a native prompt that cannot prove process
+  // isolation.
+  if (notice.input_mode !== "host_native_verified" || !NATIVE_MASKED_INPUT_SUPPORTED) {
     return ExternalTTYFallback(notice);
   }
+  return nativeEntry(notice, client, ui);
+}
+
+// nativeEntry is the qualified in-host masked-entry component. It is
+// reachable only when NATIVE_MASKED_INPUT_SUPPORTED is true, which is a
+// build-time decision; this build keeps it false. Keeping it as a named
+// export lets the qualification suite exercise the component directly
+// without weakening the gate.
+export function nativeEntry(
+  notice: ProtectedInputNotice,
+  client: SeqPassInputClient,
+  ui: PiCustomUI,
+) {
   let value = "";
   let closed = false;
 
@@ -128,3 +143,9 @@ function ExternalTTYFallback(notice: ProtectedInputNotice) {
     close: () => {},
   };
 }
+
+// Compile-time check that the gate is a constant and off in this build.
+// A mutated gate (computed at runtime, or enabled) fails the type check
+// or this assertion.
+const gateIsConstFalse: false = NATIVE_MASKED_INPUT_SUPPORTED;
+void gateIsConstFalse;

@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/secretbridge/secretbridge/internal/adapter"
 )
 
 // captureStdout runs fn with stdout redirected and returns what was printed.
@@ -84,8 +86,18 @@ func TestReportAgentStatusReportsQualifiedStateScrubbed(t *testing.T) {
 		t.Fatalf("got %d frames, want event + summary (%q)", len(frames), out)
 	}
 	event, summary := frames[0], frames[1]
-	if event["type"] != "state_changed" || event["request_id"] != "req-9" || event["state"] != "awaiting_user" {
-		t.Fatalf("event frame = %v", event)
+	// The event frame is sealed in the versioned contract envelope (§5):
+	// a receiver pins the protocol version and refuses unknown ones
+	// instead of misparsing a newer producer's frames.
+	if event["protocol_version"] != float64(adapter.ProtocolVersion) {
+		t.Fatalf("event frame missing the contract version: %v", event)
+	}
+	env, ok := event["frame"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("event frame does not wrap an inner frame: %v", event)
+	}
+	if env["type"] != "state_changed" || env["request_id"] != "req-9" || env["state"] != "awaiting_user" {
+		t.Fatalf("sealed event frame = %v", env)
 	}
 	// The summary carries the derived facts, so an agent never has to
 	// interpret broker vocabulary itself.

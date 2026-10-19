@@ -786,42 +786,65 @@ func initCmd(args []string) {
 // writeInstallConfig writes the installation-wide configuration file for d,
 // idempotently and never over a differing file without --force. The file
 // contains no secret, so 0644 is intentional: every UID involved in the
-// installation must be able to read the endpoints it may reach.
+// installation must be able to read the endpoints it may reach. It is the
+// CLI wrapper (os.Exit on refusal) around writeInstallConfigPath, which is
+// the testable core.
 func writeInstallConfig(path string, d config.Deployment, force bool) {
 	data, err := config.RenderConfig(d)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "init: cannot render the installation config: %v\n", err)
 		os.Exit(1)
 	}
+	if err := writeInstallConfigPath(path, data, force); err != nil {
+		fmt.Fprintf(os.Stderr, "init: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// writeInstallConfigPath is the core of the install-config writer. Refusals
+// are returned, not exited, so tests can pin the security properties.
+func writeInstallConfigPath(path string, data []byte, force bool) error {
 	if existing, err := os.ReadFile(path); err == nil {
 		if string(existing) == string(data) {
 			fmt.Printf("install config: %s (already up to date)\n", path)
-			return
+			return nil
 		}
 		if !force {
-			fmt.Fprintf(os.Stderr, "init: refusing to overwrite differing %s (pass --force)\n", path)
-			os.Exit(1)
+			return fmt.Errorf("refusing to overwrite differing %s (pass --force)", path)
 		}
 	} else if !os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "init: cannot inspect %s: %v\n", path, err)
-		os.Exit(1)
+		return fmt.Errorf("cannot inspect %s: %w", path, err)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "init: cannot create %s: %v\n", filepath.Dir(path), err)
-		os.Exit(1)
+		return fmt.Errorf("cannot create %s: %w", filepath.Dir(path), err)
 	}
 	// Write through a sibling temp file and rename, so a crash mid-write
 	// can never leave a truncated config that other surfaces would refuse.
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "init: cannot write %s: %v\n", tmp, err)
-		os.Exit(1)
+	// The temp name is randomized (os.CreateTemp), so a pre-planted
+	// path+".tmp" symlink cannot redirect the final rename onto an
+	// unrelated target.
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-")
+	if err != nil {
+		return fmt.Errorf("cannot create a temp file in %s: %w", filepath.Dir(path), err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		fmt.Fprintf(os.Stderr, "init: cannot install %s: %v\n", path, err)
-		os.Exit(1)
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0644); err != nil {
+		tmp.Close()
+		return fmt.Errorf("cannot restrict %s: %w", tmpName, err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("cannot write %s: %w", tmpName, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("cannot flush %s: %w", tmpName, err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("cannot install %s: %w", path, err)
 	}
 	fmt.Printf("install config: %s (endpoints, vault and UID lists only — no secrets)\n", path)
+	return nil
 }
 
 // printNextSteps writes the exact broker and doctor commands for the chosen

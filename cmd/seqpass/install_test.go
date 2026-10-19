@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/secretbridge/secretbridge/internal/config"
 )
 
 // The canonical pi snippet used by the write-behavior tests.
@@ -178,5 +180,63 @@ func TestMCPStanzaUsesThisBinary(t *testing.T) {
 	exe, _ := os.Executable()
 	if exe != "" && !strings.Contains(string(stanza), exe) {
 		t.Errorf("mcp stanza does not reference this binary (%s):\n%s", exe, stanza)
+	}
+}
+
+// The endpoint environment layer is part of the shared resolution contract:
+// explicit flag > environment > config file > defaults. install must honor
+// it, or it can publish a config-file endpoint while the broker actually
+// listens on the environment override — the adapter would dial a different
+// installation than the one serving traffic.
+func TestInstallHonorsEndpointEnvironment(t *testing.T) {
+	t.Setenv(config.EnvSocket, "/run/env/broker.sock")
+	t.Setenv(config.EnvIntakeSocket, "/run/env/intake.sock")
+
+	mcp, err := mcpSnippet(loadBaseForTest(t).SocketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(mcp), "/run/env/broker.sock") {
+		t.Fatalf("mcp stanza ignored the SEQ_PASS_SOCKET environment override:\n%s", mcp)
+	}
+
+	pi, err := piSnippet("/run/env/intake.sock", "/run/env/host.sock", "/run/env/broker.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(pi), "/run/env/intake.sock") {
+		t.Fatalf("pi snippet lost the environment-resolved intake socket:\n%s", pi)
+	}
+}
+
+// loadBaseForTest resolves the deployment the same way installCmd does
+// (config file + endpoint environment), isolated from the machine's real
+// configuration file.
+func loadBaseForTest(t *testing.T) config.Deployment {
+	t.Helper()
+	t.Setenv(config.EnvConfig, "")
+	if os.Geteuid() != 0 {
+		d, err := config.Load("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.ApplyEnv()
+		return d
+	}
+	d := config.Defaults()
+	d.ApplyEnv()
+	return d
+}
+
+// installCmd's flag defaults must come from the environment-aware base, so
+// a bare `seqpass install mcp` emits the stanza for the installation that
+// is actually listening. This drives the real flag-default path.
+func TestInstallCmdDefaultsWithEnvironment(t *testing.T) {
+	t.Setenv(config.EnvSocket, "/run/env/broker.sock")
+	out := captureStdout(t, func() {
+		installCmd([]string{"mcp"})
+	})
+	if !strings.Contains(out, "/run/env/broker.sock") {
+		t.Fatalf("install mcp ignored the socket environment override:\n%s", out)
 	}
 }

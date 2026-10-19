@@ -63,14 +63,10 @@ const (
 	SystemStateDir  = "/var/lib/seqpass"
 )
 
-// Config-file environment overrides. SEQ_PASS_CONFIG follows the package's
-// existing endpoint-variable spelling; SEQQASS_CONFIG is accepted as the
-// historical alias. Both must point at a file, and a missing or malformed
-// explicit file is an error, never a silent fallback.
-const (
-	EnvConfig    = "SEQ_PASS_CONFIG"
-	EnvConfigAlt = "SEQQQASS_CONFIG"
-)
+// Config-file environment override. SEQ_PASS_CONFIG follows the package's
+// existing endpoint-variable spelling. It must point at a file, and a
+// missing or malformed explicit file is an error, never a silent fallback.
+const EnvConfig = "SEQ_PASS_CONFIG"
 
 // systemDefaults returns the multi-UID installation defaults: sockets under
 // /run/seqpass and broker state under /var/lib/seqpass. They are only used
@@ -114,7 +110,7 @@ type configFile struct {
 // ConfigPath resolves which configuration file governs this installation:
 // the environment override when set, otherwise /etc/seqpass/config.json.
 func ConfigPath() string {
-	for _, name := range []string{EnvConfig, EnvConfigAlt} {
+	for _, name := range []string{EnvConfig} {
 		if v := os.Getenv(name); v != "" {
 			return v
 		}
@@ -138,7 +134,7 @@ func Load(explicitPath string) (Deployment, error) {
 	path := explicitPath
 	envNamed := false
 	if path == "" {
-		for _, name := range []string{EnvConfig, EnvConfigAlt} {
+		for _, name := range []string{EnvConfig} {
 			if v := os.Getenv(name); v != "" {
 				path = v
 				envNamed = true

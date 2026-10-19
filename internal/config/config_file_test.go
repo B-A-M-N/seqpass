@@ -106,10 +106,6 @@ func TestLoadRefusesMissingExplicitConfig(t *testing.T) {
 	if _, err := Load(""); err == nil {
 		t.Fatal("Load accepted a missing environment-configured file")
 	}
-	t.Setenv(EnvConfigAlt, missing)
-	if _, err := Load(""); err == nil {
-		t.Fatal("Load accepted a missing file named by the alt environment variable")
-	}
 }
 
 // Without a configuration file the loader falls back to the single-UID dev
@@ -117,7 +113,6 @@ func TestLoadRefusesMissingExplicitConfig(t *testing.T) {
 // workflows rely on.
 func TestLoadDevFallbackUnchanged(t *testing.T) {
 	t.Setenv(EnvConfig, "")
-	t.Setenv(EnvConfigAlt, "")
 	if _, err := os.Stat(SystemConfigPath); err == nil {
 		t.Skipf("%s exists on this machine; dev fallback not testable", SystemConfigPath)
 	}
@@ -132,20 +127,15 @@ func TestLoadDevFallbackUnchanged(t *testing.T) {
 	}
 }
 
-// ConfigPath honors both environment variable spellings, in documented
-// order, and defaults to the system path.
+// ConfigPath honors the environment override and defaults to the system
+// path.
 func TestConfigPathPrecedence(t *testing.T) {
 	if got := ConfigPath(); got != SystemConfigPath {
 		t.Fatalf("ConfigPath with no environment = %q", got)
 	}
 	t.Setenv(EnvConfig, "/a/config.json")
-	t.Setenv(EnvConfigAlt, "/b/config.json")
 	if got := ConfigPath(); got != "/a/config.json" {
-		t.Fatalf("ConfigPath = %q, want the primary override", got)
-	}
-	os.Unsetenv(EnvConfig)
-	if got := ConfigPath(); got != "/b/config.json" {
-		t.Fatalf("ConfigPath = %q, want the alt override", got)
+		t.Fatalf("ConfigPath = %q, want the override", got)
 	}
 }
 

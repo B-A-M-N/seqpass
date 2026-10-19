@@ -170,10 +170,12 @@ func agentCall(method string, params map[string]interface{}) interface{} {
 	return data
 }
 
-// emitEvent prints one validated, sanitized adapter event. An event that
-// fails validation is never printed.
+// emitEvent prints one validated, sanitized adapter event, sealed in the
+// versioned contract envelope (§5) so a receiver can refuse frames from an
+// unknown protocol version instead of misparsing a newer producer. An event
+// that fails validation is never printed.
 func emitEvent(e adapter.Event) {
-	frame, err := adapter.Encode(e)
+	frame, err := adapter.EncodeVersioned(e)
 	if err != nil {
 		fatal("refusing to emit an invalid event: " + err.Error())
 	}

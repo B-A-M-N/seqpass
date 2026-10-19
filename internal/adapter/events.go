@@ -104,6 +104,22 @@ func Encode(e Event) ([]byte, error) {
 	return json.Marshal(e)
 }
 
+// EncodeVersioned validates an event and marshals it inside the versioned
+// envelope (§5). Live emit paths (the agent CLI event stream) use this so a
+// receiver can pin the contract version it was written against and refuse
+// frames from an unknown one, instead of misparsing a newer producer.
+func EncodeVersioned(e Event) ([]byte, error) {
+	frame, err := Encode(e)
+	if err != nil {
+		return nil, err
+	}
+	var decoded any
+	if err := json.Unmarshal(frame, &decoded); err != nil {
+		return nil, err
+	}
+	return json.Marshal(Versioned{ProtocolVersion: ProtocolVersion, Frame: decoded})
+}
+
 // Decode parses one event frame, rejecting unknown fields so a newer or
 // hostile producer cannot smuggle extra data past the adapter.
 func Decode(frame []byte) (Event, error) {

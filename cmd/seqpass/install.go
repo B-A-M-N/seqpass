@@ -27,6 +27,13 @@ import (
 //     a different installation than the broker the operator started.
 func installCmd(args []string) {
 	base := loadBase()
+	// Endpoint environment overrides (SEQ_PASS_SOCKET etc.) are part of
+	// the shared resolution contract: explicit flag > environment >
+	// config file > defaults. Skipping ApplyEnv here would let install
+	// publish a config-file endpoint while the broker actually listens
+	// on the environment override — the adapter would dial a different
+	// installation than the one serving traffic.
+	base.ApplyEnv()
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	printF := fs.Bool("print", false, "print what would be written; do not touch the filesystem")
 	outF := fs.String("out", "", "target file for the adapter config (required to write opencode/pi snippets; optional for mcp)")
@@ -127,12 +134,28 @@ func writeAdapterConfig(path string, snippet []byte, force bool) error {
 		return fmt.Errorf("cannot create %s: %w", filepath.Dir(path), err)
 	}
 	// Write through a sibling temp file and rename, so a crash mid-write
-	// can never leave a truncated config the host would misread.
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, snippet, 0600); err != nil {
-		return fmt.Errorf("cannot write %s: %w", tmp, err)
+	// can never leave a truncated config the host would misread. The temp
+	// name is randomized (os.CreateTemp), so a pre-planted path+".tmp"
+	// symlink in a shared directory cannot redirect the final rename onto
+	// an unrelated target.
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-")
+	if err != nil {
+		return fmt.Errorf("cannot create a temp file in %s: %w", filepath.Dir(path), err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("cannot restrict %s: %w", tmpName, err)
+	}
+	if _, err := tmp.Write(snippet); err != nil {
+		tmp.Close()
+		return fmt.Errorf("cannot write %s: %w", tmpName, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("cannot flush %s: %w", tmpName, err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("cannot install %s: %w", path, err)
 	}
 	return nil

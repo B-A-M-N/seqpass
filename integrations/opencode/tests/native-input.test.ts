@@ -13,6 +13,7 @@ import {
   footerText,
   inboxOptions,
 } from "../lib/nativeInput";
+import { hostVersionSupported } from "../index";
 
 describe("SeqPass native input gating", () => {
   it("refuses in-host collection while the build lacks a masked field", () => {
@@ -94,5 +95,25 @@ describe("SeqPass inbox listing", () => {
     const flat = JSON.stringify(options);
     expect(flat).not.toContain("agent-authored text");
     expect(flat).not.toContain("untrusted_purpose");
+  });
+});
+
+describe("host version qualification", () => {
+  // Table covering the version-grammar edge cases: malformed input must
+  // fail closed, a different major must be refused, v-prefixed and plain
+  // semver within the qualified major must be accepted.
+  it.each([
+    ["1.18.3", true],
+    ["v1.19.0", true],
+    ["2.0.0", false],
+    ["2", false],
+    ["0.9.1", false],
+    ["", false],
+    ["1.x.y", true], // major-1 prefix accepted; API surface is major-scoped
+    ["1x.9", false], // malformed: digits only before the dot
+    ["v2.1", false],
+    ["abc", false],
+  ])("hostVersionSupported(%j) = %j", (version, want) => {
+    expect(hostVersionSupported(version)).toBe(want);
   });
 });

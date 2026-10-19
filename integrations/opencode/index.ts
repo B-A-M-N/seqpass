@@ -27,9 +27,12 @@ export const id = "seqpass";
 // Refuses a host whose reported major version is outside the qualified
 // range. Minor/patch drift is tolerated: the plugin API surface this
 // adapter uses (keymap, slots, dialog, toast) is stable within a major.
+// The grammar is strict (`v?-prefix optional, digits only) so malformed
+// input fails closed instead of parsing "1x.9" as major 1.
 export function hostVersionSupported(version: string): boolean {
-  const major = Number.parseInt(version.split(".")[0] ?? "", 10);
-  return Number.isInteger(major) && major === supportedMajor;
+  const match = /^v?(\d+)\./.exec(version);
+  if (!match) return false;
+  return Number.parseInt(match[1], 10) === supportedMajor;
 }
 
 const pollIntervalMs = 5_000;
