@@ -38,7 +38,6 @@ Group=seqpass
 # Optional configuration (paths/UIDs only — never credentials):
 EnvironmentFile=-/etc/default/seqpass
 
-ExecStartPre=/usr/local/bin/seqpass doctor --quiet
 ExecStart=/usr/local/bin/seqpass broker \
   --vault aegiskeys \
   --db /var/lib/seqpass/broker.db \

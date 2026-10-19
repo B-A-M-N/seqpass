@@ -351,7 +351,8 @@ CREATE INDEX IF NOT EXISTS obs_op_idx ON outcome_observations(operation_id, obse
 // schemaVersion is the current numbered schema version. Version 1 added
 // the approval-binding repair columns; version 2 adds the trusted
 // dispatch record, observation record/commit timestamps, and evidence
-// kinds (G02/G07); version 4 adds the git.push pinned source repository
+// kinds (G02/G07); version 3 added the auth-epoch and destination-digest
+// binding columns; version 4 adds the git.push pinned source repository
 // (a security binding: it participates in the destination digest). Older
 // databases take the repair path below.
 const schemaVersion = 4

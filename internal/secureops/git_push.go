@@ -182,6 +182,9 @@ func (g *gitPush) Execute(ctx context.Context, cred Credential, in UseInput) (Sa
 	// (never for file:// remotes), so a failed or unread write is not an
 	// incident: the push exit status is authoritative, and any transport
 	// that needed the credential without receiving it fails closed below.
+	// This receive is unconditional and is also the synchronization edge
+	// for the fill buffer: it happens before the deferred clear(fill) on
+	// every return path, so the zeroing can never race the write.
 	_ = <-writeErr
 	if ctx.Err() == context.DeadlineExceeded {
 		killProcessGroup(child.Process)
@@ -198,7 +201,6 @@ func (g *gitPush) Execute(ctx context.Context, cred Credential, in UseInput) (Sa
 	// non-fast-forward refusal already failed Wait above; nothing is
 	// projected unless git reported success.
 	head := gitBranchHead(source, ref)
-
 	data := map[string]interface{}{"pushed": true}
 	if !strings.Contains(ref, token) {
 		data["branch"] = ref
@@ -216,22 +218,39 @@ func (g *gitPush) Execute(ctx context.Context, cred Credential, in UseInput) (Sa
 	return SafeResult{Summary: summary, Data: data}, nil
 }
 
-// gitBranchHead reads the tip of a branch from the repository at dir
-// without executing git in the push path's error-prone direction: the ref
-// file itself (loose) is authoritative for a freshly pushed branch, and a
-// packed fallback resolves via packed-refs. Missing/ambiguous refs project
+// gitBranchHead reads the tip of a branch from the repository at dir:
+// the loose ref file first (worktree .git/refs/heads/<ref>, or bare
+// refs/heads/<ref>), then packed-refs for repositories where the branch
+// has been packed (git gc). Peeled-annotation lines (starting with '^')
+// and malformed lines are skipped; a missing or ambiguous ref projects
 // nothing.
 func gitBranchHead(dir, ref string) string {
 	b, err := os.ReadFile(filepath.Join(dir, ".git", "refs", "heads", ref))
 	if err != nil {
 		b, err = os.ReadFile(filepath.Join(dir, "refs", "heads", ref))
-		if err != nil {
-			return ""
+	}
+	if err == nil {
+		if oid := string(bytes.TrimSpace(b)); isGitOID(oid) {
+			return oid
 		}
 	}
-	oid := string(bytes.TrimSpace(b))
-	if !isGitOID(oid) {
-		return ""
+	// packed-refs fallback: lines are "<oid> refs/heads/<ref>", with
+	// peeled object lines starting with '^' (annotations, not refs).
+	packedFiles := []string{filepath.Join(dir, ".git", "packed-refs"), filepath.Join(dir, "packed-refs")}
+	for _, pf := range packedFiles {
+		raw, rerr := os.ReadFile(pf)
+		if rerr != nil {
+			continue
+		}
+		want := " refs/heads/" + ref
+		for _, line := range strings.Split(string(raw), "\n") {
+			if len(line) < 42 || line[0] == '#' || line[0] == '^' {
+				continue
+			}
+			if strings.HasSuffix(line, want) && isGitOID(line[:40]) {
+				return line[:40]
+			}
+		}
 	}
-	return oid
+	return ""
 }

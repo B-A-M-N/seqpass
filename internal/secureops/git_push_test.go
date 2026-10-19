@@ -297,9 +297,10 @@ func TestGitPushRefusals(t *testing.T) {
 
 	// Drift between registration and execution fails closed: a source
 	// repository that has become group-writable is refused before any
-	// credential material is composed. (Discriminating control for the
-	// exec-time checkPinnedPath re-verification: removing the check lets
-	// this push proceed.)
+	// credential material is composed and before git is executed.
+	// (Discriminating control for the exec-time checkPinnedPath
+	// re-verification: removing the check lets this push proceed.)
+	argvDump, _ := installGitWrapper(t, realGit)
 	drifted := filepath.Join(filepath.Dir(source), "drifted")
 	if err := exec.Command(realGit, "clone", "--quiet", "file://"+source, drifted).Run(); err != nil {
 		t.Fatalf("drift fixture clone: %v", err)
@@ -310,6 +311,11 @@ func TestGitPushRefusals(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(drifted, 0700) })
 	if err := execErr(gitPushDest(remote, drifted), map[string]string{"ref": "probe"}, Credential{Value: gitMarker}); err == nil {
 		t.Fatal("group-writable source repository must be refused")
+	}
+	// The refusal happened before any process was spawned: the wrapper's
+	// argv dump (written by the pinned git on every execution) is absent.
+	if _, err := os.Stat(argvDump); err == nil {
+		t.Fatal("refused push nonetheless executed git")
 	}
 }
 
@@ -369,5 +375,25 @@ func TestGitPushDiscoveryContract(t *testing.T) {
 	if err := d.Validate(UseInput{Params: map[string]string{"ref": "main"},
 		Dest: gitPinnedDest("https://git.example.com/o/r.git")}); err == nil {
 		t.Fatal("submission-time validation accepted a destination without a source pin")
+	}
+}
+
+// After git gc / pack-refs the loose ref is gone; the projection falls
+// back to packed-refs and must not pick up foreign or peeled lines.
+func TestGitBranchHeadPackedRefsFallback(t *testing.T) {
+	realGit := hasGit(t)
+	source, tip := localRepoFixture(t, realGit, "probe")
+	env := append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	cmd := exec.Command(realGit, "-C", source, "pack-refs", "--all")
+	cmd.Env = env
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("pack-refs: %v: %s", err, out)
+	}
+	// Loose ref is gone; the packed-refs fallback resolves the tip.
+	if got := gitBranchHead(source, "probe"); got != tip {
+		t.Fatalf("packed-refs fallback = %q, want %q", got, tip)
+	}
+	if got := gitBranchHead(source, "absent"); got != "" {
+		t.Fatalf("absent branch projected %q", got)
 	}
 }
