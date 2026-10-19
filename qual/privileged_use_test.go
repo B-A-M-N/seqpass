@@ -23,7 +23,7 @@ import (
 // process-boundary tier documents in qual/PRIVILEGED.md, except that the
 // AegisKeys installation variables are NOT used here.
 func TestQualPrivilegedSyntheticUse(t *testing.T) {
-	h := &harness{t: t, dir: t.TempDir(), uid: "synthetic-tier"}
+	h := &harness{t: t, dir: t.TempDir(), uid: "synthetic-tier", topology: map[string]string{}}
 	if os.Getenv("SEQPASS_QUAL_PRIVILEGED") != "1" {
 		h.recordBlocked("synthetic-credential-tier", tierSystem,
 			"the real broker resolves a synthetic credential through the AegisKeys contract and dispatches it to a real consuming application without any agent-visible disclosure",

@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -52,30 +51,6 @@ func countJSONLines(path string) (int, error) {
 		return 0, err
 	}
 	return len(splitLines(string(raw))), nil
-}
-
-func fileExists(path string) bool {
-	_, err := os.Lstat(path)
-	return err == nil
-}
-
-func readJSONLines(path string) ([]map[string]interface{}, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var out []map[string]interface{}
-	for _, line := range splitLines(string(raw)) {
-		var item map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &item); err != nil {
-			return nil, err
-		}
-		out = append(out, item)
-	}
-	return out, nil
 }
 
 // containsAnyValue reports whether the haystack carries the needle

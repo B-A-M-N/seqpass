@@ -27,6 +27,7 @@ import (
 var syntheticScenarioCases = map[string][]string{
 	"authorized-credentialed-read": {
 		"synthetic-registration",
+		"service-can-reach-mock-aegiskeys-socket",
 		"use-submit-returns-opaque-id",
 		"use-execution-completes",
 		"provider-received-pinned-bearer",
@@ -123,6 +124,15 @@ func runPrivilegedSyntheticUse(t *testing.T, h *harness) (ready bool, blocked st
 		h.recordTier("synthetic-runtime", tierSystem, "create a disposable private qualification tree", "temporary root is created", err.Error(), false)
 		return true, ""
 	}
+	// From here on the tier runs in a live lab, so the scenario aggregates
+	// must land on every ready path: either computed from the recorded
+	// subchecks after the scenarios were reached, or as honest
+	// not_exercised rows when an earlier setup step bailed. The deferred
+	// finalize also fixes the ordering requirement: stopSyntheticBroker
+	// records broker-log-nondisclosure in the body, and the aggregate
+	// computation must observe it.
+	scenarioReached := false
+	defer func() { finalizeSyntheticScenarios(h, scenarioReached) }()
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	for _, step := range []struct {
 		name string
@@ -157,7 +167,10 @@ func runPrivilegedSyntheticUse(t *testing.T, h *harness) (ready bool, blocked st
 		return true, ""
 	}
 
-	// Synthetic credentials and their durable mock backing files.
+	// Synthetic credentials and their durable mock backing files. The
+	// values are strings, so they cannot be zeroed; lifetimes are bounded
+	// by the disposable root tree and retained evidence carries digests
+	// only (the []byte fixtures use clear(), these do not pretend to).
 	cred1, err := newSyntheticValue("SEQPASS-QUAL-CRED1-")
 	if err != nil {
 		h.recordTier("synthetic-credential-fixture", tierSystem, "generate the synthetic credential values", "random values available only to the trusted harness", err.Error(), false)
@@ -168,10 +181,6 @@ func runPrivilegedSyntheticUse(t *testing.T, h *harness) (ready bool, blocked st
 		h.recordTier("synthetic-credential-fixture", tierSystem, "generate the synthetic credential values", "random values available only to the trusted harness", err.Error(), false)
 		return true, ""
 	}
-	defer func() {
-		cred1 = ""
-		cred2 = ""
-	}()
 	vaultPath := filepath.Join(aegisDir, mockVaultPath)
 	metaPath := filepath.Join(aegisDir, mockMetaPath)
 	if err := writeSyntheticVaultFile(vaultPath, cred1); err != nil {
@@ -187,9 +196,9 @@ func runPrivilegedSyntheticUse(t *testing.T, h *harness) (ready bool, blocked st
 	h.topology["synthetic_binding"] = "qual/synthetic"
 
 	// Mock AegisKeys broker + real credentialed mock provider.
-	upstream := newMockUpstream("", logsDir, cred1, cred2)
+	upstream := newMockUpstream(logsDir, cred1, cred2)
 	aegisSocket := filepath.Join(aegisDir, "aegis.sock")
-	if err := upstream.startAegis(aegisSocket, vaultPath); err != nil {
+	if err := upstream.startAegis(aegisSocket, vaultPath, serviceIdentity.gid); err != nil {
 		h.recordTier("synthetic-upstream-start", tierSystem, "start the protocol-faithful AegisKeys mock on a service-group-isolated unix socket", "mock serves the AegisKeys v2 resolve contract", err.Error(), false)
 		return true, ""
 	}
@@ -204,12 +213,6 @@ func runPrivilegedSyntheticUse(t *testing.T, h *harness) (ready bool, blocked st
 		h.recordTier("synthetic-upstream-start", tierSystem, "prove the mock AegisKeys socket is live before broker startup", "root observer can connect to listener", err.Error(), false)
 		return true, ""
 	}
-	h.topology["aegiskeys_mock_socket"] = aegisSocket
-	h.topology["aegiskeys_mock_socket_owner_mode"] = ownershipMode(aegisSocket)
-	h.topology["mock_provider_origin"] = origin
-
-	// Real SeqPass broker under the dedicated service UID, production vault
-	// contract pointing at the AegisKeys mock.
 	bin := buildBinary(t, root)
 	h.bin = bin
 	probeBin, err := buildBoundaryProbe(t, root)
@@ -217,6 +220,20 @@ func runPrivilegedSyntheticUse(t *testing.T, h *harness) (ready bool, blocked st
 		h.recordTier("synthetic-probe-build", tierSystem, "build a stdlib-only external UID probe", "probe builds without project-private test hooks", err.Error(), false)
 		return true, ""
 	}
+	// The service side of the boundary must also be proven: the service
+	// UID can connect to the group-isolated mock socket (the mirror of the
+	// agent-denial check recorded after broker startup).
+	serviceProbe := runCredentialed(t, probeBin, serviceIdentity, serviceUser, []string{
+		"service", itoa(serviceUID), aegisSocket,
+	})
+	var svcResult boundaryProbe
+	serviceOK := decodeProbe(serviceProbe, &svcResult) == nil && svcResult.EffectiveUID == serviceUID && svcResult.AegisSocketConnect
+	h.recordTier("service-can-reach-mock-aegiskeys-socket", tierSystem,
+		"broker service identity has access to the group-isolated mock AegisKeys socket", "service UID connects to the mock listener",
+		fmt.Sprintf("uid=%d connected=%t", svcResult.EffectiveUID, svcResult.AegisSocketConnect), serviceOK)
+	h.topology["aegiskeys_mock_socket"] = aegisSocket
+	h.topology["aegiskeys_mock_socket_owner_mode"] = ownershipMode(aegisSocket)
+	h.topology["mock_provider_origin"] = origin
 	h.agent = filepath.Join(agentDir, "agent.sock")
 	h.admin = filepath.Join(adminDir, "admin.sock")
 	dbPath := filepath.Join(stateDir, "seqpass.db")
@@ -292,19 +309,14 @@ func runPrivilegedSyntheticUse(t *testing.T, h *harness) (ready bool, blocked st
 	// Trusted registration under the service UID.
 	refID, policyOK := registerSyntheticPolicy(t, h, probeBin, serviceIdentity, serviceUser, agentUID, origin)
 	if !policyOK {
-		finalizeSyntheticScenarios(h, false)
 		stopSyntheticBroker(t, cmd, &brokerDone, &brokerStopped, &brokerLog, h, artifactDir, []string{cred1, cred2})
 		return true, ""
 	}
 
 	// Agent MCP session and the credentialed scenarios.
 	mcpErr := runSyntheticAgentScenarios(t, h, probeBin, serviceIdentity, serviceUser, agentIdentity, agentUser, refID, upstream, dbPath, probeOutput, []string{cred1, cred2, b64(cred1), b64(cred2)})
-	finalizeSyntheticScenarios(h, mcpErr == nil)
+	scenarioReached = mcpErr == nil
 	stopSyntheticBroker(t, cmd, &brokerDone, &brokerStopped, &brokerLog, h, artifactDir, []string{cred1, cred2})
-	if mcpErr != nil {
-		// runSyntheticAgentScenarios already recorded the failing case.
-		return true, ""
-	}
 	return true, ""
 }
 
@@ -645,7 +657,8 @@ func runSyntheticAgentScenarios(
 		cleanups()
 		return disableErr
 	}
-	revokedDenied := true
+	preRevokeResolves, _ := upstream.resolveCount()
+	preRevokeRequests, _ := upstream.providerRequests()
 	use3Reply, err := sendMCPCall(agentIn, reader, &requestTrace, &transcript, 14, "tools/call", map[string]interface{}{
 		"name": "secret_use", "arguments": map[string]interface{}{
 			"secret_ref": refID, "operation": "http.request", "target": h.topology["synthetic_dest_id"],
@@ -659,12 +672,13 @@ func runSyntheticAgentScenarios(
 	}
 	h.recordTier("use-revoked-submit-denied", tierSystem,
 		"disable the allow policy and resubmit through the untrusted MCP adapter", "submission is denied after revocation",
-		fmt.Sprintf("denied=%t", use3Denied), revokedDenied && use3Denied)
+		fmt.Sprintf("denied=%t", use3Denied), use3Denied)
 	requests3, _ := upstream.providerRequests()
 	resolves3, _ := upstream.resolveCount()
 	h.recordTier("no-dispatch-after-revocation", tierSystem,
-		"verify no credential resolution and no provider request followed the revoked submission", "resolve count stays at two and provider request count stays at two",
-		fmt.Sprintf("resolves=%d provider=%d", resolves3, len(requests3)), resolves3 == 2 && len(requests3) == 2)
+		"verify no credential resolution and no provider request followed the revoked submission", "resolve and provider request counts are unchanged by the denied submission",
+		fmt.Sprintf("resolves=%d->%d provider=%d->%d", preRevokeResolves, resolves3, len(preRevokeRequests), len(requests3)),
+		preRevokeResolves == resolves3 && len(preRevokeRequests) == len(requests3))
 
 	// Broker-side and store-side nondisclosure sweeps.
 	stderrClean := !containsAnyValue(agentErr.Bytes(), creds...)
@@ -734,7 +748,7 @@ func pollUseStatus(t *testing.T, stdin io.Writer, reader *bufio.Reader, requestT
 // needle (literal or base64), reusing the relay tier's scanner.
 func processMemoryContainsSet(pid int, needles ...string) (bool, error) {
 	for _, needle := range needles {
-		if containsAnyValue([]byte{0}, needle) && needle == "" {
+		if needle == "" {
 			continue
 		}
 		found, err := processMemoryContains(pid, []byte(needle))
@@ -756,9 +770,15 @@ func processMemoryContainsSet(pid int, needles ...string) (bool, error) {
 }
 
 // finalizeSyntheticScenarios records the PRIVILEGED.md scenario aggregates
-// from the recorded subchecks.
+// from the recorded subchecks. It never duplicates a scenario row: the
+// aggregate passes only when every listed subcheck was recorded and passed;
+// missing subchecks fail the aggregate rather than silently counting as
+// exercised.
 func finalizeSyntheticScenarios(h *harness, reached bool) {
 	for scenario, subchecks := range syntheticScenarioCases {
+		if hasRecordedScenario(h, scenario) {
+			continue
+		}
 		if !reached {
 			h.recordNotExercised(scenario, tierSystem, scenarioExpected(scenario), "the synthetic tier did not reach this scenario")
 			continue
@@ -835,7 +855,17 @@ func stopSyntheticBroker(
 	h.recordTier("synthetic-broker-clean-shutdown", tierSystem,
 		"stop the synthetic-tier broker after the credentialed scenarios",
 		"broker exits cleanly on SIGINT", fmt.Sprintf("clean=%t", cleanShutdown), cleanShutdown)
-	leaked := containsAnyValue(brokerLog.Bytes(), creds...)
+	// Detect and redact before retention: the retained artifact must not
+	// carry credential values (literal or base64) even on failure.
+	leaked := false
+	for _, cred := range creds {
+		if brokerLog.Redact([]byte(cred), []byte("[REDACTED-QUALIFICATION-VALUE]")) {
+			leaked = true
+		}
+		if brokerLog.Redact([]byte(b64(cred)), []byte("[REDACTED-QUALIFICATION-VALUE]")) {
+			leaked = true
+		}
+	}
 	h.recordTier("broker-log-nondisclosure", tierSystem,
 		"inspect real broker stdout/stderr after trusted execution and shutdown", "broker logs omit the synthetic values",
 		fmt.Sprintf("credential_absent=%t", !leaked), !leaked)

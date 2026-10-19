@@ -67,7 +67,7 @@ const (
 	mockMetaPath  = "broker.json"
 )
 
-func newMockUpstream(aegisSockPath, logsDir string, cred1, cred2 string) *mockUpstream {
+func newMockUpstream(logsDir string, cred1, cred2 string) *mockUpstream {
 	return &mockUpstream{
 		binding:     "qual/synthetic",
 		cred1:       cred1,
@@ -82,7 +82,7 @@ func newMockUpstream(aegisSockPath, logsDir string, cred1, cred2 string) *mockUp
 // service UID connects and the agent UID is denied at the kernel boundary.
 // The credential is loaded from the root-owned synthetic vault file, so the
 // file genuinely backs the served value (file-denial checks stay honest).
-func (m *mockUpstream) startAegis(sockPath, vaultPath string) error {
+func (m *mockUpstream) startAegis(sockPath, vaultPath string, serviceGID uint32) error {
 	stored, err := readSyntheticVaultFile(vaultPath)
 	if err != nil {
 		return err
@@ -95,6 +95,13 @@ func (m *mockUpstream) startAegis(sockPath, vaultPath string) error {
 		return err
 	}
 	m.aegisLis = lis
+	// connect(2) on a unix socket needs write permission on the inode, so
+	// the socket itself must carry the service group, not just the
+	// containing directory. -1 keeps the existing owner untouched (root in
+	// the privileged tier, the harness user in the contract test).
+	if err := os.Chown(sockPath, -1, int(serviceGID)); err != nil {
+		return err
+	}
 	if err := os.Chmod(sockPath, 0660); err != nil {
 		return err
 	}
@@ -328,12 +335,12 @@ func TestMockUpstreamContract(t *testing.T) {
 	if err := writeSyntheticVaultFile(badVault, "wrong"); err != nil {
 		t.Fatal(err)
 	}
-	up := newMockUpstream("", dir, cred1, cred2)
+	up := newMockUpstream(dir, cred1, cred2)
 	defer up.close()
-	if err := up.startAegis(filepath.Join(dir, "aegis.sock"), badVault); err == nil {
+	if err := up.startAegis(filepath.Join(dir, "aegis.sock"), badVault, uint32(os.Getegid())); err == nil {
 		t.Fatal("startAegis accepted a vault that does not back the credential")
 	}
-	if err := up.startAegis(filepath.Join(dir, "aegis.sock"), vaultPath); err != nil {
+	if err := up.startAegis(filepath.Join(dir, "aegis.sock"), vaultPath, uint32(os.Getegid())); err != nil {
 		t.Fatal(err)
 	}
 	origin, err := up.startProvider()
