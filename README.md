@@ -45,6 +45,10 @@ harness (Codex / Claude / Hermes)
 | Recipient durability contract | Implemented, tested | `internal/transfer/recipient_test.go` + `recipient_server_test.go` |
 | Real credential consumer (`SecretConsumer`) | Implemented, tested | `internal/transfer/consumer.go` + `internal/service/real_consumer_test.go` (delivery → commit → verified `applied`) |
 | Generic agent adapter (MCP + CLI) | Implemented, tested | `internal/adapter/` + `cmd/seqpass/agent.go` |
+| Versioned adapter contract (`protocol_version`, sealed frames) | Implemented, tested | `internal/adapter/protocol.go` (`Seal`/`Unseal` refuse unknown versions) |
+| Adapter host-version qualification (register-time detection, incompatible-major refusal) | Implemented, tested | `integrations/opencode/index.ts` + `integrations/pi/client.ts`, vitest suites |
+| `seqpass install <adapter>` (endpoints-only adapter config) | Implemented, tested | `cmd/seqpass/install.go` (no credentials/session tokens in snippets; `--force` overwrite guard) |
+| Installation-wide config (`/etc/seqpass/config.json`, `/run/seqpass`, `/var/lib/seqpass`) | Implemented, tested | `internal/config/config.go` loader (fail-closed on malformed config; dev home-dir fallback unchanged) |
 | Live isolation boundary check + drift revocation | Implemented, tested | `internal/isolation/` + `internal/daemon/isolation_test.go` |
 | `seqpass recipient` (deployable consumer endpoint) | Implemented, tested | `cmd/seqpass/recipient.go` |
 | **Recipient live-socket integration** | **Not yet production-qualified** | Requires real recipient process + privileged Unix-socket topology |
@@ -90,6 +94,12 @@ sudo -u seqpass ./seqpass broker --vault aegiskeys --assurance isolated \
 
 # 2. Register the harness adapter (Codex)
 codex mcp add seqpass -- /usr/local/bin/seqpass mcp
+# Or generate adapter configuration with the install command (endpoints
+# only — never credentials or session tokens; tokens are minted by
+# host.register at runtime):
+# ./seqpass install mcp --print        # exact MCP server registration stanza
+# ./seqpass install opencode --out <plugin-config> --intake-socket ... --host-socket ...
+# ./seqpass install pi --out <extension-config> --intake-socket ... --host-socket ... --agent-socket ...
 # Claude Code
 claude mcp add --scope user seqpass -- /usr/local/bin/seqpass mcp
 # Hermes (~/.hermes/config.yaml): mcp_servers.seqpass.command=/usr/local/bin/seqpass,

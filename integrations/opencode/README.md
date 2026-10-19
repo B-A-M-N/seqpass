@@ -24,11 +24,19 @@ dialog branch activates.
 
 ## Wiring
 
-The plugin receives `intakeSocket`, `hostSocket`, `sessionID`, and
-`sessionToken` as plugin options and owns two IPC transports through the
-shared wire client (`integrations/shared/ipc.ts`): the intake socket for
-registration and fulfillment, the host socket for pending-notice polling
-(5 s interval, disposed with the plugin lifecycle).
+The plugin receives `intakeSocket`, `hostSocket`, and optionally
+`sessionID`/`sessionToken` as plugin options and owns two IPC transports
+through the shared wire client (`integrations/shared/ipc.ts`): the intake
+socket for registration and fulfillment, the host socket for
+pending-notice polling (5 s interval, disposed with the plugin
+lifecycle). When session credentials are absent, `host.register` mints a
+fresh session/token pair at startup; pre-provisioned options are honored
+when present.
+
+Registration records the real host version from `api.app.version` and
+refuses a host whose major version is outside the qualified range
+(currently v1.x): the adapter never claims qualification for a host
+build it was not tested against.
 
 Status: functional against the `@opencode-ai/plugin` TUI contract as
 installed (package version ^1.18.3 — there is no 2.x release; the adapter
