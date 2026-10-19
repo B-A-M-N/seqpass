@@ -16,7 +16,21 @@ import { inboxOptions } from "./lib/nativeInput";
 import { SeqPassProtectedInputDialog } from "./components/SeqPassProtectedInput";
 import { seqPassFooter } from "./components/SeqPassFooter";
 
+// Qualification contract: this adapter is tested against the OpenCode v2
+// CLI plugin API (package version ^1.18.3 — there is no 2.x release). A
+// host reporting an incompatible major version is refused rather than
+// silently claiming qualification for a different binary.
+const supportedMajor = 1;
+
 export const id = "seqpass";
+
+// Refuses a host whose reported major version is outside the qualified
+// range. Minor/patch drift is tolerated: the plugin API surface this
+// adapter uses (keymap, slots, dialog, toast) is stable within a major.
+export function hostVersionSupported(version: string): boolean {
+  const major = Number.parseInt(version.split(".")[0] ?? "", 10);
+  return Number.isInteger(major) && major === supportedMajor;
+}
 
 const pollIntervalMs = 5_000;
 
@@ -30,12 +44,20 @@ export const tui: TuiPluginModule["tui"] = async (
     return;
   }
 
-  const sessionID = options?.sessionID as string | undefined;
-  const sessionToken = options?.sessionToken as string | undefined;
-  if (!sessionID || !sessionToken) {
-    api.ui.toast({ title: "SeqPass", message: "Missing authenticated host session", variant: "error" });
+  // SP-08: session credentials are optional at startup. When absent, the
+  // trusted host must call register() to mint a fresh session/token pair
+  // from the broker; requiring them beforehand would force every host to
+  // pre-provision a token, which registration itself exists to avoid.
+  if (!hostVersionSupported(api.app.version)) {
+    api.ui.toast({
+      title: "SeqPass",
+      message: `Incompatible host version ${api.app.version}: this adapter supports OpenCode v${supportedMajor}.x`,
+      variant: "error",
+    });
     return;
   }
+  const sessionID = options?.sessionID as string | undefined;
+  const sessionToken = options?.sessionToken as string | undefined;
 
   const client = new SeqPassHostClient({ intakeSocket, hostSocket, sessionID, sessionToken });
   // Dispose before the first dial: a failed registration must not leak
@@ -45,10 +67,14 @@ export const tui: TuiPluginModule["tui"] = async (
   });
   try {
     await client.connect();
-    await client.register();
-  } catch {
+    await client.register(api.app.version);
+  } catch (err) {
     void client.close();
-    api.ui.toast({ title: "SeqPass", message: "SeqPass broker unavailable", variant: "error" });
+    api.ui.toast({
+      title: "SeqPass",
+      message: err instanceof Error ? err.message : "SeqPass broker unavailable",
+      variant: "error",
+    });
     return;
   }
 

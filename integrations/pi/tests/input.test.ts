@@ -27,6 +27,7 @@ describe("SeqPass Pi adapter contract", () => {
     const config = {
       intakeSocket: "/tmp/test.intake",
       hostSocket: "/tmp/test.host",
+      hostVersion: "1.2.3",
       agentSocket: "/tmp/test.agent",
       sessionID: "host-1",
       sessionToken: "tok-test",
@@ -46,6 +47,7 @@ describe("SeqPass Pi adapter contract", () => {
     const client = new SeqPassClient({
       intakeSocket: "/tmp/test.intake",
       hostSocket: "/tmp/test.host",
+      hostVersion: "1.2.3",
       sessionID: "host-1",
       sessionToken: "tok-test",
     });
@@ -65,6 +67,7 @@ describe("SeqPass Pi adapter contract", () => {
     const client = new SeqPassClient({
       intakeSocket: "/nonexistent/seqpass/intake.sock",
       hostSocket: "/nonexistent/seqpass/host.sock",
+      hostVersion: "1.2.3",
       sessionID: "host-1",
       sessionToken: "tok-test",
     });
@@ -76,6 +79,7 @@ describe("SeqPass Pi adapter contract", () => {
     const client = new SeqPassClient({
       intakeSocket: "/tmp/test.intake",
       hostSocket: "/tmp/test.host",
+      hostVersion: "1.2.3",
       agentSocket: "/tmp/test.agent",
       sessionID: "host-1",
       sessionToken: "tok-test",
@@ -89,7 +93,7 @@ describe("SeqPass Pi adapter contract", () => {
       throw new Error("not connected (expected in this test)");
     };
     try {
-      await client.register();
+      await client.register("1.2.3");
     } catch {
       // The write itself may fail against a stubbed transport; only the
       // registration payload matters here.
@@ -104,6 +108,10 @@ describe("SeqPass Pi adapter contract", () => {
     // Drives the real key handler with typed characters and verifies
     // every rendered frame carries asterisk progress only; the value
     // itself appears solely in the fulfill call to the trusted client.
+    // The build-level gate is explicitly enabled here because this test
+    // qualifies the native component itself; production ships with the
+    // gate off, which the following test pins.
+    process.env.SEQPASS_PI_NATIVE_INPUT = "1";
     const renders: string[] = [];
     let handler: ((key: string) => void) | null = null;
     const ui = {
@@ -151,6 +159,24 @@ describe("SeqPass Pi adapter contract", () => {
       expect(forbidden in result).toBe(false);
     }
     expect(typeof result.close).toBe("function");
+  });
+
+  it("host-native mode routes to the external fallback in a default build", () => {
+    // The unqualified build gate is a security property: without
+    // independent qualification evidence, an in-host masked field would
+    // collect credentials inside the agent-controlled host process. A
+    // mutated gate (always-on native capture) trips this test.
+    delete process.env.SEQPASS_PI_NATIVE_INPUT;
+    const keyHandlerInstalled = { current: false };
+    const ui = {
+      render: () => {},
+      setKeyHandler: () => { keyHandlerInstalled.current = true; },
+      close: () => {},
+    };
+    const notice = { ...baseNotice, input_mode: "host_native_verified" as const };
+    const result = ProtectedInput(notice, {} as any, ui) as any;
+    expect(result.fallback).toBe(true);
+    expect(keyHandlerInstalled.current).toBe(false);
   });
 });
 

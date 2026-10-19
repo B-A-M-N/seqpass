@@ -206,7 +206,7 @@ describe("SeqPassHostClient registration honesty", () => {
       sessionToken: "tok-test",
     });
     clients.push(client);
-    await client.register();
+    await client.register("1.19.0");
     expect(requests).toHaveLength(1);
     const params = requests[0].params;
     expect(params.presentation).toBe("request_status");

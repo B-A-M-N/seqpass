@@ -130,6 +130,37 @@ func Normalize(raw string) (RequestState, error) {
 	return "", fmt.Errorf("unqualified request state %q", raw)
 }
 
+// ProtocolVersion is the version of the adapter request/status/event
+// contract (§5). It is bumped on any change to frame shapes, state
+// vocabulary, or field semantics. Adapters and consumers SHOULD refuse
+// frames whose version they do not understand instead of guessing.
+const ProtocolVersion = 1
+
+// Versioned wraps any adapter frame with its protocol version. Emitters
+// wrap; receivers must check the version before interpreting the payload
+// and reject unknown versions rather than misparse them.
+type Versioned struct {
+	// ProtocolVersion pins the contract the frame was produced under.
+	ProtocolVersion int `json:"protocol_version"`
+	Frame           any `json:"frame"`
+}
+
+// Seal wraps a validated frame in a versioned envelope.
+func Seal(frame any) Versioned {
+	return Versioned{ProtocolVersion: ProtocolVersion, Frame: frame}
+}
+
+// Unseal checks a versioned envelope and extracts the frame. An envelope
+// from a different protocol version is an error: silently accepting it
+// would let a newer producer smuggle differently-shaped data past the
+// adapter's validation.
+func Unseal(versioned Versioned) (any, error) {
+	if versioned.ProtocolVersion != ProtocolVersion {
+		return nil, fmt.Errorf("unsupported adapter protocol version %d (want %d)", versioned.ProtocolVersion, ProtocolVersion)
+	}
+	return versioned.Frame, nil
+}
+
 // Transport names the wire an integration uses to reach the broker.
 type Transport string
 
@@ -154,6 +185,9 @@ type Operation struct {
 // probing: which operations exist, which states to expect, and which
 // surfaces the integration deliberately does not expose.
 type Capability struct {
+	// ProtocolVersion pins the adapter contract version this capability
+	// payload was produced under (see ProtocolVersion).
+	ProtocolVersion int            `json:"protocol_version"`
 	Transport       Transport      `json:"transport"`
 	Assurance       string         `json:"assurance"`
 	DataKinds       []string       `json:"data_kinds"`
@@ -196,6 +230,7 @@ func NewCapability(transport Transport, assurance, inputMode, inputReason string
 		return sorted[i].Name < sorted[j].Name
 	})
 	return Capability{
+		ProtocolVersion: ProtocolVersion,
 		Transport:       transport,
 		Assurance:       assurance,
 		DataKinds:       append([]string{}, DataKindsSupported...),

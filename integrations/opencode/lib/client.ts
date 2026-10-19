@@ -19,8 +19,10 @@ import type { ProtectedInputNotice } from "../types";
 export interface SeqPassHostClientConfig {
   intakeSocket: string;
   hostSocket: string;
-  sessionID: string;
-  sessionToken: string;
+  // SP-08: session credentials are optional at construction; register()
+  // adopts the broker-minted pair afterwards.
+  sessionID?: string;
+  sessionToken?: string;
 }
 
 const maxPayloadBytes = 64 * 1024;
@@ -36,8 +38,8 @@ export class SeqPassHostClient {
   constructor(config: SeqPassHostClientConfig) {
     this.intake = new SeqPassIpcClient(config.intakeSocket);
     this.host = new SeqPassIpcClient(config.hostSocket);
-    this.sessionID = config.sessionID;
-    this.sessionToken = config.sessionToken;
+    this.sessionID = config.sessionID ?? "";
+    this.sessionToken = config.sessionToken ?? "";
   }
 
   async connect(): Promise<void> {
@@ -46,11 +48,18 @@ export class SeqPassHostClient {
     this.connected = true;
   }
 
-  async register(): Promise<unknown> {
+  async register(hostVersion?: string): Promise<unknown> {
     await this.connect();
+    const version = (hostVersion ?? "").trim();
+    if (!version) {
+      // The host version must be detected from the real binary, never
+      // assumed: a hardcoded value would claim qualification for a host
+      // build this adapter was never tested against.
+      throw new Error("SeqPass requires the host version (api.app.version) to register");
+    }
     const result = await this.intake.call("host.register", {
       host_kind: "opencode",
-      host_version: "2.0.27",
+      host_version: version,
       adapter_version: "0.1.0",
       // Presentation honestly describes what this adapter offers: it
       // surfaces broker-verified request status only. Credential bytes

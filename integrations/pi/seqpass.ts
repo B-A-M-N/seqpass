@@ -13,6 +13,10 @@ import type { ProtectedInputNotice } from "./types";
 export interface SeqPassExtensionConfig {
   intakeSocket: string;
   hostSocket: string;
+  // SP-10: the host version must be configured from the real Pi binary
+  // version, never hardcoded: registration records it as qualification
+  // evidence. An empty version fails registration closed.
+  hostVersion: string;
   agentSocket?: string;
   // SP-08: sessionID/sessionToken may be empty at startup. When absent,
   // the trusted host must call register() to obtain fresh credentials from
@@ -26,7 +30,7 @@ export interface SeqPassExtensionConfig {
 export interface SeqPassClientLike {
   connect(): Promise<void>;
   connectAgent(): Promise<void>;
-  register(): Promise<unknown>;
+  register(hostVersion?: string): Promise<unknown>;
   setSession(sessionID: string, sessionToken: string): void;
   requestRelay(args: { destination_id: string; data_kind: string; purpose?: string; ttl_seconds?: number }): Promise<{ request_id?: string; status: string; error?: string }>;
   getStatus(requestID: string): Promise<{ status: string; error?: string }>;
@@ -49,7 +53,7 @@ export function registerSeqPass(config: SeqPassExtensionConfig, deps?: { client?
       return;
     }
     await client.connect();
-    const result = await client.register();
+    const result = await client.register(config.hostVersion);
     if (result && typeof result === "object") {
       const m = result as { session?: { id?: string }; token?: { token?: string } };
       // Adopt the broker-minted credentials only as a pair. A partial

@@ -46,6 +46,7 @@ function harness(config: Partial<SeqPassExtensionConfig> = {}) {
   const extension = registerSeqPass({
     intakeSocket: "/tmp/test.intake",
     hostSocket: "/tmp/test.host",
+    hostVersion: "1.2.3",
     ...config,
   }, { client: client as any });
   const tools: Record<string, { description: string; handler: (args: any) => Promise<any> }> = {};

@@ -15,6 +15,18 @@
  */
 import type { ProtectedInputNotice, SeqPassInputClient } from "./types";
 
+// SP-05 parity gate: build-level switch for in-host credential capture.
+// This adapter build has not accumulated independent qualification
+// evidence for host-native masked input (no process isolation from
+// agent-controlled code in the Pi host), so it defaults to false and all
+// requests route to the external trusted terminal. Setting
+// SEQPASS_PI_NATIVE_INPUT=1 is reserved for a build that ships with that
+// qualification evidence — the broker still decides the input mode; this
+// gate only ensures a build never claims more than it proved.
+export function nativeMaskedInputSupported(): boolean {
+  return process.env.SEQPASS_PI_NATIVE_INPUT === "1";
+}
+
 export interface PiCustomUI {
   render: (text: string) => void;
   setKeyHandler: (handler: (key: string) => void) => void;
@@ -42,10 +54,11 @@ export function ProtectedInput(
   client: SeqPassInputClient,
   ui: PiCustomUI,
 ) {
-  // SP-05: when the broker issues external_tty mode, the adapter must
-  // direct the user to the external trusted-terminal flow instead of
-  // rendering a native prompt that cannot prove process isolation.
-  if (notice.input_mode !== "host_native_verified") {
+  // SP-05: when the broker issues external_tty mode, or when this build
+  // has no qualified native masked input, the adapter must direct the
+  // user to the external trusted-terminal flow instead of rendering a
+  // native prompt that cannot prove process isolation.
+  if (notice.input_mode !== "host_native_verified" || !nativeMaskedInputSupported()) {
     return ExternalTTYFallback(notice);
   }
   let value = "";

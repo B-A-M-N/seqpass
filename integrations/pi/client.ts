@@ -74,11 +74,18 @@ export class SeqPassClient {
     await this.requireAgent().connect();
   }
 
-  async register(): Promise<unknown> {
+  async register(hostVersion?: string): Promise<unknown> {
     await this.connect();
+    const version = (hostVersion ?? "").trim();
+    if (!version) {
+      // The host version must be supplied from real host configuration,
+      // never assumed: a hardcoded value would claim qualification for a
+      // host build this adapter was never tested against.
+      throw new Error("SeqPass requires hostVersion in the extension config to register");
+    }
     return await this.intake.call("host.register", {
       host_kind: "pi",
-      host_version: "1.0",
+      host_version: version,
       adapter_version: "0.1.0",
       // Registration defaults to external credential input: the
       // operator's own `seqpass tui` terminal is the trusted surface.

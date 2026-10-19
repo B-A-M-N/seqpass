@@ -227,3 +227,52 @@ func TestRedactMessage(t *testing.T) {
 		t.Fatalf("redaction did not rewrite the field: %q", got)
 	}
 }
+
+func TestCapabilityCarriesProtocolVersion(t *testing.T) {
+	cap := NewCapability(TransportCLI, "isolated", "external_tty", "test", nil)
+	if cap.ProtocolVersion != ProtocolVersion {
+		t.Fatalf("capability protocol version %d, want %d", cap.ProtocolVersion, ProtocolVersion)
+	}
+	frame, err := json.Marshal(cap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var round map[string]interface{}
+	if err := json.Unmarshal(frame, &round); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := round["protocol_version"].(float64); !ok || int(v) != ProtocolVersion {
+		t.Fatalf("capability wire frame missing protocol_version: %s", frame)
+	}
+}
+
+func TestVersionedEnvelopeRoundTripAndRejection(t *testing.T) {
+	env := Seal(Event{Type: EventError, Code: "x", Message: "y"})
+	if env.ProtocolVersion != ProtocolVersion {
+		t.Fatalf("seal produced version %d, want %d", env.ProtocolVersion, ProtocolVersion)
+	}
+	wire, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back Versioned
+	if err := json.Unmarshal(wire, &back); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := Unseal(back)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evt, ok := frame.(map[string]interface{})
+	if !ok || evt["type"] != string(EventError) {
+		t.Fatalf("unsealed frame is not the original event: %#v", frame)
+	}
+
+	// A frame claiming a different protocol version must be refused, not
+	// interpreted: a newer producer's shape may not pass this contract's
+	// validation.
+	bad := Versioned{ProtocolVersion: ProtocolVersion + 1, Frame: evt}
+	if _, err := Unseal(bad); err == nil {
+		t.Fatal("Unseal accepted a frame from an unsupported protocol version")
+	}
+}
