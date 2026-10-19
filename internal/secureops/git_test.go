@@ -611,7 +611,7 @@ func TestGitFetchDiscoveryContract(t *testing.T) {
 	if d.Completion() != ResponseValidated {
 		t.Fatal("read-only git.fetch must be ResponseValidated")
 	}
-	for _, forbidden := range []string{"git.clone", "git.push", "git.raw", "git.remote.add", "git.config"} {
+	for _, forbidden := range []string{"git.clone", "git.raw", "git.remote.add", "git.config"} {
 		if _, err := Lookup(forbidden); err == nil {
 			t.Fatalf("operation %s must not exist", forbidden)
 		}

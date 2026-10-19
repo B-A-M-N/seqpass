@@ -53,6 +53,11 @@ type Destination struct {
 	// exact recipient UID (and optionally GID) at registration.
 	ExpectedUID *uint32 `json:"expected_uid,omitempty"`
 	ExpectedGID *uint32 `json:"expected_gid,omitempty"`
+	// SourceRepo pins the content source for the git.push profile: an
+	// absolute, operator-registered repository path. The agent cannot
+	// name or alter it — pushed content is a registration fact, like the
+	// remote. Empty for fetch-only destinations.
+	SourceRepo string `json:"source_repo,omitempty"`
 }
 
 // Operation lifecycle states.

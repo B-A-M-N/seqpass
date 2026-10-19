@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS destinations (
   name TEXT NOT NULL,
   type TEXT NOT NULL,
   endpoint TEXT NOT NULL,
+  source_repo TEXT NOT NULL DEFAULT '',
   auth_method TEXT,
   allowed_ops TEXT,
   requires_approval BOOLEAN,
@@ -350,8 +351,10 @@ CREATE INDEX IF NOT EXISTS obs_op_idx ON outcome_observations(operation_id, obse
 // schemaVersion is the current numbered schema version. Version 1 added
 // the approval-binding repair columns; version 2 adds the trusted
 // dispatch record, observation record/commit timestamps, and evidence
-// kinds (G02/G07). Older databases take the repair path below.
-const schemaVersion = 3
+// kinds (G02/G07); version 4 adds the git.push pinned source repository
+// (a security binding: it participates in the destination digest). Older
+// databases take the repair path below.
+const schemaVersion = 4
 
 func (d *DB) currentVersion() (int, error) {
 	var v int
@@ -446,6 +449,7 @@ func (d *DB) migrate() error {
 		{"uses", "dest_revision", "dest_revision INTEGER NOT NULL DEFAULT 0"},
 		{"destinations", "expected_uid", "expected_uid INTEGER"},
 		{"destinations", "expected_gid", "expected_gid INTEGER"},
+		{"destinations", "source_repo", "source_repo TEXT NOT NULL DEFAULT ''"},
 		// Full read/write shape: the code SELECTs and INSERTs every
 		// column below, so a legacy table missing any of them is
 		// unusable until repaired — not just the security bindings.
@@ -593,7 +597,7 @@ func (d *DB) verifySchema() error {
 	expected := map[string][]string{
 		"authorization_state":     {"id", "epoch"},
 		"secret_refs":             {"id", "name", "binding"},
-		"destinations":            {"id", "endpoint", "revision", "expected_uid", "expected_gid"},
+		"destinations":            {"id", "endpoint", "source_repo", "revision", "expected_uid", "expected_gid"},
 		"policies":                {"id", "rules", "revision"},
 		"transfers":               {"id", "status", "revision", "auth_epoch", "dest_digest", "dest_revision", "op_hash"},
 		"uses":                    {"id", "status", "revision", "auth_epoch", "dest_digest", "dest_revision", "op_hash"},

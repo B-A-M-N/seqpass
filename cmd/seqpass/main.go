@@ -400,6 +400,7 @@ func adminCmd(args []string) {
 		name := fs.String("name", "", "name")
 		typ := fs.String("type", "recipient-socket", "recipient-socket | http-pinned | process-pinned | git-pinned")
 		ep := fs.String("endpoint", "", "recipient-socket: unix socket path; http-pinned: pinned origin (https://host[:port]); process-pinned: absolute executable path; git-pinned: pinned git remote URL (https://host[:port]/path.git)")
+		src := fs.String("source-repo", "", "git-pinned only: absolute source repository path to pin for git.push (pushed content is a registration fact, never an agent parameter)")
 		expectUID := fs.Int("expect-uid", -1, "pinned recipient UID (recipient-socket only)")
 		expectGID := fs.Int("expect-gid", -1, "pinned recipient GID (optional, recipient-socket only)")
 		_ = fs.Parse(args[1:])
@@ -423,7 +424,10 @@ func adminCmd(args []string) {
 			}
 		case "git-pinned":
 			if *name == "" || *ep == "" {
-				fatal("add-dest --name N --type git-pinned --endpoint https://host[:port]/path.git (remote pinned at registration; agents only choose the branch)")
+				fatal("add-dest --name N --type git-pinned --endpoint https://host[:port]/path.git (remote pinned at registration; agents only choose the branch) [--source-repo /abs/repo to pin the push source]")
+			}
+			if *src != "" {
+				params["source_repo"] = *src
 			}
 		default:
 			fatal("add-dest: unsupported type " + *typ)

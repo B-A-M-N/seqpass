@@ -842,9 +842,10 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 		return Response{OK: true}
 	case MethodDestAdd:
 		d := &types.Destination{
-			Name:     strParam(p, "name"),
-			Type:     strParam(p, "type"),
-			Endpoint: strParam(p, "endpoint"),
+			Name:       strParam(p, "name"),
+			Type:       strParam(p, "type"),
+			Endpoint:   strParam(p, "endpoint"),
+			SourceRepo: strParam(p, "source_repo"),
 		}
 		if d.Name == "" || d.Endpoint == "" || d.Type == "" {
 			return Response{OK: false, Error: "missing fields"}

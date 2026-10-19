@@ -44,7 +44,7 @@ harness (Codex / Claude / Hermes)
 | **AegisKeys production resolution** | **Not yet production-qualified** | Requires live dedicated-UID grant + rotation tests |
 | Recipient durability contract | Implemented, tested | `internal/transfer/recipient_test.go` + `recipient_server_test.go` |
 | Real credential consumer (`SecretConsumer`) | Implemented, tested | `internal/transfer/consumer.go` + `internal/service/real_consumer_test.go` (delivery → commit → verified `applied`) |
-| Credentialed operations (`http.request`, `process.run`, `git.fetch` pinned profiles) | Implemented, tested | `internal/secureops/` — pinned executables/origins/remotes, credential never in argv/env/URL/DTO (fd-injected; mutation-tested negative controls) |
+| Credentialed operations (`http.request`, `process.run`, `git.fetch`, `git.push` pinned profiles) | Implemented, tested | `internal/secureops/` — pinned executables/origins/remotes/sources, credential never in argv/env/URL/DTO (fd-injected; mutation-tested negative controls). `git.push` pushes a branch of the operator-pinned source repository to the operator-pinned remote; no `--force`, the agent supplies only the branch |
 | Generic agent adapter (MCP + CLI) | Implemented, tested | `internal/adapter/` + `cmd/seqpass/agent.go` |
 | Versioned adapter contract (`protocol_version`, sealed frames) | Implemented, tested | `internal/adapter/protocol.go` (`Seal`/`Unseal` refuse unknown versions) |
 | Adapter host-version qualification (register-time detection, incompatible-major refusal) | Implemented, tested | `integrations/opencode/index.ts` + `integrations/pi/client.ts`, vitest suites |
@@ -411,6 +411,27 @@ Rules:
   executable-level separation, ship distinct `seqpass-broker` / `seqpass-mcp`
   binaries or prevent agent UIDs from executing the privileged binary as the
   service user (no sudo, no setuid).
+
+### systemd service (recommended for the isolated topology)
+
+`deploy/seqpass-broker.service` runs the broker under the dedicated
+service identity with restart-on-failure, a `seqpass doctor
+--topology --require-verified` startup dependency check, restrictive
+filesystem privileges (`ProtectSystem=strict`, `PrivateTmp`,
+`NoNewPrivileges`, writes confined to `/run/seqpass` +
+`/var/lib/seqpass`), and **no credential-bearing environment variables**
+(the optional `/etc/default/seqpass` holds path/UID configuration only).
+Install with:
+
+```bash
+sudo cp deploy/seqpass-broker.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now seqpass-broker
+```
+
+Adapt `ExecStart` flags (sockets, UIDs, intake group) to your topology —
+or override via a drop-in unit — and keep the doctor pre-start check so a
+drifted installation refuses to boot.
 
 ## Sandbox note
 

@@ -184,6 +184,49 @@ func pinnedExecutable(raw string) (string, error) {
 // checkPinnedExecutable enforces the file facts: regular file, executable,
 // not group/world writable, owned by root or the broker's own identity,
 // and every ancestor directory not group/world writable.
+// checkPinnedPath verifies a pinned directory (the git.push source
+// repository) with the pinned-file-fact discipline: directory checks
+// instead of executable checks, same ownership and ancestor rules.
+func checkPinnedPath(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return errors.New("pinned path not accessible")
+	}
+	if !fi.IsDir() {
+		return errors.New("pinned path must be a directory")
+	}
+	if fi.Mode().Perm()&0022 != 0 {
+		return errors.New("pinned path must not be group/world writable")
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Uid != 0 && st.Uid != uint32(os.Geteuid()) {
+		return errors.New("pinned path must be owned by root or the broker identity")
+	}
+	dir := filepath.Dir(path)
+	for {
+		di, err := os.Stat(dir)
+		if err != nil {
+			return errors.New("pinned path ancestor not accessible")
+		}
+		if !di.IsDir() {
+			return errors.New("pinned path ancestor is not a directory")
+		}
+		if di.Mode().Perm()&0022 != 0 {
+			if dir == "/tmp" && di.Mode()&os.ModeSticky != 0 && uidOf(di) == 0 {
+				return nil
+			}
+			return fmt.Errorf("pinned path ancestor %s must not be group/world writable", dir)
+		}
+		if dir == filepath.Dir(dir) {
+			break
+		}
+		dir = filepath.Dir(dir)
+	}
+	return nil
+}
+
+// checkPinnedExecutable verifies a pinned executable: absolute, resolved,
+// regular, not group/world writable, owned by root or the broker's own
+// identity, and every ancestor directory not group/world writable.
 func checkPinnedExecutable(path string) error {
 	fi, err := os.Lstat(path)
 	if err != nil {

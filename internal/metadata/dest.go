@@ -26,7 +26,7 @@ func DestDigest(dest *types.Destination) string {
 	if dest.ExpectedGID != nil {
 		gid = fmt.Sprintf("%d", *dest.ExpectedGID)
 	}
-	h := sha256.Sum256([]byte(dest.ID + "\x00" + dest.Type + "\x00" + dest.Endpoint + "\x00" + string(allowedOps) + "\x00" + uid + "\x00" + gid))
+	h := sha256.Sum256([]byte(dest.ID + "\x00" + dest.Type + "\x00" + dest.Endpoint + "\x00" + dest.SourceRepo + "\x00" + string(allowedOps) + "\x00" + uid + "\x00" + gid))
 	return hex.EncodeToString(h[:])
 }
 
@@ -52,9 +52,9 @@ func (d *DB) CreateDestination(dest *types.Destination) error {
 	// Mutation + epoch bump commit atomically (C03).
 	_, err := d.withAuthMutation(func(tx *sql.Tx) error {
 		_, err := tx.Exec(`
-			INSERT INTO destinations (id, name, type, endpoint, auth_method, allowed_ops, requires_approval, approved_by, revision, expected_uid, expected_gid, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, dest.ID, dest.Name, dest.Type, dest.Endpoint, dest.AuthMethod, string(allowedOps), dest.RequiresApproval, dest.ApprovedBy, dest.Revision, nullableUID(dest.ExpectedUID), nullableUID(dest.ExpectedGID), dest.CreatedAt, dest.UpdatedAt)
+			INSERT INTO destinations (id, name, type, endpoint, source_repo, auth_method, allowed_ops, requires_approval, approved_by, revision, expected_uid, expected_gid, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, dest.ID, dest.Name, dest.Type, dest.Endpoint, dest.SourceRepo, dest.AuthMethod, string(allowedOps), dest.RequiresApproval, dest.ApprovedBy, dest.Revision, nullableUID(dest.ExpectedUID), nullableUID(dest.ExpectedGID), dest.CreatedAt, dest.UpdatedAt)
 		return err
 	})
 	return err
@@ -111,7 +111,7 @@ func scanDestination(scan func(...interface{}) error) (*types.Destination, error
 	dest := &types.Destination{}
 	var allowedOps string
 	var uid, gid sql.NullInt64
-	err := scan(&dest.ID, &dest.Name, &dest.Type, &dest.Endpoint, &dest.AuthMethod, &allowedOps, &dest.RequiresApproval, &dest.ApprovedBy, &dest.Revision, &uid, &gid, &dest.CreatedAt, &dest.UpdatedAt)
+	err := scan(&dest.ID, &dest.Name, &dest.Type, &dest.Endpoint, &dest.SourceRepo, &dest.AuthMethod, &allowedOps, &dest.RequiresApproval, &dest.ApprovedBy, &dest.Revision, &uid, &gid, &dest.CreatedAt, &dest.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -133,7 +133,7 @@ func scanDestination(scan func(...interface{}) error) (*types.Destination, error
 func (d *DB) GetDestination(id string) (*types.Destination, error) {
 	return scanDestination(func(args ...interface{}) error {
 		return d.db.QueryRow(`
-			SELECT id, name, type, endpoint, auth_method, allowed_ops, requires_approval, approved_by, revision, expected_uid, expected_gid, created_at, updated_at
+			SELECT id, name, type, endpoint, source_repo, auth_method, allowed_ops, requires_approval, approved_by, revision, expected_uid, expected_gid, created_at, updated_at
 			FROM destinations WHERE id = ?
 		`, id).Scan(args...)
 	})
@@ -141,7 +141,7 @@ func (d *DB) GetDestination(id string) (*types.Destination, error) {
 
 func (d *DB) ListDestinations() ([]*types.Destination, error) {
 	rows, err := d.db.Query(`
-		SELECT id, name, type, endpoint, auth_method, allowed_ops, requires_approval, approved_by, revision, expected_uid, expected_gid, created_at, updated_at
+		SELECT id, name, type, endpoint, source_repo, auth_method, allowed_ops, requires_approval, approved_by, revision, expected_uid, expected_gid, created_at, updated_at
 		FROM destinations ORDER BY created_at DESC
 	`)
 	if err != nil {

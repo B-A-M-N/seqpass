@@ -1,0 +1,74 @@
+# SeqPass broker systemd unit (objective §8).
+#
+# Install:
+#   sudo cp deploy/seqpass-broker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now seqpass-broker
+#
+# The unit runs the broker under a dedicated service identity (the same
+# UID `seqpass init` provisions) with:
+#   - restart on failure (Restart=on-failure, bounded by StartLimitSec)
+#   - startup dependency checks (network + AegisKeys socket ordering hook)
+#   - restrictive filesystem privileges (ProtectSystem=strict, PrivateTmp,
+#     PrivateDevices, NoNewPrivileges, ReadWritePaths limited to the two
+#     SeqPass installation directories)
+#   - NO credential-bearing environment variables: the broker resolves
+#     credentials through its AegisKeys binding at operation time; the
+#     optional EnvironmentFile holds only path/UID configuration.
+#
+# After editing /etc/default/seqpass or the unit: systemctl daemon-reload
+# and systemctl restart seqpass-broker.
+
+[Unit]
+Description=SeqPass credential broker
+Documentation=file:///usr/share/doc/seqpass/README.md
+After=network-online.target
+Wants=network-online.target
+# Startup dependency check: refuse a broken installation instead of
+# loop-restarting. The doctor consults the installation-wide configuration
+# file, evaluates the live topology (UID separation, socket ownership,
+# AegisKeys reachability), and exits non-zero unless the boundary is
+# verified. Development installations can override this with a drop-in.
+ExecStartPre=/usr/local/bin/seqpass doctor --topology --require-verified
+
+[Service]
+Type=simple
+User=seqpass
+Group=seqpass
+# Optional configuration (paths/UIDs only — never credentials):
+EnvironmentFile=-/etc/default/seqpass
+
+ExecStartPre=/usr/local/bin/seqpass doctor --quiet
+ExecStart=/usr/local/bin/seqpass broker \
+  --vault aegiskeys \
+  --db /var/lib/seqpass/broker.db \
+  --socket /run/seqpass/broker.sock \
+  --admin-socket /run/seqpass/admin.sock \
+  --intake-socket /run/seqpass/intake.sock
+
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=300
+StartLimitBurst=5
+TimeoutStopSec=15
+
+# Restrictive filesystem / capability profile.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+# The only writable locations: runtime sockets and broker-owned state.
+ReadWritePaths=/run/seqpass /var/lib/seqpass
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

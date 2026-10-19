@@ -172,6 +172,33 @@ func validateGitHostURL(raw, scheme string) (string, error) {
 	return raw, nil
 }
 
+// ParseGitSourceRepo is the registration-time grammar for a git.push source
+// repository: an absolute path to a directory that looks like a git
+// repository (bare, or a working tree with a .git entry). Relative paths,
+// empty values, and paths with control characters are refused — the source
+// is a registration fact the operator pins, never an agent parameter.
+func ParseGitSourceRepo(raw string) (string, error) {
+	if raw == "" || len(raw) > gitRemoteMax {
+		return "", errors.New("invalid source repository: empty or too long")
+	}
+	if !utf8.ValidString(raw) {
+		return "", errors.New("invalid source repository: not valid UTF-8")
+	}
+	for _, r := range raw {
+		if r <= 0x20 || r == 0x7f {
+			return "", errors.New("invalid source repository: control or whitespace character")
+		}
+	}
+	if !filepath.IsAbs(raw) {
+		return "", errors.New("invalid source repository: must be an absolute path")
+	}
+	clean := filepath.Clean(raw)
+	if clean == "/" || strings.HasPrefix(clean, "/dev/") || strings.HasPrefix(clean, "/proc/") || strings.HasPrefix(clean, "/sys/") {
+		return "", errors.New("invalid source repository: refused path")
+	}
+	return clean, nil
+}
+
 // ValidateGitRef is the only agent-supplied degree of freedom: a branch
 // name. The grammar admits exactly [A-Za-z0-9][A-Za-z0-9._/-]* with no
 // doubled or dangling components, no "..", and no ".lock" suffix — so no
@@ -261,6 +288,51 @@ func gitChildEnv(home string) []string {
 	}
 }
 
+// gitCredentialPlacement normalizes the credential for both git drivers.
+// The primary value is the password; an optional "username" component names
+// the account; an optional "password" component overrides the primary
+// value. Any other component is refused rather than silently ignored — a
+// credential half-consumed by an undocumented placement is a handoff
+// incident, not a projection detail. The credential-fill response is
+// line-oriented: a newline (or NUL) in either field corrupts it — git stops
+// at the first blank line, so a username carrying "\npassword=x" would
+// cause git to authenticate with the injected x while the real token is
+// silently discarded. Both fields are operator-staged, but integrity here
+// is fail-closed: an unusable credential is refused, never truncated or
+// reinterpreted.
+func gitCredentialPlacement(cred Credential) (token, user string, err error) {
+	if cred.Value == "" && cred.Components["password"] == "" {
+		return "", "", errors.New("no credential")
+	}
+	token = cred.Value
+	user = "git"
+	for name, value := range cred.Components {
+		switch name {
+		case "username":
+			if value != "" {
+				user = value
+			}
+		case "password":
+			if value != "" {
+				token = value
+			}
+		default:
+			return "", "", fmt.Errorf("unsupported credential component %q for %s", name, credOpGit)
+		}
+	}
+	if token == "" {
+		return "", "", errors.New("no credential")
+	}
+	for _, field := range []string{user, token} {
+		if strings.ContainsAny(field, "\x00\n\r") {
+			return "", "", errors.New("credential bytes unusable for the git credential protocol")
+		}
+	}
+	return token, user, nil
+}
+
+const credOpGit = "git operation"
+
 func (g *gitFetch) Execute(ctx context.Context, cred Credential, in UseInput) (SafeResult, error) {
 	if in.Dest == nil {
 		return SafeResult{}, errors.New("pinned destination missing")
@@ -279,44 +351,9 @@ func (g *gitFetch) Execute(ctx context.Context, cred Credential, in UseInput) (S
 	if err := checkPinnedExecutable(gitExecutable); err != nil {
 		return SafeResult{}, errors.New("pinned git executable not available")
 	}
-	if cred.Value == "" && cred.Components["password"] == "" {
-		return SafeResult{}, errors.New("no credential")
-	}
-	// Credential placement: the primary value is the password; an optional
-	// "username" component names the account; an optional "password"
-	// component overrides the primary value. Any other component is
-	// refused rather than silently ignored — a credential half-consumed by
-	// an undocumented placement is a handoff incident, not a projection
-	// detail.
-	token := cred.Value
-	user := "git"
-	for name, value := range cred.Components {
-		switch name {
-		case "username":
-			if value != "" {
-				user = value
-			}
-		case "password":
-			if value != "" {
-				token = value
-			}
-		default:
-			return SafeResult{}, fmt.Errorf("unsupported credential component %q for git.fetch", name)
-		}
-	}
-	if token == "" {
-		return SafeResult{}, errors.New("no credential")
-	}
-	// The credential-fill response is line-oriented: a newline (or NUL)
-	// in either field corrupts it — git stops at the first blank line, so
-	// a username carrying "\npassword=x" would cause git to authenticate
-	// with the injected x while the real token is silently discarded.
-	// Both fields are operator-staged, but integrity here is fail-closed:
-	// an unusable credential is refused, never truncated or reinterpreted.
-	for _, field := range []string{user, token} {
-		if strings.ContainsAny(field, "\x00\n\r") {
-			return SafeResult{}, errors.New("credential bytes unusable for the git credential protocol")
-		}
+	token, user, err := gitCredentialPlacement(cred)
+	if err != nil {
+		return SafeResult{}, err
 	}
 	// The credential-fill response is composed in memory, written to the
 	// controlled file descriptor, and zeroed when execution ends. It never

@@ -445,6 +445,16 @@ func (s *Service) AddDestination(d *types.Destination) error {
 		if _, err := secureops.ParseGitRemote(d.Endpoint); err != nil {
 			return err
 		}
+		// The pinned source repository is a security binding for the
+		// push profile: pushed content is a registration fact, never an
+		// agent parameter. When present it is validated here so a
+		// malformed pin is refused at the authoritative boundary, not
+		// discovered as an execution failure after an approval exists.
+		if d.SourceRepo != "" {
+			if _, err := secureops.ParseGitSourceRepo(d.SourceRepo); err != nil {
+				return err
+			}
+		}
 	}
 	return s.db.CreateDestination(d)
 }
