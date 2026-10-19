@@ -9,7 +9,9 @@ import (
 )
 
 // T04: arbitrary file destinations are rejected; symlinks cannot divert
-// delivery because path-based delivery no longer exists.
+// delivery because path-based delivery no longer exists. Pinned operation
+// profiles (http-pinned) accept only strict origin grammar, so a symlink
+// path is still refused — the endpoint can never name a filesystem object.
 func TestFileDestinationsRejected(t *testing.T) {
 	e := startBroker(t, nil)
 	op := e.operator(t)
@@ -18,12 +20,25 @@ func TestFileDestinationsRejected(t *testing.T) {
 	link := filepath.Join(t.TempDir(), "link")
 	_ = os.Symlink(victim, link)
 
-	for _, typ := range []string{"file", "http-pinned", "ssh", ""} {
+	for _, typ := range []string{"file", "ssh", ""} {
 		if _, err := op.Call(ipc.MethodDestAdd, map[string]interface{}{
 			"name": "evil", "type": typ, "endpoint": link,
 		}); err == nil {
 			t.Fatalf("destination type %q accepted", typ)
 		}
+	}
+	// A pinned profile exists only with a valid origin or pinned
+	// executable; a filesystem symlink path is neither, so the diversion
+	// stays impossible.
+	if _, err := op.Call(ipc.MethodDestAdd, map[string]interface{}{
+		"name": "evil", "type": "http-pinned", "endpoint": link,
+	}); err == nil {
+		t.Fatal("http-pinned destination accepted a filesystem path")
+	}
+	if _, err := op.Call(ipc.MethodDestAdd, map[string]interface{}{
+		"name": "evil", "type": "process-pinned", "endpoint": link,
+	}); err == nil {
+		t.Fatal("process-pinned destination accepted a symlink path")
 	}
 	if b, _ := os.ReadFile(victim); string(b) != "precious" {
 		t.Fatal("victim file modified")
@@ -40,7 +55,7 @@ func TestDeadRecipientFailsClosed(t *testing.T) {
 	ref := refID(t, mustCall(t, op, ipc.MethodSecretAdd, map[string]interface{}{"name": "r"}))
 	dest := refID(t, mustCall(t, op, ipc.MethodDestAdd, map[string]interface{}{
 		"name": "d", "type": "recipient-socket",
-		"endpoint": filepath.Join(t.TempDir(), "nobody.sock"),
+		"endpoint":     filepath.Join(t.TempDir(), "nobody.sock"),
 		"expected_uid": myUIDNum(),
 	}))
 	rules := `[{"principal":"uid:` + myUID() + `","secret_refs":["` + ref + `"],"ops":["transfer","discover"],"dest_ids":["` + dest + `"]}]`

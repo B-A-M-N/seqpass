@@ -367,17 +367,31 @@ func adminCmd(args []string) {
 	case "add-dest":
 		fs := flag.NewFlagSet("add-dest", flag.ExitOnError)
 		name := fs.String("name", "", "name")
-		typ := fs.String("type", "recipient-socket", "recipient-socket")
-		ep := fs.String("endpoint", "", "trusted recipient unix socket path")
-		expectUID := fs.Int("expect-uid", -1, "pinned recipient UID (required)")
-		expectGID := fs.Int("expect-gid", -1, "pinned recipient GID (optional)")
+		typ := fs.String("type", "recipient-socket", "recipient-socket | http-pinned | process-pinned")
+		ep := fs.String("endpoint", "", "recipient-socket: unix socket path; http-pinned: pinned origin (https://host[:port]); process-pinned: absolute executable path")
+		expectUID := fs.Int("expect-uid", -1, "pinned recipient UID (recipient-socket only)")
+		expectGID := fs.Int("expect-gid", -1, "pinned recipient GID (optional, recipient-socket only)")
 		_ = fs.Parse(args[1:])
-		if *name == "" || *ep == "" || *expectUID < 0 {
-			fatal("add-dest --name N --type recipient-socket --endpoint SOCK --expect-uid UID [--expect-gid GID]")
-		}
-		params := map[string]interface{}{"name": *name, "type": *typ, "endpoint": *ep, "expected_uid": *expectUID}
-		if *expectGID >= 0 {
-			params["expected_gid"] = *expectGID
+		params := map[string]interface{}{"name": *name, "type": *typ, "endpoint": *ep}
+		switch *typ {
+		case "recipient-socket":
+			if *name == "" || *ep == "" || *expectUID < 0 {
+				fatal("add-dest --name N --type recipient-socket --endpoint SOCK --expect-uid UID [--expect-gid GID]")
+			}
+			params["expected_uid"] = *expectUID
+			if *expectGID >= 0 {
+				params["expected_gid"] = *expectGID
+			}
+		case "http-pinned":
+			if *name == "" || *ep == "" {
+				fatal("add-dest --name N --type http-pinned --endpoint https://host[:port]")
+			}
+		case "process-pinned":
+			if *name == "" || *ep == "" {
+				fatal("add-dest --name N --type process-pinned --endpoint /absolute/executable (pin fixed flags with a wrapper script)")
+			}
+		default:
+			fatal("add-dest: unsupported type " + *typ)
 		}
 		data, err := cli.Call(ipc.MethodDestAdd, params)
 		must(err)

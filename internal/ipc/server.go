@@ -15,6 +15,7 @@ import (
 
 	"github.com/secretbridge/secretbridge/internal/harness"
 	"github.com/secretbridge/secretbridge/internal/intake"
+	"github.com/secretbridge/secretbridge/internal/secureops"
 	"github.com/secretbridge/secretbridge/internal/service"
 	"github.com/secretbridge/secretbridge/internal/types"
 )
@@ -848,21 +849,27 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 		if d.Name == "" || d.Endpoint == "" || d.Type == "" {
 			return Response{OK: false, Error: "missing fields"}
 		}
-		if d.Type != "recipient-socket" {
+		switch d.Type {
+		case "recipient-socket":
+			// C05: recipient identity pins. expected_uid is required;
+			// expected_gid is optional. Numeric params arrive as float64.
+			if uid, ok := uintParam(p, "expected_uid"); ok {
+				u := uid
+				d.ExpectedUID = &u
+			}
+			if gid, ok := uintParam(p, "expected_gid"); ok {
+				g := gid
+				d.ExpectedGID = &g
+			}
+			if d.ExpectedUID == nil {
+				return Response{OK: false, Error: "expected_uid is required for recipient-socket"}
+			}
+		case secureops.DestTypeHTTPPinned, secureops.DestTypeProcessPinned:
+			// Pinned operation profiles carry no identity pin; their
+			// security is the strict endpoint grammar, which
+			// AddDestination enforces at the broker boundary.
+		default:
 			return Response{OK: false, Error: "unsupported destination type"}
-		}
-		// C05: recipient identity pins. expected_uid is required;
-		// expected_gid is optional. Numeric params arrive as float64.
-		if uid, ok := uintParam(p, "expected_uid"); ok {
-			u := uid
-			d.ExpectedUID = &u
-		}
-		if gid, ok := uintParam(p, "expected_gid"); ok {
-			g := gid
-			d.ExpectedGID = &g
-		}
-		if d.ExpectedUID == nil {
-			return Response{OK: false, Error: "expected_uid is required for recipient-socket"}
 		}
 		if err := s.svc.AddDestination(d); err != nil {
 			return Response{OK: false, Error: err.Error()}

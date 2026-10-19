@@ -160,6 +160,16 @@ func (s *Service) ExecuteUse(ctx context.Context, useID, worker string) (map[str
 		Principal: ur.RequestedBy,
 		Resource:  driver.Resource(inputParams(ur)),
 	}
+	// Destination-pinned drivers execute against the operator-registered
+	// endpoint. Re-read here (not carried over from admission) so the
+	// executed profile is the destination record as it exists at dispatch;
+	// admission already bound the digest, so a concurrent change fails the
+	// claim, not silently re-pins the profile.
+	if ur.Target != "" {
+		if dest, derr := s.db.GetDestination(ur.Target); derr == nil && dest != nil {
+			input.Dest = dest
+		}
+	}
 	cred, err := s.resolveCredentialMaterial(ctx, ur.Source, ur.ID)
 	if err != nil {
 		s.audit(ur.ID, "secret_use_failed", ur.RequestedBy, ur.Target, "resolve-failed")

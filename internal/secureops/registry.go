@@ -20,6 +20,12 @@ type UseInput struct {
 	OpID      string
 	Principal string
 	Resource  ResourceDescriptor
+	// Dest is the resolved registered destination when Target names one,
+	// populated by the trusted executor before Execute. Drivers that pin
+	// their profile to a destination (http.request, process.run) read the
+	// operator-registered endpoint here and fail closed when it is absent;
+	// it is never an agent-supplied value.
+	Dest *types.Destination
 }
 
 // SafeResult is sanitized output safe for model-visible responses.
