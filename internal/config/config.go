@@ -16,6 +16,8 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -44,6 +46,315 @@ const (
 	EnvAdminSocket  = "SEQ_PASS_ADMIN_SOCKET"
 	EnvIntakeSocket = "SEQ_PASS_INTAKE_SOCKET"
 )
+
+// Installation-wide configuration (objective §8). The agent, the operator and
+// the broker run under different UIDs; each of them resolves $HOME
+// differently, so a home-relative default cannot be shared configuration. A
+// single root-owned file carries the endpoints every surface must agree on.
+const (
+	// SystemConfigPath is the installation-wide configuration file. It
+	// contains endpoints, the vault type and UID lists — never a secret.
+	SystemConfigPath = "/etc/seqpass/config.json"
+
+	// SystemSocketDir and SystemStateDir are the secure system defaults for
+	// a multi-UID installation: sockets under /run (tmpfs, wiped on boot and
+	// recreated by the broker), broker-owned durable state under /var/lib.
+	SystemSocketDir = "/run/seqpass"
+	SystemStateDir  = "/var/lib/seqpass"
+)
+
+// Config-file environment overrides. SEQ_PASS_CONFIG follows the package's
+// existing endpoint-variable spelling; SEQQASS_CONFIG is accepted as the
+// historical alias. Both must point at a file, and a missing or malformed
+// explicit file is an error, never a silent fallback.
+const (
+	EnvConfig    = "SEQ_PASS_CONFIG"
+	EnvConfigAlt = "SEQQQASS_CONFIG"
+)
+
+// systemDefaults returns the multi-UID installation defaults: sockets under
+// /run/seqpass and broker state under /var/lib/seqpass. They are only used
+// when the installation is system-scoped (see Load), because /run and
+// /var/lib are not writable by an unprivileged development user.
+func systemDefaults() Deployment {
+	sock := filepath.Join(SystemSocketDir, "broker.sock")
+	return Deployment{
+		DBPath:       filepath.Join(SystemStateDir, "metadata.db"),
+		SocketPath:   sock,
+		AdminSocket:  sock + ".admin",
+		IntakeSocket: sock + ".intake",
+	}
+}
+
+// configFile mirrors the JSON schema of the installation-wide configuration.
+// Pointer fields distinguish "absent" from "zero" so loading a sparse file
+// never zeroes a path that the defaults already resolved.
+type configFile struct {
+	DBPath        *string  `json:"db_path,omitempty"`
+	SocketPath    *string  `json:"socket_path,omitempty"`
+	AdminSocket   *string  `json:"admin_socket,omitempty"`
+	IntakeSocket  *string  `json:"intake_socket,omitempty"`
+	HostSocket    *string  `json:"host_socket,omitempty"`
+	VaultType     *string  `json:"vault,omitempty"`
+	Assurance     *string  `json:"assurance,omitempty"`
+	Dev           *bool    `json:"dev,omitempty"`
+	AgentUIDs     []uint32 `json:"agent_uids,omitempty"`
+	AdminUIDs     []uint32 `json:"admin_uids,omitempty"`
+	IntakeUIDs    []uint32 `json:"intake_uids,omitempty"`
+	SocketGroup   *string  `json:"socket_group,omitempty"`
+	IntakeGroup   *string  `json:"intake_group,omitempty"`
+	AegisSocket   *string  `json:"aegiskeys_socket,omitempty"`
+	AegisDir      *string  `json:"aegiskeys_dir,omitempty"`
+	MaxConcOps    *int     `json:"max_concurrent_ops,omitempty"`
+	DefaultTTL    *string  `json:"default_op_ttl,omitempty"`
+	AutoExecute   *bool    `json:"auto_execute,omitempty"`
+	NoAutoDeliver *bool    `json:"no_relay_auto_deliver,omitempty"`
+}
+
+// ConfigPath resolves which configuration file governs this installation:
+// the environment override when set, otherwise /etc/seqpass/config.json.
+func ConfigPath() string {
+	for _, name := range []string{EnvConfig, EnvConfigAlt} {
+		if v := os.Getenv(name); v != "" {
+			return v
+		}
+	}
+	return SystemConfigPath
+}
+
+// Load resolves the installation-wide Deployment.
+//
+// Precedence, from strongest to weakest: explicit flags (applied by the
+// caller after Load) > endpoint environment (ApplyEnv) > configuration file
+// > defaults. The base defaults are system paths (/run, /var/lib) when the
+// process is root or the configuration file exists — those are the markers
+// of a real multi-UID installation — and the per-UID home directory
+// otherwise, which keeps single-UID development working unchanged.
+//
+// The function fails closed: a configuration file that exists but cannot be
+// read or parsed is an error, and so is an explicitly named file that is
+// missing. Load never invents a configuration the operator did not write.
+func Load(explicitPath string) (Deployment, error) {
+	path := explicitPath
+	envNamed := false
+	if path == "" {
+		for _, name := range []string{EnvConfig, EnvConfigAlt} {
+			if v := os.Getenv(name); v != "" {
+				path = v
+				envNamed = true
+				break
+			}
+		}
+	}
+	if path == "" {
+		path = SystemConfigPath
+	}
+
+	if fi, err := os.Stat(path); err == nil {
+		if fi.IsDir() {
+			return Deployment{}, fmt.Errorf("configuration path %s is a directory", path)
+		}
+		// A system-scoped configuration file is exactly the signal that
+		// this is a multi-UID installation: resolve the system paths as
+		// the base and let the file refine them.
+		d := systemDefaults()
+		if err := applyConfigFile(&d, path); err != nil {
+			return Deployment{}, err
+		}
+		return d, nil
+	} else if !os.IsNotExist(err) {
+		return Deployment{}, fmt.Errorf("cannot inspect configuration %s: %w", path, err)
+	} else if explicitPath != "" || envNamed {
+		// The operator (or the environment) named this file; pretending
+		// it does not exist would silently reconfigure the installation
+		// to the per-UID default.
+		return Deployment{}, fmt.Errorf("configuration file %s not found", path)
+	}
+
+	// No configuration file anywhere. Root means the installation is
+	// system-scoped (services do not share root's home directory layout
+	// with the agent and operator UIDs), so use the system paths; the
+	// unprivileged single-UID development case keeps ~/.seqpass.
+	if os.Geteuid() == 0 {
+		return systemDefaults(), nil
+	}
+	return Defaults(), nil
+}
+
+// applyConfigFile parses the installation configuration and overlays it onto
+// d. Every field that the file can express is validated here: a bad value is
+// a hard error, because a half-applied configuration is worse than a refused
+// one — the surfaces that read it must not disagree.
+func applyConfigFile(d *Deployment, path string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("cannot read configuration %s: %w", path, err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var fc configFile
+	if err := dec.Decode(&fc); err != nil {
+		return fmt.Errorf("malformed configuration %s: %w", path, err)
+	}
+	if fc.DBPath != nil {
+		d.DBPath = *fc.DBPath
+	}
+	if fc.SocketPath != nil {
+		d.SocketPath = *fc.SocketPath
+	}
+	if fc.AdminSocket != nil {
+		d.AdminSocket = *fc.AdminSocket
+	}
+	if fc.IntakeSocket != nil {
+		d.IntakeSocket = *fc.IntakeSocket
+	}
+	if fc.HostSocket != nil {
+		d.HostSocket = *fc.HostSocket
+	}
+	if fc.VaultType != nil {
+		if err := validateVault(*fc.VaultType); err != nil {
+			return fmt.Errorf("configuration %s: %w", path, err)
+		}
+		d.VaultType = *fc.VaultType
+	}
+	if fc.Assurance != nil {
+		switch *fc.Assurance {
+		case "", AssuranceIsolated, AssuranceBestEffort:
+		default:
+			return fmt.Errorf("configuration %s: unknown assurance mode %q (want %s or %s)", path, *fc.Assurance, AssuranceIsolated, AssuranceBestEffort)
+		}
+		d.AssuranceMode = *fc.Assurance
+	}
+	if fc.Dev != nil {
+		d.Dev = *fc.Dev
+	}
+	uidFields := []struct {
+		name string
+		uids []uint32
+		set  func([]uint32)
+	}{
+		{"agent_uids", fc.AgentUIDs, func(u []uint32) { d.AgentUIDs = u }},
+		{"admin_uids", fc.AdminUIDs, func(u []uint32) { d.AdminUIDs = u }},
+		{"intake_uids", fc.IntakeUIDs, func(u []uint32) { d.IntakeUIDs = u }},
+	}
+	for _, f := range uidFields {
+		if f.uids == nil {
+			continue
+		}
+		seen := map[uint32]bool{}
+		for _, uid := range f.uids {
+			if seen[uid] {
+				return fmt.Errorf("configuration %s: duplicate UID %d in %s", path, uid, f.name)
+			}
+			seen[uid] = true
+		}
+		f.set(f.uids)
+	}
+	if fc.SocketGroup != nil {
+		d.SocketGroup = *fc.SocketGroup
+	}
+	if fc.IntakeGroup != nil {
+		d.IntakeGroup = *fc.IntakeGroup
+	}
+	if fc.AegisSocket != nil {
+		d.AegisKeysSocket = *fc.AegisSocket
+	}
+	if fc.AegisDir != nil {
+		d.AegisKeysDir = *fc.AegisDir
+	}
+	if fc.MaxConcOps != nil {
+		if *fc.MaxConcOps < 0 {
+			return fmt.Errorf("configuration %s: max_concurrent_ops cannot be negative", path)
+		}
+		d.MaxConcurrentOps = *fc.MaxConcOps
+	}
+	if fc.DefaultTTL != nil {
+		ttl, err := time.ParseDuration(*fc.DefaultTTL)
+		if err != nil {
+			return fmt.Errorf("configuration %s: invalid default_op_ttl %q: %w", path, *fc.DefaultTTL, err)
+		}
+		if ttl < 0 {
+			return fmt.Errorf("configuration %s: default_op_ttl cannot be negative", path)
+		}
+		d.DefaultOpTTL = ttl
+	}
+	if fc.AutoExecute != nil {
+		d.AutoExecute = *fc.AutoExecute
+	}
+	if fc.NoAutoDeliver != nil {
+		d.NoRelayAutoDeliver = *fc.NoAutoDeliver
+	}
+	return nil
+}
+
+func validateVault(v string) error {
+	switch v {
+	case VaultAegisKeys, VaultMemoryTest:
+		return nil
+	default:
+		return fmt.Errorf("unknown vault %q (want %s or %s)", v, VaultAegisKeys, VaultMemoryTest)
+	}
+}
+
+// RenderConfig renders the deployment as the JSON form of the
+// installation-wide configuration file. Only endpoints, the vault type and
+// identity lists are serialized: a credential or a session token must never
+// reach this structure, and init writes exactly this rendering.
+func RenderConfig(d Deployment) ([]byte, error) {
+	fc := configFile{
+		DBPath:       &d.DBPath,
+		SocketPath:   &d.SocketPath,
+		AdminSocket:  &d.AdminSocket,
+		IntakeSocket: &d.IntakeSocket,
+	}
+	if d.HostSocket != "" {
+		fc.HostSocket = &d.HostSocket
+	}
+	if d.VaultType != "" {
+		fc.VaultType = &d.VaultType
+	}
+	if d.AssuranceMode != "" {
+		fc.Assurance = &d.AssuranceMode
+	}
+	if d.Dev {
+		fc.Dev = &d.Dev
+	}
+	fc.AgentUIDs = d.AgentUIDs
+	fc.AdminUIDs = d.AdminUIDs
+	fc.IntakeUIDs = d.IntakeUIDs
+	if d.SocketGroup != "" {
+		fc.SocketGroup = &d.SocketGroup
+	}
+	if d.IntakeGroup != "" {
+		fc.IntakeGroup = &d.IntakeGroup
+	}
+	if d.AegisKeysSocket != "" {
+		fc.AegisSocket = &d.AegisKeysSocket
+	}
+	if d.AegisKeysDir != "" {
+		fc.AegisDir = &d.AegisKeysDir
+	}
+	if d.MaxConcurrentOps > 0 {
+		fc.MaxConcOps = &d.MaxConcurrentOps
+	}
+	if d.DefaultOpTTL != 0 {
+		s := d.DefaultOpTTL.String()
+		fc.DefaultTTL = &s
+	}
+	if d.AutoExecute {
+		fc.AutoExecute = &d.AutoExecute
+	}
+	if d.NoRelayAutoDeliver {
+		fc.NoAutoDeliver = &d.NoRelayAutoDeliver
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(fc); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
 
 // Deployment is the operator-supplied description of an installation.
 // It is plain data: constructing one never touches the filesystem and never

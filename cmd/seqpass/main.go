@@ -36,6 +36,22 @@ func defaultPaths() (db, sock, admin, intake string) {
 	return config.Paths()
 }
 
+// loadBase resolves the installation-wide configuration (config file +
+// defaults, before environment and flags). Every surface that creates or
+// verifies broker-owned objects — broker, init, doctor, install — must
+// consult it, because those surfaces run under different UIDs and a
+// home-relative default silently splits the installation. A malformed
+// configuration is a hard error: the surfaces would otherwise disagree
+// about where the installation lives, which is a boundary problem.
+func loadBase() config.Deployment {
+	d, err := config.Load("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "seqpass: %v\n", err)
+		os.Exit(1)
+	}
+	return d
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -62,6 +78,8 @@ func main() {
 		doctorCmd(os.Args[2:])
 	case "init":
 		initCmd(os.Args[2:])
+	case "install":
+		installCmd(os.Args[2:])
 	default:
 		usage()
 		os.Exit(1)
@@ -81,6 +99,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  seqpass tui [--intake-socket PATH]  # persistent native inbox TUI (own terminal, never the agent's)")
 	fmt.Fprintln(os.Stderr, "  seqpass doctor [--topology]  # honest health + live isolation boundary report")
 	fmt.Fprintln(os.Stderr, "  seqpass init [--vault aegiskeys] ...  # create the 0700 state dir + database, print next steps")
+	fmt.Fprintln(os.Stderr, "  seqpass install opencode|pi|mcp [--print] [--out FILE] [--force]  # write the adapter's endpoint config (never credentials)")
 	fmt.Fprintln(os.Stderr, "  seqpass status")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "MCP registration:")
@@ -89,12 +108,15 @@ func usage() {
 }
 
 func brokerCmd(args []string) {
+	// §8: the broker must land on the same installation the operator and
+	// the agent see, so its endpoint defaults come from the shared
+	// configuration file rather than root's (or the service UID's) home.
+	base := loadBase()
 	fs := flag.NewFlagSet("broker", flag.ExitOnError)
-	db, sock, admin, intake := defaultPaths()
-	dbF := fs.String("db", db, "SQLite path")
-	sockF := fs.String("socket", sock, "Broker socket")
-	adminF := fs.String("admin-socket", admin, "Admin socket")
-	intakeF := fs.String("intake-socket", intake, "Trusted human intake socket (owner-only unless --intake-group is set)")
+	dbF := fs.String("db", base.DBPath, "SQLite path")
+	sockF := fs.String("socket", base.SocketPath, "Broker socket")
+	adminF := fs.String("admin-socket", base.AdminSocket, "Admin socket")
+	intakeF := fs.String("intake-socket", base.IntakeSocket, "Trusted human intake socket (owner-only unless --intake-group is set)")
 	intakeUIDs := fs.String("intake-uid", "", "comma-separated human intake UIDs (default: admin UIDs; list agent UIDs here only for same-user best-effort mode)")
 	intakeGroup := fs.String("intake-group", "", "optional trusted intake socket group; must differ from agent group and exclude agent UIDs")
 	hostF := fs.String("host-socket", "", "optional display-only native-host adapter socket; owner-only, separate directory required")
@@ -562,8 +584,12 @@ func runTUI(intakeSock string) error {
 // it asks a running broker; with --topology it evaluates the configured
 // boundary live, before anything is started.
 func doctorCmd(args []string) {
+	// §8: consult the installation-wide configuration file so the doctor
+	// evaluates the same endpoints the broker and the operator use, even
+	// when it runs under a different UID.
+	base := loadBase()
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
-	_, sock, admin, intake := defaultPaths()
+	sock, admin, intake := base.SocketPath, base.AdminSocket, base.IntakeSocket
 	topology := fs.Bool("topology", false, "evaluate the configured topology live instead of asking a running broker")
 	requireVerified := fs.Bool("require-verified", false, "exit non-zero unless the boundary is verified")
 	sockF := fs.String("socket", sock, "broker socket")
@@ -606,11 +632,11 @@ func doctorCmd(args []string) {
 		return
 	}
 
-	db, _, _, _ := defaultPaths()
+	db := base.DBPath
 	if *dbF != "" {
 		db = *dbF
 	}
-	d := config.Defaults()
+	d := base
 	d.DBPath = db
 	d.SocketPath = *sockF
 	d.AdminSocket = *adminF
@@ -673,10 +699,16 @@ func healthVerified(data interface{}) bool {
 // initCmd creates the installation's state directory and database with
 // restrictive permissions, then prints the exact command to start the
 // broker. It never generates, stores or prints a credential.
+//
+// With --out it also writes the installation-wide configuration file
+// (endpoints, vault type, UID lists — never secrets), so the broker, the
+// doctor and `seqpass install` can resolve the installation identically
+// from any UID. When running as root, /etc/seqpass/config.json is the
+// default target.
 func initCmd(args []string) {
+	base := loadBase()
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
-	dbDefault, _, _, _ := defaultPaths()
-	dbF := fs.String("db", dbDefault, "database path")
+	dbF := fs.String("db", base.DBPath, "database path")
 	vaultF := fs.String("vault", config.VaultAegisKeys, "vault type: aegiskeys (production) or memory-test (development, requires --dev)")
 	devF := fs.Bool("dev", false, "development-only acknowledgement for the memory-test vault")
 	assuranceF := fs.String("assurance", "", "topology claim: isolated|best-effort (default: derived from the vault)")
@@ -684,9 +716,11 @@ func initCmd(args []string) {
 	adminUIDsF := fs.String("admin-uid", "", "comma-separated admin UIDs")
 	intakeUIDsF := fs.String("intake-uid", "", "comma-separated trusted intake UIDs")
 	groupF := fs.String("socket-group", "", "agent socket group (required for a production vault)")
+	outF := fs.String("out", "", "write the installation-wide config file here (default: /etc/seqpass/config.json when running as root)")
+	forceF := fs.Bool("force", false, "overwrite an existing, differing config file")
 	_ = fs.Parse(args)
 
-	d := config.Defaults()
+	d := base
 	d.DBPath = *dbF
 	d.VaultType = *vaultF
 	d.Dev = *devF
@@ -698,6 +732,17 @@ func initCmd(args []string) {
 	if err := d.Validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "init: %v\n", err)
 		os.Exit(2)
+	}
+
+	// §8: generate the installation-wide configuration. It carries only
+	// endpoints, the vault type and UID lists; secrets live in the vault
+	// and tokens are minted at runtime, so this file is safe to read.
+	if out := *outF; out != "" || os.Geteuid() == 0 {
+		target := out
+		if target == "" {
+			target = config.SystemConfigPath
+		}
+		writeInstallConfig(target, d, *forceF)
 	}
 
 	dir := d.StateDir()
@@ -736,6 +781,47 @@ func initCmd(args []string) {
 	fmt.Println()
 	fmt.Println("Next steps (run the broker as the dedicated service UID):")
 	printNextSteps(d)
+}
+
+// writeInstallConfig writes the installation-wide configuration file for d,
+// idempotently and never over a differing file without --force. The file
+// contains no secret, so 0644 is intentional: every UID involved in the
+// installation must be able to read the endpoints it may reach.
+func writeInstallConfig(path string, d config.Deployment, force bool) {
+	data, err := config.RenderConfig(d)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "init: cannot render the installation config: %v\n", err)
+		os.Exit(1)
+	}
+	if existing, err := os.ReadFile(path); err == nil {
+		if string(existing) == string(data) {
+			fmt.Printf("install config: %s (already up to date)\n", path)
+			return
+		}
+		if !force {
+			fmt.Fprintf(os.Stderr, "init: refusing to overwrite differing %s (pass --force)\n", path)
+			os.Exit(1)
+		}
+	} else if !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "init: cannot inspect %s: %v\n", path, err)
+		os.Exit(1)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "init: cannot create %s: %v\n", filepath.Dir(path), err)
+		os.Exit(1)
+	}
+	// Write through a sibling temp file and rename, so a crash mid-write
+	// can never leave a truncated config that other surfaces would refuse.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "init: cannot write %s: %v\n", tmp, err)
+		os.Exit(1)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		fmt.Fprintf(os.Stderr, "init: cannot install %s: %v\n", path, err)
+		os.Exit(1)
+	}
+	fmt.Printf("install config: %s (endpoints, vault and UID lists only — no secrets)\n", path)
 }
 
 // printNextSteps writes the exact broker and doctor commands for the chosen
