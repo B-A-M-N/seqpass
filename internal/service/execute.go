@@ -464,6 +464,18 @@ func (s *Service) ExecuteTransfer(ctx context.Context, transferID, worker string
 			}
 			return nil, err
 		}
+		// §10: an authenticated, digest-bound refusal is a deterministic
+		// recipient application failure. Finalize as clean failed — the
+		// settle path then refunds the reservation so the operator can
+		// fix the recipient and submit a fresh request. Never reported as
+		// uncertain: the broker KNOWS no acceptance occurred.
+		if err == transfer.ErrRecipientRejected {
+			s.audit(tr.ID, "secret_transfer_failed", tr.RequestedBy, tr.DestinationID, "recipient-rejected")
+			if ferr := s.db.FinalizeOp("transfer", tr.ID, attemptID, types.StatusFailed, "", nil); ferr != nil {
+				return nil, fmt.Errorf("recipient refusal and finalization failed: %v / %w", err, ferr)
+			}
+			return nil, fmt.Errorf("recipient refused the delivery")
+		}
 		return fail(types.StatusFailed, "deliver-failed", "secret_transfer_failed", err)
 	}
 	// The broker-built delivery receipt passes the same closed contract as

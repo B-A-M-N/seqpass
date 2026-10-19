@@ -543,6 +543,13 @@ func relayNext(state string) string {
 		return "Withdrawn: submit a fresh relay_request if still needed"
 	case types.RelayUnavailable:
 		return "Payload lost (restart/revocation): submit a fresh relay_request"
+	case "failed":
+		// §10: a deterministic failure (including an authenticated
+		// recipient refusal) must never read as terminal-and-silent.
+		// The user needs to know this is NOT an ambiguous dispatch: no
+		// reconciliation is pending, and the corrective action is to fix
+		// the cause and submit a fresh request.
+		return "Delivery failed deterministically (recipient refused or dispatch refused): fix the cause, then submit a fresh relay_request"
 	default:
 		return "terminal: no further action"
 	}
@@ -623,6 +630,23 @@ func (s *Service) settleRelayTransfer(tr *types.TransferRequest) {
 		}
 		if r.State == types.RelayDispatching {
 			s.audit(relayID, "relay_settle_note", tr.RequestedBy, tr.DestinationID, "failed-after-dispatch")
+			// §10: a post-dispatch deterministic failure (e.g. an
+			// authenticated, digest-bound recipient refusal) must not
+			// leave its delivery-history row stuck in "reserved" nor
+			// retain the staged value. Mark the row terminal so the
+			// grant's delivery history reports the truthful outcome.
+			// Budget is NOT refunded (dispatch was committed — the peer
+			// received the bytes even though it refused). A single-use
+			// payload is dead with its operation: tombstone it exactly
+			// as the uncertain path does, so no second consumer can
+			// ever read a refused value.
+			_ = s.db.RecordDeliveryOutcome(relayID, tr.ID, "failed", now)
+			if single {
+				s.eph.Delete(key)
+				s.eph.Release(key, tr.ID)
+			} else {
+				s.eph.Release(key, tr.ID)
+			}
 		}
 	}
 }

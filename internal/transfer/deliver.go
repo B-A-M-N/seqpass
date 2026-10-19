@@ -23,6 +23,15 @@ var (
 	// ErrUncertain marks "may have succeeded, ack lost": never auto-retry
 	// without a verified idempotency mechanism.
 	ErrUncertain = errors.New("delivery uncertain")
+	// ErrRecipientRejected marks a DETERMINISTIC refusal: the
+	// authenticated recipient received the envelope, verified its binding,
+	// and refused it. The broker knows no acceptance occurred — this is a
+	// recipient application failure the operator can act on (fix the
+	// recipient, or request a fresh value/code), never a lost-ack
+	// ambiguity to reconcile. A refusal that does not bind the exact
+	// (op_id, digest, bytes) stays ErrUncertain: an unbound refusal is not
+	// authenticated and may be forged or stale.
+	ErrRecipientRejected = errors.New("recipient refused the delivery")
 )
 
 const (
@@ -259,6 +268,15 @@ func (d *Deliverer) deliverSocket(ctx context.Context, opID, plaintext string, d
 	// The ack must bind the exact operation and payload digest. A forged,
 	// stale or byte-count-only ack cannot mark the transfer completed.
 	if !a.Accepted || a.OpID != opID || a.Digest != digest || a.Bytes != len(payload) {
+		// §10: an authenticated peer may send a well-formed refusal that
+		// binds the exact envelope. That is a DETERMINISTIC "no
+		// acceptance" answer — not a lost-ack ambiguity. Only such a
+		// bound refusal is classified as rejected; anything malformed,
+		// unbound, or quoting different bytes stays uncertain, because
+		// the broker cannot prove what an unbound peer actually did.
+		if !a.Accepted && a.OpID == opID && a.Digest == digest && a.Bytes == len(payload) {
+			return nil, ErrRecipientRejected
+		}
 		return nil, ErrUncertain
 	}
 	// The returned receipt is the PUBLIC receipt (G01): fixed scalar

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/secretbridge/secretbridge/internal/types"
 	"github.com/secretbridge/secretbridge/internal/testruntime"
+	"github.com/secretbridge/secretbridge/internal/types"
 )
 
 const successMarker = "SECRET-MARKER-success-9f8e7d6c5b4a"

@@ -1,9 +1,9 @@
 package service
 
 import (
-	"fmt"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -472,6 +472,71 @@ func TestRelayAcceptedNotApplied(t *testing.T) {
 	}
 }
 
+// §10: a deterministic recipient refusal (authenticated, digest-bound
+// `accepted=false`) is a clean failed — never uncertain. The agent learns
+// the truth (fix the recipient, request a fresh code) and the grant's
+// delivery history records the failed outcome; no reconciliation is
+// pending because the broker KNOWS no acceptance occurred.
+func TestRelayRefusedDeliveryIsFailedNotUncertain(t *testing.T) {
+	svc := testService(t)
+	_, r := relayDest(t, svc, "rd1", false)
+	reqID, err := svc.RelayRequest("uid:1000", "rd1", "one_time_code", "login", 0, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opID, err := svc.RelayFulfill("operator", reqID, relayRev(svc, reqID), []byte(relaySecret))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Poison the recipient's digest verification so it refuses with a
+	// well-formed, envelope-bound rejection ack.
+	r.refuseDigestMismatch = true
+	svc.runWorkerOnce(context.Background())
+	tr, _ := svc.DB().GetTransfer(opID)
+	if tr.Status != types.StatusFailed {
+		t.Fatalf("op = %s, want failed (deterministic refusal)", tr.Status)
+	}
+	rl, _ := svc.DB().GetRelay(reqID)
+	if rl.State == types.RelayUncertain {
+		t.Fatal("refusal classified uncertain: user cannot distinguish failure from lost ack")
+	}
+	st, _ := svc.RelayStatus("uid:1000", reqID)
+	if st["status"] != "failed" {
+		t.Fatalf("agent status = %v, want failed", st["status"])
+	}
+	next, _ := st["next"].(string)
+	if !strings.Contains(strings.ToLower(next), "failed") {
+		t.Fatalf("next-action guidance lacks failure truth: %q", next)
+	}
+	// The delivery-history row reports the truthful terminal outcome.
+	rows, err := svc.DB().ListRelayDeliveries(reqID, 10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("delivery rows = %v, %v", rows, err)
+	}
+	if rows[0].TerminalOutcome != "failed" || rows[0].State != "completed" {
+		t.Fatalf("delivery row not terminal-failed: %+v", rows[0])
+	}
+	// Nothing was accepted by the recipient.
+	if n := countDeliveries(r); n != 0 {
+		t.Fatalf("refusing recipient stored %d payloads", n)
+	}
+	// The audit trail records the deterministic refusal outcome.
+	logs, _ := svc.DB().ListAuditLogs(100)
+	found := false
+	for _, l := range logs {
+		if l.OperationID == opID && l.Action == "secret_transfer_failed" && l.Outcome == "recipient-rejected" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("audit missing recipient-rejected outcome for the refused op")
+	}
+	// The payload is gone: a refused single-use value must not linger.
+	if svc.eph.Live(relayPayloadKey(reqID)) {
+		t.Fatal("single-use payload retained after deterministic refusal")
+	}
+}
+
 // Request validation: unknown kinds, unknown recipients, and bad
 // consumption fail before any row exists.
 func TestRelayRequestValidation(t *testing.T) {
@@ -550,11 +615,11 @@ func TestRelayWorkerBoundedPageSize(t *testing.T) {
 	uid := uint32(os.Geteuid())
 	for i := 0; i < 40; i++ {
 		if err := svc.AddDestination(&types.Destination{
-			ID:           fmt.Sprintf("dest-%d", i),
-			Name:         fmt.Sprintf("dest-%d", i),
-			Type:         "recipient-socket",
-			Endpoint:     filepath.Join(t.TempDir(), fmt.Sprintf("r-%d.sock", i)),
-			ExpectedUID:  &uid,
+			ID:          fmt.Sprintf("dest-%d", i),
+			Name:        fmt.Sprintf("dest-%d", i),
+			Type:        "recipient-socket",
+			Endpoint:    filepath.Join(t.TempDir(), fmt.Sprintf("r-%d.sock", i)),
+			ExpectedUID: &uid,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -562,7 +627,7 @@ func TestRelayWorkerBoundedPageSize(t *testing.T) {
 	// Create enough relays to exceed the 32-record page size.
 	var reqIDs []string
 	for i := 0; i < 40; i++ {
-		agent := fmt.Sprintf("uid:%d", 1000 + i/20)
+		agent := fmt.Sprintf("uid:%d", 1000+i/20)
 		reqID, err := svc.RelayRequest(agent, fmt.Sprintf("dest-%d", i), "password", "", time.Minute, types.RelaySingleDispatch, 1)
 		if err != nil {
 			t.Fatalf("relay request %d: %v", i, err)

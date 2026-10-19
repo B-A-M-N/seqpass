@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/secretbridge/secretbridge/internal/types"
 	"github.com/secretbridge/secretbridge/internal/testruntime"
+	"github.com/secretbridge/secretbridge/internal/types"
 )
 
 func destOf(t *testing.T, typ, ep string) *types.Destination {
@@ -287,6 +287,102 @@ func TestBoundEnvelopeRoundTrip(t *testing.T) {
 	}
 	if receipt["delivered"] != true {
 		t.Fatalf("bad receipt: %v", receipt)
+	}
+}
+
+// §10: an authenticated recipient that returns a well-formed refusal
+// bound to the exact (op_id, digest, bytes) produces a DETERMINISTIC
+// rejection — not lost-ack uncertainty. The broker knows no acceptance
+// occurred, so the operator can act (fix the recipient, request a fresh
+// code) instead of investigating an ambiguous dispatch.
+func TestBoundRefusalIsRejectedNotUncertain(t *testing.T) {
+	sock := filepath.Join(sockDir(t), "r.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		c, err := l.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		var lb [4]byte
+		if _, err := io.ReadFull(c, lb[:]); err != nil {
+			return
+		}
+		n := binary.BigEndian.Uint32(lb[:])
+		if n == 0 || n > 2<<20 {
+			return
+		}
+		buf := make([]byte, n)
+		if _, err := io.ReadFull(c, buf); err != nil {
+			return
+		}
+		var env struct {
+			V       uint32 `json:"v"`
+			OpID    string `json:"op_id"`
+			Digest  string `json:"digest"`
+			Payload string `json:"payload"`
+		}
+		if json.Unmarshal(buf, &env) != nil {
+			return
+		}
+		// Bind the refusal to the exact received envelope.
+		raw, _ := json.Marshal(map[string]interface{}{
+			"accepted": false, "op_id": env.OpID, "digest": env.Digest, "bytes": len(env.Payload),
+		})
+		binary.BigEndian.PutUint32(lb[:], uint32(len(raw)))
+		_, _ = c.Write(lb[:])
+		_, _ = c.Write(raw)
+	}()
+	d := NewDeliverer()
+	_, err = d.Deliver(context.Background(), "op-refuse", "secret-code", destOf(t, "recipient-socket", sock))
+	if !errors.Is(err, ErrRecipientRejected) {
+		t.Fatalf("bound refusal must be ErrRecipientRejected, got %v", err)
+	}
+	if errors.Is(err, ErrUncertain) {
+		t.Fatal("bound refusal must not be classified uncertain")
+	}
+}
+
+// §10 negative shape: a refusal that does NOT bind the exact envelope
+// (here: wrong byte count) is unauthenticated and stays uncertain —
+// the broker cannot prove what an unbound peer actually did.
+func TestUnboundRefusalStaysUncertain(t *testing.T) {
+	sock := filepath.Join(sockDir(t), "r.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		c, err := l.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		var lb [4]byte
+		if _, err := io.ReadFull(c, lb[:]); err != nil {
+			return
+		}
+		n := binary.BigEndian.Uint32(lb[:])
+		if n == 0 || n > 2<<20 {
+			return
+		}
+		_, _ = io.CopyN(io.Discard, c, int64(n))
+		raw, _ := json.Marshal(map[string]interface{}{
+			"accepted": false, "op_id": "op-refuse2", "digest": "aa", "bytes": 1,
+		})
+		binary.BigEndian.PutUint32(lb[:], uint32(len(raw)))
+		_, _ = c.Write(lb[:])
+		_, _ = c.Write(raw)
+	}()
+	d := NewDeliverer()
+	_, err = d.Deliver(context.Background(), "op-refuse2", "secret-code", destOf(t, "recipient-socket", sock))
+	if !errors.Is(err, ErrUncertain) {
+		t.Fatalf("unbound refusal must stay ErrUncertain, got %v", err)
 	}
 }
 

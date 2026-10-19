@@ -117,6 +117,12 @@ type storeRecipient struct {
 	mu      sync.Mutex
 	store   map[string][]byte
 	dropAck bool
+	// refuseDigestMismatch (§10): when set, a payload/digest mismatch
+	// produces a well-formed envelope-bound refusal ack even when the
+	// digest actually matches — simulating a recipient application
+	// failure that the broker must classify as deterministic rejected,
+	// not uncertain.
+	refuseDigestMismatch bool
 }
 
 func startStoreRecipient(t *testing.T, dropAck bool) *storeRecipient {
@@ -197,8 +203,8 @@ func (r *storeRecipient) handle(c net.Conn) {
 	if json.Unmarshal(buf, &env) != nil {
 		return
 	}
-	if shaHex(env.Payload) != env.Digest {
-		raw, _ := json.Marshal(map[string]interface{}{"accepted": false, "op_id": env.OpID, "digest": env.Digest})
+	if shaHex(env.Payload) != env.Digest || r.refuseDigestMismatch {
+		raw, _ := json.Marshal(map[string]interface{}{"accepted": false, "op_id": env.OpID, "digest": env.Digest, "bytes": len(env.Payload)})
 		binary.BigEndian.PutUint32(lb[:], uint32(len(raw)))
 		_, _ = c.Write(lb[:])
 		_, _ = c.Write(raw)
