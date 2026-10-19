@@ -13,8 +13,7 @@
  * the value. That requires the independently qualified deployment
  * boundary (SP-05).
  */
-import type { ProtectedInputNotice } from "./types";
-import type { SeqPassClient } from "./client";
+import type { ProtectedInputNotice, SeqPassInputClient } from "./types";
 
 export interface PiCustomUI {
   render: (text: string) => void;
@@ -40,7 +39,7 @@ export function maskedEcho(length: number): string {
 
 export function ProtectedInput(
   notice: ProtectedInputNotice,
-  client: SeqPassClient,
+  client: SeqPassInputClient,
   ui: PiCustomUI,
 ) {
   // SP-05: when the broker issues external_tty mode, the adapter must
@@ -94,9 +93,11 @@ export function ProtectedInput(
   redraw();
   return {
     get masked() {
-      // This property only reports that the render text includes "(masked)".
-      // It does NOT prove that other code in this process cannot observe
-      // the value — that requires independent qualification evidence.
+      // True by construction: the only render path draws asterisks
+      // (maskedEcho) — the component has no code path that renders the
+      // value. This does NOT prove that other code in this process
+      // cannot observe the value; that requires independent
+      // qualification evidence (SP-05).
       return true;
     },
     close,

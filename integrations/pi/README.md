@@ -18,7 +18,10 @@ when `ctx.hasUI` is false or the custom UI is unavailable.
   renders one asterisk per entered character.
 
 Both transports use the shared wire client (`integrations/shared/ipc.ts`),
-the same one the OpenCode V2 adapter uses.
+the same one the OpenCode V2 adapter uses. Credential entry is external
+by default (`presentation: "request_status"`); the in-host masked
+component renders an asterisk echo only and still activates solely when
+the broker's qualification decides host-native mode.
 
 Status: functional against the declared `PiCustomUI` contract; live
 qualification still requires an actual Pi installation.

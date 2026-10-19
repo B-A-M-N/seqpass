@@ -12,3 +12,10 @@ export interface ProtectedInputNotice {
   input_assurance: string;
   untrusted_purpose?: string;
 }
+
+// The trusted client surface the protected-input component needs. Kept
+// structural so the component can be exercised with a stub in tests.
+export interface SeqPassInputClient {
+  fulfill(requestID: string, revision: number, value: string): Promise<void>;
+  dismissPrompt(requestID: string): Promise<void>;
+}

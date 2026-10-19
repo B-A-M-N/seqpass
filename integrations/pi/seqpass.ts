@@ -8,6 +8,7 @@
 import { SeqPassClient } from "./client";
 import { ProtectedInput } from "./ProtectedInput";
 import { SeqPassStatus } from "./SeqPassStatus";
+import type { ProtectedInputNotice } from "./types";
 
 export interface SeqPassExtensionConfig {
   intakeSocket: string;
@@ -20,8 +21,23 @@ export interface SeqPassExtensionConfig {
   sessionToken?: string;
 }
 
-export function registerSeqPass(config: SeqPassExtensionConfig) {
-  const client = new SeqPassClient(config);
+// Structural seam so tests can drive the extension with a stub client.
+// The real client satisfies this without modification.
+export interface SeqPassClientLike {
+  connect(): Promise<void>;
+  connectAgent(): Promise<void>;
+  register(): Promise<unknown>;
+  setSession(sessionID: string, sessionToken: string): void;
+  requestRelay(args: { destination_id: string; data_kind: string; purpose?: string; ttl_seconds?: number }): Promise<{ request_id?: string; status: string; error?: string }>;
+  getStatus(requestID: string): Promise<{ status: string; error?: string }>;
+  getPendingRequest(): Promise<ProtectedInputNotice | null>;
+  fulfill(requestID: string, revision: number, value: string): Promise<void>;
+  dismissPrompt(requestID: string): Promise<void>;
+  close(): Promise<void> | void;
+}
+
+export function registerSeqPass(config: SeqPassExtensionConfig, deps?: { client?: SeqPassClientLike }) {
+  const client: SeqPassClientLike = deps?.client ?? new SeqPassClient(config);
   let sessionReady = false;
 
   // SP-08: async bootstrap — register the host session if credentials are

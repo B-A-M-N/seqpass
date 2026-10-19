@@ -30,6 +30,9 @@ shared wire client (`integrations/shared/ipc.ts`): the intake socket for
 registration and fulfillment, the host socket for pending-notice polling
 (5 s interval, disposed with the plugin lifecycle).
 
-Status: functional against the documented `@opencode-ai/plugin` v2.0.x
-contract; live TUI qualification still requires an actual OpenCode V2
-installation.
+Status: functional against the `@opencode-ai/plugin` TUI contract as
+installed (package version ^1.18.3 — there is no 2.x release; the adapter
+targets the OpenCode v2 CLI). Live TUI qualification still requires an
+actual OpenCode installation. A clean `npm install --legacy-peer-deps`
+reproduces `tsc --noEmit` and the vitest suite; the peer range is loose
+because the host, not this package, supplies the renderer at runtime.

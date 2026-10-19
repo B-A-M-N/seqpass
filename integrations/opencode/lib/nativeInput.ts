@@ -1,8 +1,8 @@
 /**
  * SP-01/SP-05 capability gate for in-host credential collection.
  *
- * The OpenCode V2 plugin surface (`@opencode-ai/plugin` v2.0.x) exposes
- * `ui.DialogPrompt` and `ui.Prompt` for text entry, but neither offers a
+ * The OpenCode plugin surface (`@opencode-ai/plugin` TUI contract)
+ * exposes `ui.DialogPrompt` and `ui.Prompt` for text entry, but neither offers a
  * masked/secure field — typed characters render in plaintext, and the
  * underlying `@opentui` `InputRenderable` has no mask option either. A
  * dialog that echoes a credential on screen cannot carry the
@@ -61,4 +61,18 @@ export function selectNativeInput(
 export function footerText(count: number): string | null {
   if (!Number.isInteger(count) || count <= 0) return null;
   return count === 1 ? "SeqPass: 1 pending request" : `SeqPass: ${count} pending requests`;
+}
+
+// Inbox option mapping for the DialogSelect display-only listing. Titles
+// and descriptions are broker-verified fields only; the agent-supplied
+// untrusted_purpose annotation never mixes into them (it is rendered
+// only by the review dialog, explicitly labeled as untrusted).
+export function inboxOptions(
+  pending: Array<{ request_id: string; recipient_label: string; data_kind: string; consumption: string; untrusted_purpose?: string }>,
+): Array<{ title: string; value: { request_id: string }; description: string }> {
+  return pending.map(n => ({
+    title: `${n.recipient_label} — ${n.data_kind}`,
+    value: { request_id: n.request_id },
+    description: n.consumption,
+  }));
 }

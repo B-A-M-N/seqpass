@@ -80,11 +80,12 @@ export class SeqPassClient {
       host_kind: "pi",
       host_version: "1.0",
       adapter_version: "0.1.0",
-      // Presentation honestly describes what this adapter offers: it
-      // surfaces broker-verified request status only. Credential bytes
-      // are typed on the external trusted terminal, which owns the
-      // protected-intake transport. The broker never trusts these flags
-      // as security evidence (qualification decides the input mode).
+      // Registration defaults to external credential input: the
+      // operator's own `seqpass tui` terminal is the trusted surface.
+      // The in-host masked component (ProtectedInput) renders an
+      // asterisk echo only and activates solely when the broker's
+      // qualification decides host-native mode — the broker never
+      // trusts these flags as security evidence.
       presentation: "request_status",
       input_transport: "external_tty",
       supports_resume: "true",
@@ -130,10 +131,13 @@ export class SeqPassClient {
   }
 
   async fulfill(requestID: string, revision: number, value: string): Promise<void> {
-    await this.connect();
+    // Validate before dialing: an oversized payload must be refused even
+    // when the broker is unreachable, and dialing must not be the error
+    // surfaced to the operator.
     if (Buffer.byteLength(value, "utf-8") > maxPayloadBytes) {
       throw new Error("payload exceeds 64 KiB limit");
     }
+    await this.connect();
     await this.intake.call("intake.fulfill", {
       request_id: requestID,
       request_revision: revision,

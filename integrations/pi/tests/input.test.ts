@@ -5,6 +5,22 @@
  */
 import { describe, it, expect } from "vitest";
 import { SeqPassClient } from "../client";
+import { ProtectedInput } from "../ProtectedInput";
+
+const baseNotice = {
+  version: 1,
+  request_id: "req-fallback",
+  request_revision: 1,
+  host_session_id: "host-1",
+  data_kind: "api_key",
+  recipient_id: "rd1",
+  recipient_label: "Test Recipient",
+  consumption: "single_dispatch",
+  expires_at: "2026-01-01T00:00:00Z",
+  input_mode: "external_tty" as const,
+  input_assurance: "model_blind",
+  untrusted_purpose: "",
+};
 
 describe("SeqPass Pi adapter contract", () => {
   it("routes relay RPCs through the agent transport, not intake", () => {
@@ -43,6 +59,19 @@ describe("SeqPass Pi adapter contract", () => {
     client.close();
   });
 
+  it("refuses oversized payloads without dialing the broker", async () => {
+    // Parity with the OpenCode client: validation precedes dialing, so
+    // an oversized payload is refused even when the broker is down.
+    const client = new SeqPassClient({
+      intakeSocket: "/nonexistent/seqpass/intake.sock",
+      hostSocket: "/nonexistent/seqpass/host.sock",
+      sessionID: "host-1",
+      sessionToken: "tok-test",
+    });
+    const oversized = "x".repeat(64 * 1024 + 1);
+    await expect(client.fulfill("req-1", 1, oversized)).rejects.toThrow("payload exceeds 64 KiB limit");
+  });
+
   it("registers honestly as a status-only presentation surface", async () => {
     const client = new SeqPassClient({
       intakeSocket: "/tmp/test.intake",
@@ -71,23 +100,36 @@ describe("SeqPass Pi adapter contract", () => {
     expect(captured[0]!.host_kind).toBe("pi");
   });
 
-  it("records protected input qualification as blocked without a real Pi terminal", () => {
-    const reason = "real Pi ctx.ui.custom() terminal qualification unavailable in CI";
-    const result = {
-      status: "blocked",
-      reason,
-      evidence: null,
-      executed_host_tests: 0,
+  it("native-mode entry renders asterisk progress only, never the value", async () => {
+    // Drives the real key handler with typed characters and verifies
+    // every rendered frame carries asterisk progress only; the value
+    // itself appears solely in the fulfill call to the trusted client.
+    const renders: string[] = [];
+    let handler: ((key: string) => void) | null = null;
+    const ui = {
+      render: (t: string) => renders.push(t),
+      setKeyHandler: (h: (key: string) => void) => { handler = h; },
+      close: () => {},
     };
-    expect(result.status).toBe("blocked");
-    expect(result.reason).toBe(reason);
-    expect(result.evidence).toBeNull();
-    expect(result.executed_host_tests).toBe(0);
-    expect(() => {
-      if (result.executed_host_tests === 0 && result.status === "blocked") {
-        throw new Error("native integration verdict must not be green");
-      }
-    }).toThrow("native integration verdict must not be green");
+    let submitted = "";
+    const client = {
+      fulfill: async (_id: string, _rev: number, value: string) => { submitted = value; },
+      dismissPrompt: async () => {},
+    };
+    const notice = { ...baseNotice, input_mode: "host_native_verified" as const };
+    const result = ProtectedInput(notice, client as any, ui as any) as any;
+    expect(result.fallback).toBeUndefined();
+    // Type a value whose characters never appear in the header text.
+    for (const key of ["z", "9", "$"]) handler!(key);
+    for (const frame of renders) {
+      expect(frame).not.toContain("z");
+      expect(frame).not.toContain("9");
+      expect(frame).not.toContain("$");
+    }
+    handler!("enter");
+    expect(submitted).toBe("z9$");
+    // Final frame shows three-asterisk progress, nothing of the value.
+    expect(renders[renders.length - 1]).toContain("***");
   });
 
   it("does not mark descriptor objects as native protected input", () => {
@@ -100,24 +142,7 @@ describe("SeqPass Pi adapter contract", () => {
 // SP-05: When input_mode is external_tty, ProtectedInput returns a
 // fallback that directs the user to the external trusted terminal —
 // it does not render a credential-bearing native prompt.
-import { ProtectedInput } from "../ProtectedInput";
-
 describe("SeqPass Pi external-tty fallback", () => {
-  const baseNotice = {
-    version: 1,
-    request_id: "req-fallback",
-    request_revision: 1,
-    host_session_id: "host-1",
-    data_kind: "api_key",
-    recipient_id: "rd1",
-    recipient_label: "Test Recipient",
-    consumption: "single_dispatch",
-    expires_at: "2026-01-01T00:00:00Z",
-    input_mode: "external_tty" as const,
-    input_assurance: "model_blind",
-    untrusted_purpose: "",
-  };
-
   it("returns a fallback result for external_tty mode", () => {
     const client = {} as any;
     const ui = {

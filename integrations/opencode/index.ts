@@ -1,8 +1,9 @@
 /**
  * SeqPass OpenCode V2 CLI plugin entry point.
  *
- * Implements the `@opencode-ai/plugin` TuiPluginModule contract for
- * OpenCode v2.0.x. The adapter surfaces broker-verified request status
+ * Implements the `@opencode-ai/plugin` TuiPluginModule contract for the
+ * OpenCode v2 CLI (package version ^1.18.3 — there is no 2.x release).
+ * The adapter surfaces broker-verified request status
  * in-host (display-only inbox footer + review command); credential bytes
  * are typed on the external trusted terminal (`seqpass tui`) and submit
  * through SeqPass's trusted intake socket — never through OpenCode's
@@ -11,6 +12,7 @@
 import type { TuiPluginModule, TuiPluginApi } from "@opencode-ai/plugin/tui";
 import type { ProtectedInputNotice } from "./types";
 import { SeqPassHostClient } from "./lib/client";
+import { inboxOptions } from "./lib/nativeInput";
 import { SeqPassProtectedInputDialog } from "./components/SeqPassProtectedInput";
 import { seqPassFooter } from "./components/SeqPassFooter";
 
@@ -36,10 +38,16 @@ export const tui: TuiPluginModule["tui"] = async (
   }
 
   const client = new SeqPassHostClient({ intakeSocket, hostSocket, sessionID, sessionToken });
+  // Dispose before the first dial: a failed registration must not leak
+  // two open IPC sockets for the host's lifetime.
+  api.lifecycle.onDispose(() => {
+    void client.close();
+  });
   try {
     await client.connect();
     await client.register();
   } catch {
+    void client.close();
     api.ui.toast({ title: "SeqPass", message: "SeqPass broker unavailable", variant: "error" });
     return;
   }
@@ -56,7 +64,6 @@ export const tui: TuiPluginModule["tui"] = async (
   }, pollIntervalMs);
   api.lifecycle.onDispose(() => {
     clearInterval(poll);
-    void client.close();
   });
 
   // Open the review flow for one broker-verified notice. The dialog
@@ -76,22 +83,17 @@ export const tui: TuiPluginModule["tui"] = async (
       api.ui.toast({ title: "SeqPass", message: "No pending request" });
       return;
     }
-    if (pending.length === 1) {
-      openReview(pending[0]);
-      return;
-    }
-    // Display-only inbox: list broker-verified requests and let the
-    // operator pick one to review. Only notice metadata is shown.
-    api.ui.dialog.replace(() => api.ui.DialogSelect<ProtectedInputNotice>({
+    // Display-only inbox: always list broker-verified requests — even a
+    // single one — so the operator sees recipient, data kind, and
+    // consumption metadata before choosing what to review. Only notice
+    // metadata is shown; credential bytes never enter this surface.
+    api.ui.dialog.replace(() => api.ui.DialogSelect<{ request_id: string }>({
       title: "SeqPass — pending requests",
-      options: pending.map(n => ({
-        title: `${n.recipient_label} — ${n.data_kind}`,
-        value: n,
-        description: n.consumption,
-      })),
+      options: inboxOptions(pending),
       onSelect: (option) => {
         api.ui.dialog.clear();
-        openReview(option.value);
+        const notice = pending.find(n => n.request_id === option.value.request_id);
+        if (notice) openReview(notice);
       },
     }));
   };
