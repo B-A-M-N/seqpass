@@ -347,6 +347,14 @@ func provisionReportData(report *service.ProvisionReport, ref *types.SecretRefer
 	if report.IntentState != "" {
 		out["use_intent_state"] = report.IntentState
 	}
+	if report.CachedStatus {
+		// P1-A cached-status honesty: this provider_status is the LAST
+		// OBSERVED state from the durable row, not a fresh provider
+		// verdict — poll --status to re-verify; dispatch revalidates
+		// regardless.
+		out["cached_status"] = true
+		out["provider_status_note"] = "last observed provider state (not freshly verified); poll credential-save --status for a live verdict"
+	}
 	if !report.StagedUntil.IsZero() {
 		// P0-C transient staging: metadata only, never the credential.
 		out["transient"] = true

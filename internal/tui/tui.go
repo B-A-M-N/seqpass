@@ -597,10 +597,23 @@ func (s *session) doCredentialSave() error {
 	}
 	m, _ := res.(map[string]interface{})
 	if saved, _ := m["saved"].(bool); !saved {
+		if transient, _ := m["transient"].(bool); transient {
+			s.setSticky("transient credential staged in broker memory ONLY (no AegisKeys record; one approved use consumes it; unrecoverable after expiry or restart)")
+			return nil
+		}
 		s.setSticky("not saved: " + neutralize(str(m["provider_status"])))
 		return nil
 	}
 	reqID := neutralize(str(m["request_id"]))
+	// P1-A: grant_present ≠ ready — the operator must see WHICH state the
+	// provider last reported, and whether it is a fresh verdict or a
+	// cached one.
+	if cached, _ := m["cached_status"].(bool); cached {
+		if ps, _ := m["provider_status"].(string); ps == "grant_present" {
+			s.setSticky("CACHED: grant existed at last provider query — poll credential-save --status to re-verify before trusting resolves")
+			return nil
+		}
+	}
 	if use, ok := m["use_outcome"].(map[string]interface{}); ok {
 		if executed, _ := use["executed"].(bool); executed {
 			s.setSticky(fmt.Sprintf("saved + used (request %s)", reqID))

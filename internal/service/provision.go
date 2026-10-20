@@ -113,6 +113,15 @@ type ProvisionReport struct {
 	// completed/failed (the op's terminal outcome), blocked (reference
 	// conflicted or policy denied before any dispatch).
 	IntentState string
+	// CachedStatus (P1-A) is true when ProviderStatus is the LAST
+	// OBSERVED provider state recovered from the durable row (idempotent
+	// recovery), NOT a freshly verified provider verdict. grant_present
+	// recovered from cache in particular is "the grant existed when last
+	// queried" — never "the grant is usable now". Surfaces must label it
+	// as such; a newly revoked/expired grant is reflected only when the
+	// provider is actually queried (ProvisionStatusReport) and the
+	// execution gate ALWAYS revalidates authorization at dispatch.
+	CachedStatus bool
 	// StagedUntil (transient_once only): when the staged in-memory
 	// payload expires. Saved stays FALSE — nothing durable was created.
 	StagedUntil time.Time
@@ -348,6 +357,7 @@ func (s *Service) reconcileProvision(ctx context.Context, caller, mode string, r
 			ProviderStatus:       providerStatusOf(ref),
 			ReEnrollmentRequired: ref.ReconcileStatus == types.ProvisionReconcileCommitted,
 			RefID:                ref.ID,
+			CachedStatus:         true,
 		}
 		if mode == IntakeSaveAndUse {
 			s.reportIntentOutcome(ref, report)
@@ -561,11 +571,20 @@ func (s *Service) progressProvisionUseIntent(ctx context.Context, caller string,
 		report.IntentState = it.State
 		return
 	}
-	// Pending: the grant must be usable BEFORE the request is created so
+	// Pending: the grant must be USABLE before the request is created so
 	// the operator's approval leads directly to an executable state
-	// (grant approval, then operation approval).
+	// (grant approval, then operation approval). grant_present is NOT
+	// usable (P1-A): the grant exists but no unlocked/policy-valid/
+	// executable-pin-valid readiness verdict has been reported — the
+	// intent stays pending.
 	switch ref.ReconcileStatus {
-	case types.ProvisionReconcileGrantPresent, types.ProvisionReconcileReady:
+	case types.ProvisionReconcileGrantPresent:
+		report.UseResult = &UseOutcomeReport{
+			Err: "authorization_pending: the staged grant EXISTS but is not verified ready; approve the grant (aegiskeys access provision approve --request " +
+				ref.ProvisionRequestID + "); the recorded use intent is preserved",
+		}
+		return
+	case types.ProvisionReconcileReady:
 		// EXACTLY-ONCE submission anchor: the use request's ID is
 		// DETERMINISTIC ("intentop-"+intent ID) and the intent CAS
 		// (pending→submitted) is taken BEFORE SubmitUse. Only the CAS

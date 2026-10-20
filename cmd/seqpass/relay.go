@@ -429,6 +429,15 @@ func credentialSaveCmd(args []string) {
 			"request_id": *requestIDF,
 		})
 		must(err)
+		m, _ := data.(map[string]interface{})
+		// P1-A: make grant_present vs ready — and cached vs fresh —
+		// visible instead of burying the distinction in raw JSON.
+		if ps, _ := m["provider_status"].(string); ps == "grant_present" {
+			fmt.Println("grant_present: the resolve grant EXISTS, but no unlocked/policy-valid/executable-pin-valid readiness verdict has been reported — not equivalent to ready")
+		}
+		if cached, _ := m["cached_status"].(bool); cached {
+			fmt.Println("cached: last observed provider state, not freshly verified — poll again after provider-side changes (revocation/expiry) for the live verdict")
+		}
 		printJSON(data)
 		return
 	}

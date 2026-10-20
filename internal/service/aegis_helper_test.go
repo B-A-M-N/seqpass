@@ -429,6 +429,19 @@ func (m *helperMockBroker) handleV3Status(conn net.Conn, requestID string) {
 			}
 		}
 	}
+	// Grant-present simulation (P1-A tests): grantpresent-<requestID>
+	// rewrites the status to "grant_present" — the staged grant EXISTS
+	// but no unlocked/policy-valid/executable-pin-valid readiness
+	// verdict has been reported.
+	if _, gerr := os.Stat(filepath.Join(filepath.Dir(m.sockPath), "grantpresent-"+requestID)); gerr == nil {
+		var body map[string]interface{}
+		if jerr := json.Unmarshal([]byte(resp), &body); jerr == nil {
+			body["status"] = "grant_present"
+			if rewritten, merr := json.Marshal(body); merr == nil {
+				resp = string(rewritten)
+			}
+		}
+	}
 	writeJSONBody(conn, resp)
 }
 
@@ -608,6 +621,17 @@ func (m *mockBrokerChild) revoke(binding string) {
 	path := filepath.Join(filepath.Dir(m.sockPath), "revoke-"+safe)
 	if err := os.WriteFile(path, []byte("revoked"), 0600); err != nil {
 		m.t.Fatalf("revoke control file: %v", err)
+	}
+}
+
+// grantPresent models the staged grant EXISTING without a readiness
+// verdict (P1-A): a control file read by the mock child rewrites the
+// status response to "grant_present".
+func (m *mockBrokerChild) grantPresent(requestID string) {
+	m.t.Helper()
+	path := filepath.Join(filepath.Dir(m.sockPath), "grantpresent-"+requestID)
+	if err := os.WriteFile(path, []byte("1"), 0600); err != nil {
+		m.t.Fatalf("grantpresent control file: %v", err)
 	}
 }
 
