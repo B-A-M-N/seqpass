@@ -143,6 +143,26 @@ Keep observer output and service logs access-controlled. Search them for the
 test credential before accepting a run. Never put raw credentials, bearer
 headers, or credential-bearing requests in the record.
 
+### Credential-resolution helper (P0-1) — live-tier requirements
+
+The live tier must run the broker with
+`--aegiskeys-resolve-helper /usr/local/bin/seqpass` (the AegisKeys grant must
+be pinned to that executable). Verify in the live run:
+
+1. Broker self-resolve is refused at the peer-identity layer
+   (`PR_SET_DUMPABLE=0`): the lab finding must reproduce against the live
+   broker without the helper configured (proven negative control).
+2. With the helper configured, an authorized op resolves through the helper:
+   AegisKeys audit shows the resolving pid = helper child of the broker, exe =
+   the pinned `seqpass` path.
+3. Impersonation: an agent UID invoking `seqpass resolve-helper` directly is
+   denied on grant UID mismatch (no credential, no audit resolve).
+4. Grant drift: rotating the AegisKeys grant hash (or path) denies the helper
+   until re-pinned — proving the identity is actually pinned, not merely
+   path-checked.
+5. Crash posture: `kill -ABRT` on a mid-resolve helper produces no core file
+   (`RLIMIT_CORE=0`) while the broker stays non-dumpable.
+
 | Scenario | Required observation |
 | --- | --- |
 | Authorized credentialed read | Correct mock response reaches the agent; exact credential absent from MCP input/output, process-readable agent files, receipts, logs, and status. |

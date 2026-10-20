@@ -89,6 +89,10 @@ type Config struct {
 	SocketGroup     string
 	AegisKeysSocket string
 	AegisKeysDir    string
+	// AegisKeysResolveHelper names the trusted credential-resolution
+	// helper executable (P0-1). Operator configuration only; empty keeps
+	// the in-process resolve path.
+	AegisKeysResolveHelper string
 	// AutoExecute runs the trusted in-broker worker that executes
 	// authorized operations without manual `admin execute` (C13).
 	// Approval is still required: only authorized ops are consumed, and
@@ -258,12 +262,15 @@ func New(cfg Config) (*Daemon, error) {
 		dbPath = cfg.DBPath
 	}
 	svc, err := service.New(service.Config{
-		DBPath:           dbPath,
-		VaultType:        cfg.VaultType,
-		AegisKeysSocket:  cfg.AegisKeysSocket,
-		AegisKeysDir:     cfg.AegisKeysDir,
-		DefaultOpTTL:     cfg.DefaultOpTTL,
-		MaxConcurrentOps: cfg.MaxConcurrentOps,
+		DBPath:          dbPath,
+		VaultType:       cfg.VaultType,
+		AegisKeysSocket: cfg.AegisKeysSocket,
+		AegisKeysDir:    cfg.AegisKeysDir,
+		// P0-1: operator-configured trusted resolve helper (isolated
+		// deployments); empty keeps the in-process resolve path.
+		AegisKeysResolveHelper: cfg.AegisKeysResolveHelper,
+		DefaultOpTTL:           cfg.DefaultOpTTL,
+		MaxConcurrentOps:       cfg.MaxConcurrentOps,
 		// Objective 4.3: an isolated deployment withholds inline native
 		// capture unless every boundary property is proven. A best-effort
 		// deployment keeps the historic selector because it makes no

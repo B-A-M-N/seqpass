@@ -35,6 +35,17 @@ type Config struct {
 	// AegisKeysSocket is the existing AegisKeys broker socket path.
 	AegisKeysSocket string
 	AegisKeysDir    string
+	// AegisKeysResolveHelper, when set, names the trusted credential-
+	// resolution helper executable (P0-1): a short-lived one-request
+	// process spawned per approved resolve so that AegisKeys'
+	// /proc/<pid>/exe peer verification can authenticate the resolving
+	// process while the long-lived broker stays non-dumpable
+	// (PR_SET_DUMPABLE=0). The value comes exclusively from operator
+	// configuration (systemd unit / installation flags) — never from
+	// agent-visible input. Empty keeps the in-process resolve path (same-
+	// user best-effort mode and test brokers, which do not fail peer
+	// verification).
+	AegisKeysResolveHelper string
 	// RequireVerifiedHostIsolation, when set by the broker for a verified
 	// isolated deployment, withholds inline native host capture unless every
 	// agent-observable boundary property has been independently verified

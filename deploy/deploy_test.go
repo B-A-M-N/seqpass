@@ -172,6 +172,13 @@ func TestUnitCompleteTopologyArguments(t *testing.T) {
 			t.Fatalf("topology variable %s must appear in both ExecStartPre and ExecStart (preflight/broker drift): pre=%v start=%v", v, preVars, startVars)
 		}
 	}
+	// P0-1: the broker (not the preflight) must be configured with the
+	// trusted resolve helper — the long-lived broker is non-dumpable and
+	// cannot pass AegisKeys /proc/<pid>/exe peer verification itself.
+	startArgv := join(directives(t, sections, "Service", "ExecStart"))
+	if !strings.Contains(startArgv, "--aegiskeys-resolve-helper ${SEQPASS_RESOLVE_HELPER}") {
+		t.Fatalf("ExecStart is missing the trusted resolve helper argument: %q", startArgv)
+	}
 }
 
 func envVarsIn(s string) map[string]bool {

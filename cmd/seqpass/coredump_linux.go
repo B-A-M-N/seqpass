@@ -25,6 +25,24 @@ import (
 // Children (pinned drivers) inherit both properties. Best effort: a
 // refusal is a startup warning, not a hard failure.
 func disableCoreDumps() error {
+	if err := disableCoreFiles(); err != nil {
+		return err
+	}
+	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+		return fmt.Errorf("prctl PR_SET_DUMPABLE: %w", err)
+	}
+	return nil
+}
+
+// disableCoreFiles sets RLIMIT_CORE=0 WITHOUT touching PR_SET_DUMPABLE.
+// It is the core control for the credential-resolution helper (P0-1),
+// which must remain kernel-dumpable so AegisKeys can verify
+// /proc/<pid>/exe for peer authentication. The rlimit still blocks
+// file-backed cores; a piped collector could in principle receive a heap
+// holding at most the one in-flight credential, which is the documented
+// residual of the helper design (millisecond lifetime, service-UID
+// domain).
+func disableCoreFiles() error {
 	var old unix.Rlimit
 	if err := unix.Getrlimit(unix.RLIMIT_CORE, &old); err != nil {
 		return fmt.Errorf("read RLIMIT_CORE: %w", err)
@@ -39,9 +57,6 @@ func disableCoreDumps() error {
 				return fmt.Errorf("set RLIMIT_CORE: %w", err)
 			}
 		}
-	}
-	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
-		return fmt.Errorf("prctl PR_SET_DUMPABLE: %w", err)
 	}
 	return nil
 }

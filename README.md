@@ -292,6 +292,24 @@ CLI instead of MCP.
 - One broker owns each database (lock file held for life); expiry is a
   visible lifecycle transition; authorized work is listed in `admin pending`
   under READY so preauthorized ops never strand.
+- Credential-resolution helper (P0-1): the long-lived broker is
+  non-dumpable (`PR_SET_DUMPABLE=0`, §11), and AegisKeys authenticates
+  Unix-socket peers by reading `/proc/<pid>/exe` — which the kernel
+  refuses for a non-dumpable process even to the same UID. In-broker
+  resolves therefore fail at the peer-identity layer by design. The fix
+  keeps the broker's posture and moves each resolve into a short-lived
+  helper process (`seqpass resolve-helper`, configured via
+  `--aegiskeys-resolve-helper`): spawned only by the broker's approved
+  execution path, one request over a private CLOEXEC socketpair
+  inherited as fd 3, credential material returns only on that
+  descriptor (stdout/stderr are /dev/null), `RLIMIT_CORE=0` blocks core
+  files while dumpability stays at the default so AegisKeys can verify
+  the helper's executable identity. The helper is the grant target —
+  an agent-spawned helper authenticates with the agent UID and is
+  denied; the helper path is operator configuration, never
+  agent-supplied. Residual: a same-UID process could ptrace the
+  millisecond-lived helper (in the isolated topology that is the
+  service UID's own trusted domain; the agent UID cannot).
 
 ## Recipient wire protocol (v1)
 

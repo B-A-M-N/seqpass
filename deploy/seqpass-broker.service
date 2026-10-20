@@ -61,6 +61,15 @@ Group=seqpass
 #   SEQPASS_SOCKET_GROUP       agent socket group        (own the agent socket+dir)
 #   SEQPASS_INTAKE_GROUP       trusted intake group      (must differ from the agent group)
 #   SEQPASS_AEGISKEYS_SOCKET   AegisKeys broker socket   (HTTP-over-Unix, never TCP)
+#   SEQPASS_RESOLVE_HELPER     trusted resolve helper    (usually /usr/local/bin/seqpass)
+#                              P0-1: AegisKeys authenticates peers by reading
+#                              /proc/<pid>/exe, which the kernel refuses for
+#                              this non-dumpable broker. Credential resolves
+#                              therefore run through a short-lived helper
+#                              process (dumpable, RLIMIT_CORE=0, spawned per
+#                              approved resolve with a private inherited
+#                              descriptor). Its executable identity is the
+#                              AegisKeys grant target.
 EnvironmentFile=/etc/default/seqpass
 
 # Stage 1 — preflight (broker not running yet).
@@ -88,7 +97,8 @@ ExecStart=/usr/local/bin/seqpass broker \
   --intake-uid ${SEQPASS_INTAKE_UIDS} \
   --socket-group ${SEQPASS_SOCKET_GROUP} \
   --intake-group ${SEQPASS_INTAKE_GROUP} \
-  --aegiskeys-socket ${SEQPASS_AEGISKEYS_SOCKET}
+  --aegiskeys-socket ${SEQPASS_AEGISKEYS_SOCKET} \
+  --aegiskeys-resolve-helper ${SEQPASS_RESOLVE_HELPER}
 
 # Stage 2 — readiness gate (bounded post-start verification). "$$" is the
 # systemd escape for a literal "$": the retry state lives in the shell, not

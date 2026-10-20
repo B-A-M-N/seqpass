@@ -80,6 +80,11 @@ func main() {
 		initCmd(os.Args[2:])
 	case "install":
 		installCmd(os.Args[2:])
+	case "resolve-helper":
+		// Trusted-executor-internal (P0-1): spawned by the broker per
+		// approved resolve. Deliberately absent from usage(): agents have
+		// no reason to invoke it, and it is not an agent surface.
+		resolveHelperCmd(os.Args[2:])
 	default:
 		usage()
 		os.Exit(1)
@@ -126,6 +131,9 @@ func brokerCmd(args []string) {
 	noRelayF := fs.Bool("no-relay-auto-deliver", false, "disable the default broker-managed relay delivery queue (F05); with it set, fulfilled relays need --auto-execute or manual admin execute")
 	aegisSock := fs.String("aegiskeys-socket", "", "AegisKeys broker socket")
 	aegisDir := fs.String("aegiskeys-dir", "", "AegisKeys config dir")
+	// P0-1: trusted credential-resolution helper (isolated deployments).
+	// Operator configuration only — never agent-supplied.
+	helperF := fs.String("aegiskeys-resolve-helper", "", "trusted resolve helper executable (short-lived dumpable process for AegisKeys peer verification); empty = in-process resolve")
 	adminUIDs := fs.String("admin-uid", "", "comma-separated admin UIDs (default: broker euid)")
 	agentUIDs := fs.String("agent-uid", "", "comma-separated approved agent UIDs (default: broker euid only)")
 	sockGroup := fs.String("socket-group", "", "agent Unix group owning the agent socket+dir (required for multi-user deployments)")
@@ -173,12 +181,13 @@ func brokerCmd(args []string) {
 		IntakeUIDs:    intakeUIDList,
 		AdminUIDs:     adminUIDList,
 		AgentUIDs:     agentUIDList, SocketGroup: *sockGroup, AegisKeysSocket: *aegisSock,
-		IntakeGroup:        *intakeGroup,
-		NoRelayAutoDeliver: *noRelayF,
-		AegisKeysDir:       *aegisDir,
-		AutoExecute:        *autoF,
-		DefaultOpTTL:       *opTTL,
-		MaxConcurrentOps:   *maxConc,
+		IntakeGroup:            *intakeGroup,
+		NoRelayAutoDeliver:     *noRelayF,
+		AegisKeysDir:           *aegisDir,
+		AegisKeysResolveHelper: *helperF,
+		AutoExecute:            *autoF,
+		DefaultOpTTL:           *opTTL,
+		MaxConcurrentOps:       *maxConc,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "broker failed: %v\n", err)

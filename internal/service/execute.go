@@ -24,13 +24,18 @@ func (s *Service) resolveCredentialMaterial(ctx context.Context, src types.Secre
 	switch src.Kind {
 	case types.SourceAegisKeys:
 		socket := s.cfg.AegisKeysSocket
-		var cli *aegiskeys.Client
-		var err error
-		if socket != "" {
-			cli, err = aegiskeys.ConnectSocket(socket)
-		} else {
-			cli, err = aegiskeys.Connect(s.cfg.AegisKeysDir)
+		if socket == "" {
+			socket = aegiskeys.SocketPath(s.cfg.AegisKeysDir)
 		}
+		// P0-1: with the trusted resolve helper configured (isolated
+		// deployments), the resolution runs in a short-lived dumpable
+		// helper so AegisKeys can verify /proc/<pid>/exe — the broker
+		// itself stays non-dumpable and cannot authenticate. The helper
+		// path is operator configuration, never agent-supplied input.
+		if s.cfg.AegisKeysResolveHelper != "" {
+			return aegisResolved(ctx, s.cfg.AegisKeysResolveHelper, socket, src.Binding, operation, opID)
+		}
+		cli, err := aegiskeys.ConnectSocket(socket)
 		if err != nil {
 			return secureops.Credential{}, err
 		}
