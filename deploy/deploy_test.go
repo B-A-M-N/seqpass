@@ -181,6 +181,79 @@ func TestUnitCompleteTopologyArguments(t *testing.T) {
 	}
 }
 
+// TestUnitSeparateAgentSocketDirectory pins the isolated-topology directory
+// split: the agent socket lives in its OWN runtime directory
+// (/run/seqpass-agent), admin and intake sockets in /run/seqpass which the
+// first ExecStartPre tightens to 0700 BEFORE the doctor preflight runs. The
+// broker's isolated-assurance validation refuses an agent socket sharing a
+// directory with admin/intake sockets (sameSocketDir check in daemon.New),
+// so the advertised configuration must provision two directories, and the
+// trusted directory must not be group-readable when the broker starts.
+// systemd-analyze verify does NOT check any of this — it validates unit
+// syntax, not SeqPass's security topology.
+func TestUnitSeparateAgentSocketDirectory(t *testing.T) {
+	sections := parseUnit(t)
+	var runtimeDirs []string
+	var runtimeMode string
+	for _, kv := range sections["Service"] {
+		switch kv[0] {
+		case "runtimedirectory":
+			runtimeDirs = append(runtimeDirs, strings.Fields(kv[1])...)
+		case "runtimedirectorymode":
+			runtimeMode = kv[1]
+		}
+	}
+	found := map[string]bool{}
+	for _, d := range runtimeDirs {
+		found[d] = true
+	}
+	if !found["seqpass"] || !found["seqpass-agent"] {
+		t.Fatalf("RuntimeDirectory must provision both the trusted dir and the separate agent dir, got %v", runtimeDirs)
+	}
+	if runtimeMode != "0750" {
+		t.Fatalf("RuntimeDirectoryMode = %q, want 0750 (group traverse for the agent dir; the trusted dir is tightened by ExecStartPre)", runtimeMode)
+	}
+	pre := directives(t, sections, "Service", "ExecStartPre")
+	if len(pre) < 2 {
+		t.Fatal("ExecStartPre is missing the directory hardening or the doctor preflight")
+	}
+	if !strings.Contains(pre[0], "chmod 0700 /run/seqpass") {
+		t.Fatalf("first ExecStartPre must tighten /run/seqpass to 0700 (admin dir must not be group-readable), got %q", pre[0])
+	}
+	if !strings.Contains(pre[1], "--topology") {
+		t.Fatalf("the doctor preflight must run AFTER the directory hardening, got %q", pre[1])
+	}
+	// The documented production defaults must reflect the split topology:
+	// agent socket in its own runtime directory, admin/intake in the
+	// tightened trusted directory. The defaults live in the unit's comment
+	// header (operators override via /etc/default/seqpass), so pin them
+	// there — a doc/topology divergence is exactly how shared-directory
+	// configurations reappear.
+	doc, err := os.ReadFile(unitFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		varName string
+		want    string
+	}{
+		{"SEQPASS_SOCKET", "/run/seqpass-agent/broker.sock"},
+		{"SEQPASS_ADMIN_SOCKET", "/run/seqpass/admin.sock"},
+		{"SEQPASS_INTAKE_SOCKET", "/run/seqpass/intake.sock"},
+	} {
+		found := false
+		for _, line := range strings.Split(string(doc), "\n") {
+			if strings.HasPrefix(line, "#") && strings.Contains(line, c.varName) && strings.Contains(line, c.want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("unit documentation for %s must advertise the separate-directory default %s (comment lines are the advertised production configuration)", c.varName, c.want)
+		}
+	}
+}
+
 func envVarsIn(s string) map[string]bool {
 	out := map[string]bool{}
 	for i := 0; i < len(s); i++ {

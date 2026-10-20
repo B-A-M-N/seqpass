@@ -52,7 +52,7 @@ Group=seqpass
 # REQUIRED (no "-" prefix: a missing file fails the unit). Keys (paths,
 # UIDs, groups — NEVER credentials):
 #   SEQPASS_DB                 broker SQLite path        (/var/lib/seqpass/broker.db)
-#   SEQPASS_SOCKET             agent socket              (/run/seqpass/broker.sock)
+#   SEQPASS_SOCKET             agent socket              (/run/seqpass-agent/broker.sock)
 #   SEQPASS_ADMIN_SOCKET       admin socket              (/run/seqpass/admin.sock)
 #   SEQPASS_INTAKE_SOCKET      trusted intake socket     (/run/seqpass/intake.sock)
 #   SEQPASS_AGENT_UIDS         approved agent UIDs       (comma-separated; must exclude the broker euid)
@@ -72,7 +72,13 @@ Group=seqpass
 #                              AegisKeys grant target.
 EnvironmentFile=/etc/default/seqpass
 
-# Stage 1 — preflight (broker not running yet).
+# Stage 1 — preflight (broker not running yet). Hardens the trusted
+# runtime directory to owner-only FIRST: systemd creates both runtime
+# directories with RuntimeDirectoryMode (0750 — the agent directory needs
+# group traverse for the approved agent group); the admin/intake directory
+# must be 0700 because the broker refuses a group-readable admin socket
+# directory. The agent directory keeps 0750.
+ExecStartPre=/bin/chmod 0700 /run/seqpass
 ExecStartPre=/usr/local/bin/seqpass doctor --topology \
   --db ${SEQPASS_DB} \
   --socket ${SEQPASS_SOCKET} \
@@ -132,11 +138,24 @@ RestrictNamespaces=yes
 SystemCallArchitectures=native
 # The only writable locations: runtime sockets and broker-owned state.
 # systemd pre-creates both with the service identity.
-RuntimeDirectory=seqpass
+#
+# TWO runtime directories (P1 topology): the agent socket directory is
+# separate from the admin/intake directory. The broker's isolated-assurance
+# validation refuses an agent socket sharing a directory with admin/intake
+# sockets, and the directory isolation is real: the agent directory
+# (/run/seqpass-agent) is created 0750 and chowned to the agent socket
+# group by the broker on start (0660 socket, group traverse via 0750's
+# r-x), while /run/seqpass is tightened to 0700 by the first
+# ExecStartPre — the 0600 admin/intake sockets inside it are unreachable
+# to agents at the filesystem layer, not merely at the socket-mode layer.
+# The service identity must be a member of the agent socket group so the
+# broker can chown the agent directory to it (operator prerequisite:
+# usermod -aG <agent-group> seqpass).
+RuntimeDirectory=seqpass seqpass-agent
 RuntimeDirectoryMode=0750
 StateDirectory=seqpass
 StateDirectoryMode=0700
-ReadWritePaths=/run/seqpass /var/lib/seqpass
+ReadWritePaths=/run/seqpass /run/seqpass-agent /var/lib/seqpass
 UMask=0077
 
 [Install]

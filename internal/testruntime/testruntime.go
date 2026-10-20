@@ -54,7 +54,18 @@ func Dir(t interface{ Name() string }) (string, error) {
 	// t.Name() contains "/" for subtests, which MkdirTemp rejects as a
 	// pattern, so a subtest could never obtain a runtime directory and would
 	// silently skip even when the socket suites are required to run.
-	dir, err := os.MkdirTemp(root, "seqpass-test-"+strings.ReplaceAll(t.Name(), "/", "_")+"-")
+	//
+	// The name is also TRUNCATED: AF_UNIX bind addresses are limited to
+	// 107 bytes, and these directories host sockets (broker.sock etc.). A
+	// long test name pushed the socket path past the limit and the bind
+	// failed with EINVAL ("bind: invalid argument") — only visible when
+	// SEQPASS_TEST_RUNTIME_DIR is set, i.e. exactly during qualification.
+	// Uniqueness comes from MkdirTemp's random suffix, not the name.
+	name := strings.ReplaceAll(t.Name(), "/", "_")
+	if len(name) > 24 {
+		name = name[:24]
+	}
+	dir, err := os.MkdirTemp(root, "seqpass-test-"+name+"-")
 	if err != nil {
 		return "", &BlockedError{Path: root, Err: err}
 	}

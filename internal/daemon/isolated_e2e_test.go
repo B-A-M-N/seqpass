@@ -108,17 +108,25 @@ func isolatedTestConfig(root string, agentUID uint32, group string) Config {
 	}
 }
 
-// prepareIsolatedDirs creates the two socket directories the isolated topology
-// requires: a group-traversable agent directory (0710) and an owner-only
-// trusted directory (0700).
+// prepareIsolatedDirs creates the two socket directories the ADVERTISED
+// production configuration requires (deploy/seqpass-broker.service):
+//   - the agent runtime directory as systemd creates it with
+//     RuntimeDirectoryMode=0750 (group r-x gives the approved agent group
+//     traverse; the broker chowns it to the agent group on start)
+//   - the trusted runtime directory AFTER the first ExecStartPre tightens
+//     it to 0700 (the broker refuses a group-readable admin socket dir).
+//
+// This keeps the e2e tests exercising the exact directory shape the unit
+// advertises, so a live verified verdict here certifies the production
+// topology — not a 0710 variant no unit creates.
 func prepareIsolatedDirs(t *testing.T, root string) {
 	t.Helper()
 	for _, d := range []struct {
 		name string
 		mode os.FileMode
 	}{
-		{"agent", 0710},
-		{"trusted", 0700},
+		{"agent", 0750},   // RuntimeDirectory=seqpass-agent RuntimeDirectoryMode=0750
+		{"trusted", 0700}, // RuntimeDirectory=seqpass + ExecStartPre chmod 0700
 	} {
 		p := filepath.Join(root, d.name)
 		if err := os.Mkdir(p, d.mode); err != nil {
@@ -143,7 +151,7 @@ func TestIsolatedRefusalHappensAtTheLiveBoundary(t *testing.T) {
 	if !ok {
 		t.Skip(reason)
 	}
-	root, err := testruntime.Dir(t)
+	root, err := testruntime.Dir(testruntime.NamedFunc("iso-e2e-refusal"))
 	if err != nil {
 		testruntime.Skip(t, err)
 		return
@@ -200,7 +208,7 @@ func TestIsolatedDeploymentStartsWithVerifiedBoundary(t *testing.T) {
 	if !ok {
 		t.Skip(reason)
 	}
-	root, err := testruntime.Dir(t)
+	root, err := testruntime.Dir(testruntime.NamedFunc("iso-e2e-positive"))
 	if err != nil {
 		testruntime.Skip(t, err)
 		return
@@ -220,6 +228,25 @@ func TestIsolatedDeploymentStartsWithVerifiedBoundary(t *testing.T) {
 
 	if got := d.srv.AssuranceLabel(); got != "verified" {
 		t.Fatalf("assurance label = %q, want verified for a confirmed isolated topology", got)
+	}
+	// Advertised-topology assertion (deploy/seqpass-broker.service): the
+	// agent socket directory must be group-owned by the agent group with
+	// group traverse and NO group/other write; the trusted directory must
+	// be owner-only so the admin/intake sockets inside are unreachable to
+	// agents at the filesystem layer.
+	afi, err := os.Stat(filepath.Dir(cfg.SocketPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aperm := afi.Mode().Perm(); aperm != 0750 {
+		t.Fatalf("agent socket dir mode = %v, want 0750 (RuntimeDirectoryMode)", aperm)
+	}
+	tfi, err := os.Stat(filepath.Dir(cfg.AdminSocket))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tperm := tfi.Mode().Perm(); tperm != 0700 {
+		t.Fatalf("trusted socket dir mode = %v, want 0700 (admin/intake unreachable to agents at the fs layer)", tperm)
 	}
 	// A verified start must also report an intact boundary: the fingerprint
 	// captured at startup has to match the topology that is now running.
