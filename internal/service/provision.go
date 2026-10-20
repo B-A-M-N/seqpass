@@ -175,7 +175,7 @@ func (s *Service) provisionedSocket() string {
 // ExecuteUse) — no second scheduler, no implicit authorization.
 func (s *Service) ProvisionCredential(ctx context.Context, caller, mode string, req aegiskeys.ProvisionRequest, intent *UseIntent) (*ProvisionReport, *types.SecretReference, error) {
 	if !validIntakePersistence(mode) {
-		return nil, nil, fmt.Errorf("unknown persistence mode %q: use use_once, save_only or save_and_use", mode)
+		return nil, nil, fmt.Errorf("unknown persistence mode %q: use use_once, save_only, save_and_use or transient_once", mode)
 	}
 	if err := aegiskeys.ValidProvisionRequest(req); err != nil {
 		return nil, nil, err
@@ -266,7 +266,14 @@ func (s *Service) ProvisionCredential(ctx context.Context, caller, mode string, 
 // at-most-once: one approved operation consumes the staged bytes at the
 // dispatch barrier.
 func (s *Service) stageTransientOnce(caller string, req aegiskeys.ProvisionRequest) (*ProvisionReport, *types.SecretReference, error) {
-	if prior, err := s.db.GetSecretRefByProvisionRequest(req.RequestID); err == nil && prior != nil {
+	prior, lerr := s.db.GetSecretRefByProvisionRequest(req.RequestID)
+	if lerr != nil {
+		// Fail closed: a lookup failure must never let staging proceed
+		// blind — a second reference under a colliding request ID would
+		// break the single-shot exactly-once contract.
+		return nil, nil, fmt.Errorf("transient single-shot lookup failed: %w", lerr)
+	}
+	if prior != nil {
 		// A retry (new staging attempt under the same request ID) can
 		// never resurrect the ephemeral bytes — refuse both re-staging
 		// and provider-style reconciliation.
@@ -296,8 +303,12 @@ func (s *Service) stageTransientOnce(caller string, req aegiskeys.ProvisionReque
 	key := transientPayloadKey(ref.ID)
 	if err := s.eph.Store(key, []byte(req.Value), transientOnceTTL); err != nil {
 		// Refuse closed: without staged bytes the reference is dead —
-		// mark it failed so surfaces never present it as usable.
-		_ = s.db.UpdateSecretRefProvisionState(ref.ID, types.ProvisionReconcileFailed, "", "")
+		// mark it failed so surfaces never present it as usable. A
+		// persist failure of that mark is surfaced, never swallowed: a
+		// write-ahead row left unmarked must not pass silently.
+		if merr := s.db.UpdateSecretRefProvisionState(ref.ID, types.ProvisionReconcileFailed, "", ""); merr != nil {
+			return nil, ref, fmt.Errorf("transient staging failed (%v) AND the failure mark could not be persisted: %w", err, merr)
+		}
 		return nil, ref, fmt.Errorf("transient staging failed: %w", err)
 	}
 	s.audit(ref.ID, "credential_transient_staged", caller, req.Binding, transientOnceTTL.String())

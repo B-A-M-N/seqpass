@@ -17,6 +17,7 @@ package service
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -207,5 +208,28 @@ func TestTransientOnceAtMostOnceDispatch(t *testing.T) {
 	}
 	if n != 2 {
 		t.Fatalf("%d use requests exist, want exactly 2 (one executed, one failed closed)", n)
+	}
+}
+
+// TestTransientOnceLookupFailureFailsClosed (review hardening): a
+// single-shot prior-reference lookup FAILURE must refuse staging instead
+// of proceeding blind — a second durable reference under a colliding
+// request ID would break the exactly-once contract. A closed store makes
+// the lookup fail: the refusal must name the lookup, not a later write.
+func TestTransientOnceLookupFailureFailsClosed(t *testing.T) {
+	svc := testService(t)
+	if err := svc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := aegiskeys.ProvisionRequest{
+		RequestID: "prov-t-lookupfail", Value: "x", Service: "svc", Label: "L",
+		Kind: "api-key", Binding: "seqpass/tlf", Operations: []string{"test.credential_save"},
+	}
+	_, _, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeTransientOnce, req, nil)
+	if err == nil {
+		t.Fatal("staging proceeded with a failed single-shot lookup")
+	}
+	if !strings.Contains(err.Error(), "lookup failed") {
+		t.Fatalf("refusal is not the fail-closed lookup error: %v", err)
 	}
 }
