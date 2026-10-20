@@ -1,13 +1,21 @@
 package metadata
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+
+	"github.com/secretbridge/secretbridge/internal/aegiskeys"
 )
 
 type DB struct {
@@ -97,7 +105,8 @@ CREATE TABLE IF NOT EXISTS secret_refs (
   record_id TEXT,
   binding_id TEXT,
   reconcile_status TEXT,
-  use_once BOOLEAN NOT NULL DEFAULT 0
+  use_once BOOLEAN NOT NULL DEFAULT 0,
+  request_commitment TEXT
 );
 
 CREATE TABLE IF NOT EXISTS destinations (
@@ -385,9 +394,12 @@ CREATE INDEX IF NOT EXISTS pui_ref_idx ON provision_use_intents(ref_id);
 // restart rotation detection — the private key never leaves non-dumpable
 // memory); version 6 adds provision_use_intents (the durable save_and_use
 // continuation record — the intended operation reviewed at save time,
-// persisted BEFORE any approval exists; P0-B). Older databases take the
+// persisted BEFORE any approval exists; P0-B); version 7 adds
+// secret_refs.request_commitment (the keyed full-request-identity
+// commitment — HMAC under the broker-local secret, never plaintext or an
+// unkeyed hash of the secret value; P0-D). Older databases take the
 // repair path below.
-const schemaVersion = 6
+const schemaVersion = 7
 
 func (d *DB) currentVersion() (int, error) {
 	var v int
@@ -614,6 +626,21 @@ func (d *DB) migrate() error {
 		rollback()
 		return err
 	}
+	// Version 7 ensure (P0-D): the keyed request-identity commitment on
+	// every provisioned reference. An HMAC-SHA256 under the broker-local
+	// secret (broker_state) over the FULL canonical request identity —
+	// principal, mode, service, kind, label, binding, canonical operation
+	// allowlist, expiry, description, env hint, resolver grant, and the
+	// credential VALUE — lets every later retry under the same request ID
+	// prove the request is byte-identical WITHOUT persisting plaintext or
+	// an unkeyed (dictionary-attackable) hash of the secret. Older rows
+	// (pre-P0-D) read back with an empty commitment: reconcileProvision
+	// fail-closes them (operator reconciliation required) rather than
+	// trusting a cached identity that was never committed.
+	if err := ensureColumn("secret_refs", "request_commitment", "request_commitment TEXT"); err != nil {
+		rollback()
+		return err
+	}
 	// Quarantine: live legacy operations missing any approval binding
 	// (epoch, hash or digest) can never be proven valid. Mark them failed
 	// inside the same transaction so no restart can resurrect them.
@@ -675,7 +702,7 @@ func (d *DB) backupPreMigration(from int) error {
 func (d *DB) verifySchema() error {
 	expected := map[string][]string{
 		"authorization_state":     {"id", "epoch"},
-		"secret_refs":             {"id", "name", "binding"},
+		"secret_refs":             {"id", "name", "binding", "reconcile_status", "request_commitment"},
 		"destinations":            {"id", "endpoint", "source_repo", "revision", "expected_uid", "expected_gid"},
 		"policies":                {"id", "rules", "revision"},
 		"transfers":               {"id", "status", "revision", "auth_epoch", "dest_digest", "dest_revision", "op_hash"},
@@ -755,6 +782,72 @@ func (d *DB) SetBrokerState(key, value string) error {
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
 		key, value, time.Now())
 	return err
+}
+
+// brokerCommitmentKeyState is the broker_state row holding the keyed
+// commitment secret (P0-D). It is a fresh 256-bit random value generated
+// at first use and persisted ONLY in broker_state — the same broker-local
+// durable store the attest public half uses. It is a SECRET (it authenticates
+// commitments covering credential values), but it is a broker-generated
+// random key, never user credential material.
+const brokerCommitmentKeyState = "request_commitment_key"
+
+// RequestCommitmentKey returns the broker-local keyed-commitment secret,
+// creating (crypto/rand) and persisting it on first use. Generation and
+// persistence are single-shot: the key the database first persisted stays
+// the verification key for its lifetime — a rotated key would orphan every
+// existing commitment.
+func (d *DB) RequestCommitmentKey() (string, error) {
+	if v, ok, err := d.GetBrokerState(brokerCommitmentKeyState); err != nil {
+		return "", err
+	} else if ok && v != "" {
+		return v, nil
+	}
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("commitment key randomness unavailable: %w", err)
+	}
+	key := hex.EncodeToString(b)
+	if err := d.SetBrokerState(brokerCommitmentKeyState, key); err != nil {
+		return "", err
+	}
+	return key, nil
+}
+
+// ProvisionRequestCommitment computes the keyed commitment over the FULL
+// canonical request identity (P0-D): length-framed parts under a domain
+// separator (SC-01 — no delimiter ambiguity), HMAC-SHA256 under the
+// broker-local secret. Because the secret never leaves the broker and the
+// commitment covers the credential VALUE, a database leak yields neither
+// plaintext nor an unkeyed (dictionary-attackable) hash of the secret; an
+// altered replay under the same request ID fails verification.
+func (d *DB) ProvisionRequestCommitment(principal, mode string, req aegiskeys.ProvisionRequest) (string, error) {
+	key, err := d.RequestCommitmentKey()
+	if err != nil {
+		return "", err
+	}
+	ops := make([]string, len(req.Operations))
+	copy(ops, req.Operations)
+	sort.Strings(ops) // canonical operation allowlist: order never matters
+	var expiry string
+	if req.ExpiresAt != nil {
+		expiry = req.ExpiresAt.UTC().Format(time.RFC3339Nano)
+	}
+	var grant string
+	if req.ResolverGrant != nil {
+		grant = CanonicalOpHash("grant", req.ResolverGrant.ExecutablePath, req.ResolverGrant.AttestKey,
+			req.ResolverGrant.ExpiresAt.UTC().Format(time.RFC3339Nano))
+	}
+	mac := hmac.New(sha256.New, []byte(key))
+	parts := []string{"seqpass-provision-request/v1", principal, mode, req.RequestID, req.Service,
+		req.Label, req.Kind, req.Binding, strings.Join(ops, ","), expiry, req.Description, req.EnvVarHint, grant, req.Value}
+	for _, p := range parts {
+		var lb [8]byte
+		binary.BigEndian.PutUint64(lb[:], uint64(len(p)))
+		mac.Write(lb[:])
+		mac.Write([]byte(p))
+	}
+	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
 // withAuthMutation runs fn inside a single IMMEDIATE transaction and bumps

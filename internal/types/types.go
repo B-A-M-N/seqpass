@@ -31,6 +31,15 @@ type SecretReference struct {
 	// UseOnce marks a use-once intake reference: consumed (failed closed)
 	// after its first successful execution.
 	UseOnce bool `json:"use_once,omitempty"`
+	// RequestCommitment (P0-D) is the KEYED commitment (HMAC-SHA256 under
+	// a broker-local secret in broker_state) over the FULL canonical
+	// request identity: principal, mode, service, kind, label, binding,
+	// canonical operation allowlist, expiry, description, env hint,
+	// resolver grant — and the credential VALUE itself. It lets any later
+	// retry under the same request ID prove the request is byte-identical
+	// WITHOUT persisting plaintext or an unkeyed (dictionary-attackable)
+	// hash of the secret. Empty on plain (non-provisioned) references.
+	RequestCommitment string `json:"request_commitment,omitempty"`
 }
 
 // ProvisionUseIntent is the durable continuation record for a

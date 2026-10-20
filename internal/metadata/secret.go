@@ -23,10 +23,10 @@ func (d *DB) CreateSecretRef(sr *types.SecretReference) error {
 	_, err := d.withAuthMutation(func(tx *sql.Tx) error {
 		_, err := tx.Exec(`
 			INSERT INTO secret_refs (id, name, description, owner, binding, created_at, updated_at,
-				provision_request_id, record_id, binding_id, reconcile_status, use_once)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				provision_request_id, record_id, binding_id, reconcile_status, use_once, request_commitment)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`, sr.ID, sr.Name, sr.Description, sr.Owner, sr.Binding, sr.CreatedAt, sr.UpdatedAt,
-			sr.ProvisionRequestID, sr.RecordID, sr.BindingID, sr.ReconcileStatus, sr.UseOnce)
+			sr.ProvisionRequestID, sr.RecordID, sr.BindingID, sr.ReconcileStatus, sr.UseOnce, sr.RequestCommitment)
 		return err
 	})
 	return err
@@ -38,14 +38,14 @@ func (d *DB) CreateSecretRef(sr *types.SecretReference) error {
 // unrestricted.
 func (d *DB) GetSecretRef(id string) (*types.SecretReference, error) {
 	sr := &types.SecretReference{}
-	var binding, provisionRequestID, recordID, bindingID, reconcileStatus sql.NullString
+	var binding, provisionRequestID, recordID, bindingID, reconcileStatus, requestCommitment sql.NullString
 	var useOnce sql.NullBool
 	err := d.db.QueryRow(`
 		SELECT id, name, description, owner, binding, created_at, updated_at,
-			provision_request_id, record_id, binding_id, reconcile_status, use_once
+			provision_request_id, record_id, binding_id, reconcile_status, use_once, request_commitment
 		FROM secret_refs WHERE id = ?
 	`, id).Scan(&sr.ID, &sr.Name, &sr.Description, &sr.Owner, &binding, &sr.CreatedAt, &sr.UpdatedAt,
-		&provisionRequestID, &recordID, &bindingID, &reconcileStatus, &useOnce)
+		&provisionRequestID, &recordID, &bindingID, &reconcileStatus, &useOnce, &requestCommitment)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -67,6 +67,9 @@ func (d *DB) GetSecretRef(id string) (*types.SecretReference, error) {
 	if reconcileStatus.Valid {
 		sr.ReconcileStatus = reconcileStatus.String
 	}
+	if requestCommitment.Valid {
+		sr.RequestCommitment = requestCommitment.String
+	}
 	if useOnce.Valid {
 		sr.UseOnce = useOnce.Bool
 	}
@@ -76,7 +79,7 @@ func (d *DB) GetSecretRef(id string) (*types.SecretReference, error) {
 func (d *DB) ListSecretRefs() ([]*types.SecretReference, error) {
 	rows, err := d.db.Query(`
 		SELECT id, name, description, owner, binding, created_at, updated_at,
-			provision_request_id, record_id, binding_id, reconcile_status, use_once
+			provision_request_id, record_id, binding_id, reconcile_status, use_once, request_commitment
 		FROM secret_refs ORDER BY created_at DESC
 	`)
 	if err != nil {
@@ -87,10 +90,10 @@ func (d *DB) ListSecretRefs() ([]*types.SecretReference, error) {
 	var refs []*types.SecretReference
 	for rows.Next() {
 		sr := &types.SecretReference{}
-		var binding, provisionRequestID, recordID, bindingID, reconcileStatus sql.NullString
+		var binding, provisionRequestID, recordID, bindingID, reconcileStatus, requestCommitment sql.NullString
 		var useOnce sql.NullBool
 		if err := rows.Scan(&sr.ID, &sr.Name, &sr.Description, &sr.Owner, &binding, &sr.CreatedAt, &sr.UpdatedAt,
-			&provisionRequestID, &recordID, &bindingID, &reconcileStatus, &useOnce); err != nil {
+			&provisionRequestID, &recordID, &bindingID, &reconcileStatus, &useOnce, &requestCommitment); err != nil {
 			return nil, err
 		}
 		if binding.Valid {
@@ -107,6 +110,9 @@ func (d *DB) ListSecretRefs() ([]*types.SecretReference, error) {
 		}
 		if reconcileStatus.Valid {
 			sr.ReconcileStatus = reconcileStatus.String
+		}
+		if requestCommitment.Valid {
+			sr.RequestCommitment = requestCommitment.String
 		}
 		if useOnce.Valid {
 			sr.UseOnce = useOnce.Bool

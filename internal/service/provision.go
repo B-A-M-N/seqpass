@@ -14,6 +14,7 @@ package service
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"time"
@@ -194,6 +195,16 @@ func (s *Service) ProvisionCredential(ctx context.Context, caller, mode string, 
 	// Write-ahead durable reference BEFORE any provider call: a crash
 	// after the provider committed but before the response arrived leaves
 	// an 'uncertain' record that the retry reconciles — never a duplicate.
+	// P0-D: the write-ahead row carries the keyed commitment over the
+	// FULL canonical request identity (principal, mode, service, kind,
+	// label, binding, canonical operations, expiry, hints, resolver
+	// grant, and the value itself), so no later replay under the same
+	// request ID can be concealed by the local cache. No plaintext and no
+	// unkeyed hash of the secret is ever persisted.
+	commitment, cerr := s.db.ProvisionRequestCommitment(caller, mode, req)
+	if cerr != nil {
+		return nil, nil, fmt.Errorf("provision commitment failed: %w", cerr)
+	}
 	ref = &types.SecretReference{
 		Name:               req.Label,
 		Description:        req.Description,
@@ -202,6 +213,7 @@ func (s *Service) ProvisionCredential(ctx context.Context, caller, mode string, 
 		ProvisionRequestID: req.RequestID,
 		ReconcileStatus:    types.ProvisionReconcilePending,
 		UseOnce:            mode == IntakeUseOnce,
+		RequestCommitment:  commitment,
 	}
 	if err := s.db.CreateSecretRef(ref); err != nil {
 		return nil, nil, fmt.Errorf("provision write-ahead failed: %w", err)
@@ -304,11 +316,27 @@ func (s *Service) reconcileProvision(ctx context.Context, caller, mode string, r
 	case types.ProvisionReconcileFailed:
 		return nil, ref, errors.New("provisioning previously refused: submit a NEW request ID after correcting the request")
 	}
-	// Identity anchor: same request ID must carry the same binding and
-	// service. Label/kind drift is also refused: the durable reference is
-	// the SeqPass-side identity of this request.
-	if ref.Binding != req.Binding || ref.Owner != caller {
-		return nil, ref, errors.New("provisioning request identity mismatch (binding/owner changed under the same request ID)")
+	// P0-D full request-identity reconciliation: the local cache must not
+	// conceal an altered replay. Every retry under the same request ID
+	// re-proves the request byte-identical to what was originally
+	// reviewed: principal, mode, service, kind, label, binding, canonical
+	// operation allowlist, expiry, description, env hint, resolver grant
+	// AND the secret value are all covered by the keyed commitment stored
+	// on the durable reference (HMAC under the broker-local secret — no
+	// plaintext and no unkeyed hash of the secret is ever persisted).
+	// Legacy rows without a commitment (pre-P0-D) fail closed: an
+	// identity that was never committed cannot be trusted from the cache.
+	if ref.RequestCommitment == "" {
+		return nil, ref, errors.New("provisioning request has no recorded identity commitment (pre-existing reference): operator reconciliation required before any retry")
+	}
+	want, cerr := s.db.ProvisionRequestCommitment(caller, mode, req)
+	if cerr != nil {
+		return nil, ref, fmt.Errorf("provision commitment failed: %w", cerr)
+	}
+	if subtle.ConstantTimeCompare([]byte(want), []byte(ref.RequestCommitment)) != 1 {
+		s.audit(ref.ID, "credential_request_identity_conflict", caller, req.Binding,
+			"retry under the same request ID altered the reviewed request (principal/mode/service/kind/label/binding/operations/expiry/value)")
+		return nil, ref, errors.New("provisioning request identity mismatch: the request differs from what this request ID originally reviewed (P0-D); submit a NEW request ID or reconcile with the operator")
 	}
 	switch ref.ReconcileStatus {
 	case types.ProvisionReconcileCommitted, types.ProvisionReconcileReady, types.ProvisionReconcileGrantPresent:
