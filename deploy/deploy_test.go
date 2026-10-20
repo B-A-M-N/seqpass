@@ -179,6 +179,17 @@ func TestUnitCompleteTopologyArguments(t *testing.T) {
 	if !strings.Contains(startArgv, "--aegiskeys-resolve-helper ${SEQPASS_RESOLVE_HELPER}") {
 		t.Fatalf("ExecStart is missing the trusted resolve helper argument: %q", startArgv)
 	}
+	// P1: the production unit must CLAIM isolated explicitly. Empty would
+	// derive isolated from the production vault today, but the claim is a
+	// security contract, not a default to be inherited silently — and
+	// best-effort (always reported unverified) must never appear in a
+	// production unit at all.
+	if !strings.Contains(startArgv, "--assurance isolated") {
+		t.Fatalf("ExecStart is missing the explicit --assurance isolated claim: %q", startArgv)
+	}
+	if strings.Contains(startArgv, "best-effort") {
+		t.Fatalf("ExecStart claims best-effort assurance: a production unit must claim isolated, never best-effort: %q", startArgv)
+	}
 }
 
 // TestUnitSeparateAgentSocketDirectory pins the isolated-topology directory

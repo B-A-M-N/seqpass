@@ -94,6 +94,7 @@ ExecStartPre=/usr/local/bin/seqpass doctor --topology \
 
 ExecStart=/usr/local/bin/seqpass broker \
   --vault aegiskeys \
+  --assurance isolated \
   --db ${SEQPASS_DB} \
   --socket ${SEQPASS_SOCKET} \
   --admin-socket ${SEQPASS_ADMIN_SOCKET} \
