@@ -101,6 +101,16 @@ type Config struct {
 	// nil; the public half is reported via the broker's attest-public
 	// status surface for the operator's grant pin.
 	AegisKeysAttestKey *aegiskeys.ExecutorAttestKey
+	// AegisKeysAttestSeedPath, when set, points at a provisioned seed file
+	// (systemd LoadCredentialEncrypted credential or equivalent root-owned
+	// 0400 file) from which the executor attest key is DERIVED
+	// deterministically: the stable-key restart mode. The key pair then
+	// survives restarts and the AegisKeys grant's attest_key pin stays
+	// valid without operator re-enrollment. Takes precedence over key
+	// generation; the seed is read once at startup and only the key pair
+	// enters memory. Empty keeps the fresh-key-per-start mode (rotation
+	// detection applies).
+	AegisKeysAttestSeedPath string
 	// AutoExecute runs the trusted in-broker worker that executes
 	// authorized operations without manual `admin execute` (C13).
 	// Approval is still required: only authorized ops are consumed, and
@@ -270,14 +280,28 @@ func New(cfg Config) (*Daemon, error) {
 		dbPath = cfg.DBPath
 	}
 	// P0-1 hardened-parent attestation: when the helper is configured
-	// without an explicit key, generate the executor key pair here — it
-	// lives only in this process's non-dumpable memory.
+	// without an explicit key, derive one from the provisioned seed file
+	// (stable-key restart mode) or generate the executor key pair here —
+	// it lives only in this process's non-dumpable memory.
 	attestKey := cfg.AegisKeysAttestKey
 	if attestKey == nil && cfg.AegisKeysResolveHelper != "" {
-		attestKey, err = aegiskeys.NewExecutorAttestKey()
-		if err != nil {
-			lease.Release()
-			return nil, fmt.Errorf("generate attest key: %w", err)
+		if cfg.AegisKeysAttestSeedPath != "" {
+			seed, serr := aegiskeys.LoadAttestSeedFile(cfg.AegisKeysAttestSeedPath)
+			if serr != nil {
+				lease.Release()
+				return nil, fmt.Errorf("load attest seed: %w", serr)
+			}
+			attestKey, serr = aegiskeys.NewExecutorAttestKeyFromSeed(seed)
+			if serr != nil {
+				lease.Release()
+				return nil, fmt.Errorf("derive attest key: %w", serr)
+			}
+		} else {
+			attestKey, err = aegiskeys.NewExecutorAttestKey()
+			if err != nil {
+				lease.Release()
+				return nil, fmt.Errorf("generate attest key: %w", err)
+			}
 		}
 	}
 	svc, err := service.New(service.Config{

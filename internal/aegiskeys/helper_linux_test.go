@@ -17,6 +17,10 @@ func TestHelperCommandMinimalEnv(t *testing.T) {
 	t.Setenv("SEQPASS_TEST_ENV_CANARY", "synthetic-secret-value")
 	t.Setenv("SEQPASS_AEGISKEYS_TOKEN", "synthetic-secret-value-2")
 	t.Setenv("GOMAXPROCS", "2")
+	// systemd's LoadCredentialEncrypted exposes the stable-key seed through
+	// CREDENTIALS_DIRECTORY: a credential the broker may hold but the
+	// helper must never see.
+	t.Setenv("CREDENTIALS_DIRECTORY", "/run/credentials/seqpass-broker")
 
 	server, child, err := socketPair()
 	if err != nil {

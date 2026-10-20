@@ -104,7 +104,38 @@ ExecStart=/usr/local/bin/seqpass broker \
   --socket-group ${SEQPASS_SOCKET_GROUP} \
   --intake-group ${SEQPASS_INTAKE_GROUP} \
   --aegiskeys-socket ${SEQPASS_AEGISKEYS_SOCKET} \
-  --aegiskeys-resolve-helper ${SEQPASS_RESOLVE_HELPER}
+  --aegiskeys-resolve-helper ${SEQPASS_RESOLVE_HELPER} \
+  --aegiskeys-attest-seed ${SEQPASS_ATTEST_SEED}
+
+# Restart strategy (P0-1 attestation): without a provisioned seed the
+# broker generates a FRESH attest key pair per start — secure, but the
+# AegisKeys grant's attest_key pin then needs operator re-enrollment after
+# every restart (rotation is surfaced via the audit log and
+# admin.attest_public). For unattended durable reuse, provision a stable
+# seed ONCE with systemd's encrypted-credential mechanism:
+#
+#   systemd-creds encrypt --name=seqpass_attest_seed \
+#     < seed-32-bytes.bin /etc/seqpass/attest-seed.cred
+#
+# then drop-in:
+#
+#   [Service]
+#   LoadCredentialEncrypted=seqpass_attest_seed:/etc/seqpass/attest-seed.cred
+#   Environment=SEQPASS_ATTEST_SEED=%d/seqpass_attest_seed
+#
+# PID 1 decrypts the credential into the unit's read-only credential
+# mount; it is never an ordinary file owned by the service UID, and the
+# resolve helper inherits NONE of it (the helper's environment is an
+# explicit allowlist that excludes CREDENTIALS_DIRECTORY). Generate the
+# seed with, e.g.: `openssl rand 32 > seed-32-bytes.bin` on a trusted
+# host. The credential file itself is root-only; the decrypted mount is
+# visible only to this unit's processes.
+#
+# Without the drop-in SEQPASS_ATTEST_SEED is unset: systemd expands
+# "${SEQPASS_ATTEST_SEED}" (braced form) to exactly one empty argument,
+# which is the documented fresh-key default — never a missing flag
+# argument. An operator using the unbraced "$SEQPASS_ATTEST_SEED" form
+# gets a missing-argument failure instead (fail-closed).
 
 # Stage 2 — readiness gate (bounded post-start verification). "$$" is the
 # systemd escape for a literal "$": the retry state lives in the shell, not

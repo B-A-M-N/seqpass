@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -980,6 +981,62 @@ func TestAttestKeyRestartRotation(t *testing.T) {
 	_ = sig
 }
 
+// TestAttestSeedStableAcrossRestarts pins the stable-key restart mode: a
+// seed derived key pair is deterministic, so restarts keep the grant's
+// attest_key pin valid — no rotation, no re-enrollment — which is the
+// unattended-durable-reuse mode for production deployments. The seed file
+// must also refuse access-widening (0400 root/service-owned only).
+func TestAttestSeedStableAcrossRestarts(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "meta.db")
+	seedPath := filepath.Join(dir, "seed")
+	seed := make([]byte, ed25519.SeedSize)
+	if _, err := rand.Read(seed); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(seedPath, seed, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	svc1, err := New(Config{DBPath: dbPath, VaultType: "memory-test", AegisKeysAttestKey: mustSeedKey(t, seed)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub1 := svc1.AegisKeysAttestPublic()
+	_ = svc1.Close()
+	svc2, err := New(Config{DBPath: dbPath, VaultType: "memory-test", AegisKeysAttestKey: mustSeedKey(t, seed)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svc2.Close()
+	if svc2.AttestRotationPending() {
+		t.Fatal("a seed-derived key must survive restarts without rotation")
+	}
+	if svc2.AegisKeysAttestPublic() != pub1 {
+		t.Fatal("seed-derived public half changed across restarts")
+	}
+	// Same identity must also come through the loader used by the daemon
+	// wiring (0400 file, owned by this identity).
+	if _, err := aegiskeys.LoadAttestSeedFile(seedPath); err != nil {
+		t.Fatalf("LoadAttestSeedFile rejected a valid 0400 seed: %v", err)
+	}
+	// Access-widened seed files are refused: the seed is a secret.
+	if err := os.Chmod(seedPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := aegiskeys.LoadAttestSeedFile(seedPath); err == nil {
+		t.Fatal("LoadAttestSeedFile accepted a group/world-readable seed")
+	}
+}
+
+func mustSeedKey(t *testing.T, seed []byte) *aegiskeys.ExecutorAttestKey {
+	t.Helper()
+	k, err := aegiskeys.NewExecutorAttestKeyFromSeed(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
+}
+
 func mustHex(t *testing.T, s string) []byte {
 	t.Helper()
 	raw, err := hex.DecodeString(s)
@@ -995,6 +1052,10 @@ func mustHex(t *testing.T, s string) []byte {
 // process must not appear in the child's environ.
 func TestResolveViaHelperHelperEnvFiltered(t *testing.T) {
 	t.Setenv("SEQPASS_TEST_ENV_CANARY", "synthetic-secret-value")
+	// The systemd credential mount env must be filtered exactly like any
+	// other non-allowlisted variable (stable-key mode holds the seed under
+	// this directory).
+	t.Setenv("CREDENTIALS_DIRECTORY", "/run/credentials/seqpass-broker")
 	outPath := filepath.Join(t.TempDir(), "env.json")
 	helperTestingCommandMode(t, "envcheck", envcheckChildArg, outPath)
 	// The child exits without a framed response, so the resolve fails —

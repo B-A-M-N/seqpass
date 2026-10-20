@@ -134,6 +134,10 @@ func brokerCmd(args []string) {
 	// P0-1: trusted credential-resolution helper (isolated deployments).
 	// Operator configuration only — never agent-supplied.
 	helperF := fs.String("aegiskeys-resolve-helper", "", "trusted resolve helper executable (short-lived dumpable process for AegisKeys peer verification); empty = in-process resolve")
+	// P0-1 restart strategy, stable-key mode: the attest seed is read from
+	// a provisioned secret file (systemd LoadCredentialEncrypted credential
+	// or a root-owned 0400 file) and never persisted or logged by SeqPass.
+	attestSeedF := fs.String("aegiskeys-attest-seed", "", "path to the 32-byte executor attest seed (systemd encrypted credential or root-owned 0400 file); enables the stable-key restart mode where the grant's attest_key pin survives restarts; empty = fresh key per start with rotation detection")
 	adminUIDs := fs.String("admin-uid", "", "comma-separated admin UIDs (default: broker euid)")
 	agentUIDs := fs.String("agent-uid", "", "comma-separated approved agent UIDs (default: broker euid only)")
 	sockGroup := fs.String("socket-group", "", "agent Unix group owning the agent socket+dir (required for multi-user deployments)")
@@ -181,13 +185,14 @@ func brokerCmd(args []string) {
 		IntakeUIDs:    intakeUIDList,
 		AdminUIDs:     adminUIDList,
 		AgentUIDs:     agentUIDList, SocketGroup: *sockGroup, AegisKeysSocket: *aegisSock,
-		IntakeGroup:            *intakeGroup,
-		NoRelayAutoDeliver:     *noRelayF,
-		AegisKeysDir:           *aegisDir,
-		AegisKeysResolveHelper: *helperF,
-		AutoExecute:            *autoF,
-		DefaultOpTTL:           *opTTL,
-		MaxConcurrentOps:       *maxConc,
+		IntakeGroup:             *intakeGroup,
+		NoRelayAutoDeliver:      *noRelayF,
+		AegisKeysDir:            *aegisDir,
+		AegisKeysResolveHelper:  *helperF,
+		AegisKeysAttestSeedPath: *attestSeedF,
+		AutoExecute:             *autoF,
+		DefaultOpTTL:            *opTTL,
+		MaxConcurrentOps:        *maxConc,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "broker failed: %v\n", err)

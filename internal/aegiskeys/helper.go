@@ -13,6 +13,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"syscall"
 	"time"
 )
 
@@ -435,6 +436,58 @@ func NewExecutorAttestKey() (*ExecutorAttestKey, error) {
 	}
 	_ = pub
 	return &ExecutorAttestKey{Private: priv}, nil
+}
+
+// NewExecutorAttestKeyFromSeed derives a deterministic ed25519 key from a
+// 32-byte seed. The restart strategy's stable-key mode: an operator
+// provisions the seed through systemd's encrypted-credential mechanism
+// (LoadCredentialEncrypted — decrypted by PID 1 into the unit's read-only
+// credential mount, never an ordinary file owned by the service UID), so
+// the key pair survives restarts and the AegisKeys grant's attest_key pin
+// stays valid across unattended restarts. The seed must be exactly
+// ed25519.SeedSize bytes; anything else is refused, not truncated.
+func NewExecutorAttestKeyFromSeed(seed []byte) (*ExecutorAttestKey, error) {
+	if len(seed) != ed25519.SeedSize {
+		return nil, fmt.Errorf("attest seed must be exactly %d bytes, got %d", ed25519.SeedSize, len(seed))
+	}
+	priv := ed25519.NewKeyFromSeed(seed)
+	return &ExecutorAttestKey{Private: priv}, nil
+}
+
+// LoadAttestSeedFile reads a provisioned seed file (systemd credential or
+// an equivalent root-owned secret). It is a hardened read: symlinks
+// refused, group/world-readable files refused, owner must be the broker
+// identity or root, and the content must be exactly 32 bytes. The seed is
+// a secret: it must never live in a file the service's same-UID peers can
+// read — the encrypted-credential mount is the intended source.
+func LoadAttestSeedFile(path string) ([]byte, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("attest seed: %w", err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("attest seed %s is a symlink", path)
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("attest seed %s is not a regular file", path)
+	}
+	if fi.Mode().Perm()&0077 != 0 {
+		return nil, fmt.Errorf("attest seed %s must not be group/world-accessible (%v)", path, fi.Mode().Perm())
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		uid := uint32(os.Geteuid())
+		if st.Uid != 0 && st.Uid != uid {
+			return nil, fmt.Errorf("attest seed %s is owned by uid %d, want root or %d", path, st.Uid, uid)
+		}
+	}
+	seed, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("attest seed read: %w", err)
+	}
+	if len(seed) != ed25519.SeedSize {
+		return nil, fmt.Errorf("attest seed %s must be exactly %d bytes, got %d", path, ed25519.SeedSize, len(seed))
+	}
+	return seed, nil
 }
 
 // PublicHex returns the hex-encoded public key for the operator's grant
