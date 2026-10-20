@@ -162,6 +162,15 @@ be pinned to that executable). Verify in the live run:
    path-checked.
 5. Crash posture: `kill -ABRT` on a mid-resolve helper produces no core file
    (`RLIMIT_CORE=0`) while the broker stays non-dumpable.
+6. Attestation (attest-key grants): pin the broker's public key (`admin
+   attest_public` on the admin socket) as the grant's `attest_key`. An
+   authorized resolve then succeeds only with the broker's signature (audit
+   shows the request was attested); a helper exec'd directly by ANY other
+   process — same UID included — is denied on signature verification, because
+   the signing key lives only in the non-dumpable broker's memory.
+7. Attestation drift: rotating the grant's `attest_key` denies every resolve
+   until the broker-side key is re-pinned — proving the signature is actually
+   verified, not merely tolerated.
 
 | Scenario | Required observation |
 | --- | --- |

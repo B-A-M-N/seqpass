@@ -307,9 +307,20 @@ CLI instead of MCP.
   the helper's executable identity. The helper is the grant target —
   an agent-spawned helper authenticates with the agent UID and is
   denied; the helper path is operator configuration, never
-  agent-supplied. Residual: a same-UID process could ptrace the
-  millisecond-lived helper (in the isolated topology that is the
-  service UID's own trusted domain; the agent UID cannot).
+  agent-supplied. Attestation closes the courier hole: the broker
+  signs every resolve with an in-memory ed25519 key (`admin
+  attest_public` retrieves the hex public half for the AegisKeys
+  grant's `attest_key` pin); the dumpable helper only carries
+  nonce+signature over the socketpair, so a same-UID process that
+  execs the helper directly still cannot produce a signature the
+  grant accepts (the private key lives in non-dumpable memory, the
+  one same-UID-unreadable store). A grant pinning an attest key never
+  matches an unattested or invalidly signed request. Residual: a
+  same-UID process could ptrace the millisecond-lived helper, but
+  what it would observe (nonce+signature over already-approved
+  binding/op) forges nothing — replay of a captured request is denied
+  by fresh-nonce attestation, and the credential itself is not
+  observable on the peer-verified socket.
 
 ## Recipient wire protocol (v1)
 
