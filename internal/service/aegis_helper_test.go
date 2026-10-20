@@ -1,7 +1,10 @@
 package service
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"crypto"
 	"crypto/ed25519"
 	"encoding/binary"
 	"encoding/hex"
@@ -10,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -100,19 +104,23 @@ func (m *helperMockBroker) peerIdentity(conn net.Conn) (uid int, exe string, err
 
 func (m *helperMockBroker) handle(conn net.Conn) {
 	defer conn.Close() //nolint:errcheck
-	// Read one HTTP-ish request: the helper client posts a JSON body.
-	req := make([]byte, 0, 1024)
-	buf := make([]byte, 512)
+	// Read one bounded HTTP request with real framing: http.ReadRequest
+	// honors Content-Length/chunked encoding, and the body is drained to
+	// EOF before decoding — a request whose headers and body arrive in
+	// separate segments must not be mistaken for a malformed one (that
+	// race once reset connections mid-exchange and intermittently failed
+	// the positive control).
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	for {
-		n, err := conn.Read(buf)
-		req = append(req, buf[:n]...)
-		if err != nil || strings.Contains(string(req), "\r\n\r\n") {
-			break
-		}
+	bufr := bufio.NewReaderSize(conn, 4096)
+	hreq, err := http.ReadRequest(bufr)
+	if err != nil {
+		httpError(conn, httpBadRequest)
+		return
 	}
-	bodyStart := strings.Index(string(req), "\r\n\r\n")
-	if bodyStart < 0 {
+	const maxMockBody = 64 << 10
+	raw, err := io.ReadAll(io.LimitReader(hreq.Body, maxMockBody+1))
+	hreq.Body.Close() //nolint:errcheck
+	if err != nil || len(raw) > maxMockBody {
 		httpError(conn, httpBadRequest)
 		return
 	}
@@ -123,7 +131,8 @@ func (m *helperMockBroker) handle(conn net.Conn) {
 		AttestNonce string `json:"attest_nonce"`
 		AttestSig   []byte `json:"attest_sig"`
 	}
-	if err := json.Unmarshal(req[bodyStart+4:], &body); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if err := dec.Decode(&body); err != nil || dec.More() {
 		httpError(conn, httpBadRequest)
 		return
 	}
@@ -366,9 +375,37 @@ func TestMain(m *testing.M) {
 		os.Exit(runHelperChild())
 	case "mock":
 		os.Exit(runMockBrokerChild())
+	case "trunc":
+		// Reads nothing; writes two raw bytes to the inherited descriptor
+		// (a truncated frame) and exits: exercises the parent's
+		// truncated-response failure path.
+		f := os.NewFile(uintptr(3), "trunc-fd")
+		if f == nil {
+			os.Exit(2)
+		}
+		_, _ = f.Write([]byte{0x00, 0x01})
+		os.Exit(0)
+	case "stall":
+		// Never responds; the parent must time-bound and reap us.
+		time.Sleep(60 * time.Second)
+		os.Exit(0)
+	}
+	// envcheck-child <outPath>: dumps the child environment to outPath and
+	// exits without a framed response (also an early-exit failure case).
+	for i, a := range os.Args {
+		if a == envcheckChildArg && i+1 < len(os.Args) {
+			lines := os.Environ()
+			if werr := os.WriteFile(os.Args[i+1], []byte(strings.Join(lines, "\n")), 0o600); werr != nil {
+				os.Exit(2)
+			}
+			os.Exit(0)
+		}
 	}
 	os.Exit(m.Run())
 }
+
+// envcheckChildArg marks the re-exec'd child that dumps its environment.
+const envcheckChildArg = "envcheck-child"
 
 func runHelperChild() int {
 	sock := os.Getenv("SEQPASS_TEST_HELPER_SOCKET")
@@ -443,12 +480,26 @@ func TestBrokerNonDumpableCannotAuthenticate(t *testing.T) {
 // would recursively run the whole suite, which is exactly the hang the
 // first run hit). Every helper-path test must call it.
 func helperTestingCommand(t *testing.T) {
+	helperTestingCommandMode(t, "helper")
+}
+
+// helperTestingCommandMode is helperTestingCommand with a specific child
+// dispatch mode ("helper", "trunc", "stall", "envcheck").
+func helperTestingCommandMode(t *testing.T, mode string, extraArgs ...string) {
 	t.Helper()
 	prev := aegiskeys.TestingHelperCommand
 	t.Cleanup(func() { aegiskeys.TestingHelperCommand = prev })
 	aegiskeys.TestingHelperCommand = func(ctx context.Context, helperPath, aegisSocket string, child *os.File) *exec.Cmd {
 		cmd := exec.CommandContext(ctx, helperPath)
-		cmd.Env = append(os.Environ(), helperModeEnv+"=helper", "SEQPASS_TEST_HELPER_SOCKET="+aegisSocket)
+		cmd.Args = append([]string{helperPath}, extraArgs...)
+		if mode == "envcheck" {
+			// The env-inheritance assertion target: the child environment
+			// must be EXACTLY the production filter output — dispatch
+			// info travels on argv, never env.
+			cmd.Env = aegiskeys.HelperEnv()
+		} else {
+			cmd.Env = append(os.Environ(), helperModeEnv+"="+mode, "SEQPASS_TEST_HELPER_SOCKET="+aegisSocket)
+		}
 		cmd.ExtraFiles = []*os.File{child}
 		return cmd
 	}
@@ -693,6 +744,215 @@ func TestResolveHelperRejectsNoDescriptor(t *testing.T) {
 	}
 	if strings.Contains(string(out), "mock-credential") {
 		t.Fatal("output contained credential material")
+	}
+}
+
+// TestMockBrokerHandlesFragmentedRequest pins correct HTTP framing in the
+// mock broker: the request headers and JSON body may arrive in separate
+// segments, and the mock must read the full Content-Length body (real
+// http.ReadRequest + bounded body read) before decoding — not decode
+// whatever happened to arrive after the header terminator. Under the old
+// terminator-only read loop this test reliably 400s on the empty body,
+// which is exactly the transport race that intermittently reset the
+// positive control's connection.
+func TestMockBrokerHandlesFragmentedRequest(t *testing.T) {
+	parent, child, err := socketPairForTest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close() //nolint:errcheck
+	defer child.Close()  //nolint:errcheck
+	serverConn, err := net.FileConn(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverConn.Close() //nolint:errcheck
+	clientConn, err := net.FileConn(child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientConn.Close() //nolint:errcheck
+
+	m := &helperMockBroker{
+		grantUID:   os.Geteuid(),
+		grantExe:   selfExe(t),
+		allowedOps: []string{"http.request"},
+		value:      "mock-credential-value",
+	}
+	done := make(chan struct{})
+	go func() {
+		m.handle(serverConn)
+		close(done)
+	}()
+
+	body := `{"binding":"seqpass/example","operation":"http.request","operation_id":"op-frag"}`
+	hdr := fmt.Sprintf("POST /v2/resolve HTTP/1.1\r\nHost: aegiskeys.local\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", len(body))
+	if _, err := clientConn.Write([]byte(hdr)); err != nil {
+		t.Fatal(err)
+	}
+	// Headers delivered; body deliberately held back across a real
+	// scheduling gap.
+	time.Sleep(50 * time.Millisecond)
+	if _, err := clientConn.Write([]byte(body)); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	hresp, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respBody, err := io.ReadAll(io.LimitReader(hresp.Body, 4096))
+	hresp.Body.Close() //nolint:errcheck
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("mock handle did not finish")
+	}
+	if hresp.StatusCode != http.StatusOK {
+		t.Fatalf("fragmented request rejected: %d %q", hresp.StatusCode, string(respBody))
+	}
+	if !strings.Contains(string(respBody), "mock-credential-value") {
+		t.Fatalf("fragmented request response missing credential: %q", string(respBody))
+	}
+}
+
+// zombieChildCount counts zombie (unreaped) children of this process by
+// scanning /proc — the observable defect when ResolveViaHelper returns
+// early without Wait()-ing the helper child.
+func zombieChildCount(t *testing.T) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	self := strconv.Itoa(os.Getpid())
+	for _, e := range entries {
+		if _, aerr := strconv.Atoi(e.Name()); aerr != nil {
+			continue
+		}
+		raw, rerr := os.ReadFile("/proc/" + e.Name() + "/stat")
+		if rerr != nil {
+			continue // process exited between listing and read
+		}
+		s := string(raw)
+		idx := strings.LastIndexByte(s, ')')
+		if idx < 0 || idx+2 >= len(s) {
+			continue
+		}
+		fields := strings.Fields(s[idx+2:])
+		if len(fields) >= 2 && fields[0] == "Z" && fields[1] == self {
+			count++
+		}
+	}
+	return count
+}
+
+// TestResolveViaHelperReapsChildrenOnFailure pins the exactly-once reaping
+// contract (P1): every early-return failure path after cmd.Start() —
+// deadline/transport failure, truncated response, a helper that never
+// responds, an attestation signing failure — must kill the child if still
+// running and Wait() exactly once. Without this, each failed exchange
+// leaves a zombie helper for the broker's remaining lifetime.
+func TestResolveViaHelperReapsChildrenOnFailure(t *testing.T) {
+	before := zombieChildCount(t)
+
+	// 1. Helper exits immediately without a framed response (early exit).
+	helperTestingCommandMode(t, "envcheck", envcheckChildArg, filepath.Join(t.TempDir(), "unused.json"))
+	_, err := aegiskeys.ResolveViaHelper(context.Background(), selfExe(t), deadSocketPath(t), "seqpass/example", "http.request", "op-z", nil)
+	if !errors.Is(err, aegiskeys.ErrTransportUnavailable) {
+		t.Fatalf("early-exit helper = %v, want transport_unavailable", err)
+	}
+
+	// 2. Helper sends a truncated frame and exits.
+	helperTestingCommandMode(t, "trunc")
+	_, err = aegiskeys.ResolveViaHelper(context.Background(), selfExe(t), deadSocketPath(t), "seqpass/example", "http.request", "op-z", nil)
+	if !errors.Is(err, aegiskeys.ErrTransportUnavailable) {
+		t.Fatalf("truncated-response helper = %v, want transport_unavailable", err)
+	}
+
+	// 3. Helper never responds: the caller's context bounds the exchange
+	// and must not hang; the killed child is reaped.
+	helperTestingCommandMode(t, "stall")
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	started := time.Now()
+	_, err = aegiskeys.ResolveViaHelper(ctx, selfExe(t), deadSocketPath(t), "seqpass/example", "http.request", "op-z", nil)
+	cancel()
+	if !errors.Is(err, aegiskeys.ErrTransportUnavailable) {
+		t.Fatalf("stalled helper = %v, want transport_unavailable", err)
+	}
+	if elapsed := time.Since(started); elapsed > 10*time.Second {
+		t.Fatalf("stalled helper exchange took %v: hang", elapsed)
+	}
+
+	// 4. Signing fails after the child is already running: the child is
+	// killed and reaped, and the ORIGINAL signing error is returned.
+	helperTestingCommandMode(t, "envcheck", envcheckChildArg, filepath.Join(t.TempDir(), "unused2.json"))
+	_, err = aegiskeys.ResolveViaHelper(context.Background(), selfExe(t), deadSocketPath(t), "seqpass/example", "http.request", "op-z", failingSigner{})
+	if !errors.Is(err, aegiskeys.ErrTransportUnavailable) || !strings.Contains(err.Error(), "attest sign") {
+		t.Fatalf("signing-failure helper = %v, want transport attest-sign error", err)
+	}
+
+	// All four exchanges: every child reaped — no zombie accumulated.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		after := zombieChildCount(t)
+		if after <= before {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("unreaped helper children: %d before, %d after 4 failed exchanges", before, after)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// deadSocketPath is a Unix socket path with no listener: the helper's
+// broker connection fails inside the child regardless of timing.
+func deadSocketPath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "no-listener.sock")
+}
+
+// failingSigner is a crypto.Signer whose Sign always fails: it drives the
+// attestation-signing failure path after the helper child is running.
+type failingSigner struct{}
+
+func (failingSigner) Public() crypto.PublicKey { return ed25519.PublicKey(make([]byte, 32)) }
+func (failingSigner) Sign(io.Reader, []byte, crypto.SignerOpts) ([]byte, error) {
+	return nil, errors.New("synthetic signer failure")
+}
+
+// TestResolveViaHelperHelperEnvFiltered proves the filter end-to-end: the
+// spawned helper process's actual environment contains no parent
+// application variables — a synthetic secret-shaped canary set in this
+// process must not appear in the child's environ.
+func TestResolveViaHelperHelperEnvFiltered(t *testing.T) {
+	t.Setenv("SEQPASS_TEST_ENV_CANARY", "synthetic-secret-value")
+	outPath := filepath.Join(t.TempDir(), "env.json")
+	helperTestingCommandMode(t, "envcheck", envcheckChildArg, outPath)
+	// The child exits without a framed response, so the resolve fails —
+	// the environ dump is the assertion target.
+	_, _ = aegiskeys.ResolveViaHelper(context.Background(), selfExe(t), deadSocketPath(t), "seqpass/example", "http.request", "op-env", nil)
+	raw, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("envcheck child did not write environ: %v", err)
+	}
+	env := string(raw)
+	if strings.Contains(env, "SEQPASS_TEST_ENV_CANARY") {
+		t.Fatal("helper inherited the synthetic secret-shaped canary variable")
+	}
+	for _, line := range strings.Split(env, "\n") {
+		if line == "" {
+			continue
+		}
+		key := strings.SplitN(line, "=", 2)[0]
+		switch key {
+		case "GODEBUG", "GOGC", "GOMEMLIMIT", "GOMAXPROCS":
+		default:
+			t.Fatalf("helper inherited non-allowlisted env %q", key)
+		}
 	}
 }
 

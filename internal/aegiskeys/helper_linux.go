@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -39,12 +40,46 @@ func socketPair() (server net.Conn, child *os.File, err error) {
 // set it.
 var TestingHelperCommand func(ctx context.Context, helperPath, aegisSocket string, child *os.File) *exec.Cmd
 
+// helperEnvAllowlist is the closed set of environment variables the helper
+// may inherit: Go runtime knobs only. Everything else in the broker's
+// environment — including anything secret-shaped — is dropped. The helper
+// needs none of the parent's application configuration: the AegisKeys
+// socket path travels on argv, the request on the inherited descriptor.
+// Non-matching variables are never forwarded, so the broker's environment
+// can never become an implicit credential channel to the helper.
+var helperEnvAllowlist = map[string]bool{
+	"GODEBUG":    true,
+	"GOGC":       true,
+	"GOMEMLIMIT": true,
+	"GOMAXPROCS": true,
+}
+
+// minimalHelperEnv builds the helper's explicit environment from the
+// allowlist above.
+func minimalHelperEnv() []string {
+	return HelperEnv()
+}
+
+// HelperEnv returns the helper child's environment: only allowlisted Go
+// runtime knobs from the current process environment. Exported for tests
+// that re-exec the test binary in helper mode (the hook must reproduce the
+// production environment exactly) and for deployment tooling that needs
+// the same filter.
+func HelperEnv() []string {
+	env := make([]string, 0, len(helperEnvAllowlist))
+	for _, kv := range os.Environ() {
+		if i := strings.IndexByte(kv, '='); i > 0 && helperEnvAllowlist[kv[:i]] {
+			env = append(env, kv)
+		}
+	}
+	return env
+}
+
 // helperCommand builds the exec of the trusted resolve helper. The child
 // receives the socketpair exclusively as fd 3; it inherits NO secret-bearing
-// environment (the parent environment contains paths and SeqPass
-// configuration only — the broker never holds credentials in env) and no
-// argv secrets (only the helper mode, the AegisKeys socket PATH, and the
-// fd number are on argv).
+// environment — only allowlisted Go runtime knobs (helperEnvAllowlist) —
+// and no argv secrets (only the helper mode, the AegisKeys socket PATH, and
+// the fd number are on argv).
 //
 // PR_SET_DUMPABLE is deliberately NOT touched here: the helper's purpose
 // is that AegisKeys can read /proc/<pid>/exe to authenticate it. Core
@@ -57,6 +92,6 @@ func helperCommand(ctx context.Context, helperPath, aegisSocket string, child *o
 		"--socket", aegisSocket,
 		"--fd", fmt.Sprint(helperDescriptorNumber))
 	cmd.ExtraFiles = []*os.File{child}
-	cmd.Env = os.Environ()
+	cmd.Env = minimalHelperEnv()
 	return cmd
 }

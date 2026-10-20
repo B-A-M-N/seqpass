@@ -237,6 +237,28 @@ func ResolveViaHelper(ctx context.Context, helperPath, aegisSocket, binding, ope
 	// The parent no longer needs its end once the child holds it.
 	child.Close() //nolint:errcheck
 
+	// Exactly-once reaping (P1): every early return below must kill the
+	// child if it is still running and Wait() it exactly once — an
+	// unreaped helper is a zombie for the broker's remaining lifetime,
+	// and repeated failed exchanges would accumulate them. exec.
+	// CommandContext's eventual kill does not replace the caller's
+	// obligation to reap.
+	waited := false
+	waitOnce := func() {
+		if waited {
+			return
+		}
+		waited = true
+		_ = cmd.Wait()
+	}
+	abortWith := func(origErr error) (CredentialMaterial, error) {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill() // no-op (ErrProcessDone) if it already exited
+		}
+		waitOnce()
+		return CredentialMaterial{}, origErr
+	}
+
 	// Socket deadline: the caller's deadline plus slack for the helper's
 	// startup and exit, or the child budget when the caller passed none.
 	deadline := time.Now().Add(12 * time.Second)
@@ -244,7 +266,7 @@ func ResolveViaHelper(ctx context.Context, helperPath, aegisSocket, binding, ope
 		deadline = d.Add(2 * time.Second)
 	}
 	if err := server.SetDeadline(deadline); err != nil {
-		return CredentialMaterial{}, fmt.Errorf("%w: helper exchange: %v", ErrTransportUnavailable, err)
+		return abortWith(fmt.Errorf("%w: helper exchange: %v", ErrTransportUnavailable, err))
 	}
 
 	// One small request frame (<= 4KiB) — the socket buffer absorbs it, so
@@ -254,27 +276,28 @@ func ResolveViaHelper(ctx context.Context, helperPath, aegisSocket, binding, ope
 	if attestKey != nil {
 		nonce, nerr := newAttestNonce()
 		if nerr != nil {
-			return CredentialMaterial{}, fmt.Errorf("%w: attest nonce: %v", ErrTransportUnavailable, nerr)
+			return abortWith(fmt.Errorf("%w: attest nonce: %v", ErrTransportUnavailable, nerr))
 		}
 		sig, serr := signAttestation(attestKey, binding, operation, operationID, nonce)
 		if serr != nil {
-			return CredentialMaterial{}, fmt.Errorf("%w: attest sign: %v", ErrTransportUnavailable, serr)
+			return abortWith(fmt.Errorf("%w: attest sign: %v", ErrTransportUnavailable, serr))
 		}
 		req.AttestNonce = nonce
 		req.AttestSig = sig
 	}
 	if err := writeFramed(server, req, helperMaxRequestBytes); err != nil {
-		return CredentialMaterial{}, fmt.Errorf("%w: helper request: %v", ErrTransportUnavailable, err)
+		return abortWith(fmt.Errorf("%w: helper request: %v", ErrTransportUnavailable, err))
 	}
 
 	var resp HelperResponse
 	if err := readFramed(server, &resp, helperMaxResponseBytes); err != nil {
-		return CredentialMaterial{}, fmt.Errorf("%w: helper exchange: %v", ErrTransportUnavailable, err)
+		return abortWith(fmt.Errorf("%w: helper exchange: %v", ErrTransportUnavailable, err))
 	}
 
 	// The helper is one-shot; reap it. CommandContext has killed it already
 	// if the context deadline fired during the exchange.
 	waitErr := cmd.Wait()
+	waited = true
 	if waitErr != nil {
 		return CredentialMaterial{}, fmt.Errorf("%w: resolve helper exited: %v", ErrTransportUnavailable, waitErr)
 	}
