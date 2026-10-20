@@ -160,11 +160,30 @@ func (c *Client) Status(ctx context.Context) (BrokerStatus, error) {
 // git.push, http.request, process.run, transfer); operation-scoped
 // bindings reject any other operation. OperationID is an opaque correlation
 // token carried into the broker audit log only — it never widens
-// authorization.
+// authorization. AttestNonce/AttestSig carry the hardened-parent
+// attestation (below); they are empty on ordinary resolves.
 type ResolveRequest struct {
 	Binding     string `json:"binding"`
 	Operation   string `json:"operation,omitempty"`
 	OperationID string `json:"operation_id,omitempty"`
+	// Hardened-parent attestation (AegisKeys attest-key grants): the
+	// NON-DUMPABLE executor signs the canonical request string with its
+	// in-memory ed25519 key; the dumpable helper child carries nonce and
+	// signature to the broker, which verifies against the operator-pinned
+	// public key. A grant pinning an attest key never matches without a
+	// valid signature — a same-UID attacker can exec the helper but cannot
+	// forge the signature (the private key lives in non-dumpable memory).
+	AttestNonce string `json:"attest_nonce,omitempty"`
+	AttestSig   []byte `json:"attest_sig,omitempty"` // ed25519 signature, base64 on the wire
+}
+
+// AttestCanonicalString mirrors broker.AttestCanonicalString byte for byte:
+// the exact string the broker requires signed when a grant pins an attest
+// key (domain-separated, binds binding reference + operation + operation
+// ID + nonce so a signature cannot be replayed across any of them). The
+// broker is authoritative; this copy must never drift.
+func AttestCanonicalString(binding, operation, operationID, nonce string) []byte {
+	return []byte("aegiskeys-broker-attest-v1\x00" + binding + "\x00" + operation + "\x00" + operationID + "\x00" + nonce)
 }
 
 // validOperationName mirrors the broker grammar ([a-z0-9._-], 1..64 chars)
@@ -222,6 +241,16 @@ func validOperationID(id string) bool {
 // AegisKeys Lock() prevents subsequent resolutions; it cannot retract
 // plaintext already resolved.
 func (c *Client) Resolve(ctx context.Context, binding, operation, operationID string) (CredentialMaterial, error) {
+	return c.ResolveAttested(ctx, binding, operation, operationID, "", nil)
+}
+
+// ResolveAttested is Resolve with hardened-parent attestation material.
+// The nonce must be fresh per request and the signature must cover
+// AttestCanonicalString(binding, operation, operationID, nonce) made with
+// the executor's in-memory ed25519 private key (the operator pinned the
+// public half in the grant). Used by the resolve-helper flow: the helper
+// carries the executor's attestation but never holds the signing key.
+func (c *Client) ResolveAttested(ctx context.Context, binding, operation, operationID, attestNonce string, attestSig []byte) (CredentialMaterial, error) {
 	if c == nil || c.http == nil {
 		return CredentialMaterial{}, ErrTransportUnavailable
 	}
@@ -234,7 +263,16 @@ func (c *Client) Resolve(ctx context.Context, binding, operation, operationID st
 	if operationID != "" && !validOperationID(operationID) {
 		return CredentialMaterial{}, fmt.Errorf("%w: operation_id", ErrRequestInvalid)
 	}
-	req := ResolveRequest{Binding: binding, Operation: operation, OperationID: operationID}
+	// Attestation bounds mirror the broker's request validation: a nonce
+	// or signature outside them is a local 400-equivalent, never a wire
+	// round trip.
+	if (attestNonce != "") != (len(attestSig) > 0) {
+		return CredentialMaterial{}, fmt.Errorf("%w: attestation requires both nonce and signature", ErrRequestInvalid)
+	}
+	if len(attestNonce) > 128 {
+		return CredentialMaterial{}, fmt.Errorf("%w: attest_nonce", ErrRequestInvalid)
+	}
+	req := ResolveRequest{Binding: binding, Operation: operation, OperationID: operationID, AttestNonce: attestNonce, AttestSig: attestSig}
 	if c.legacy {
 		return c.resolveV1(ctx, req)
 	}

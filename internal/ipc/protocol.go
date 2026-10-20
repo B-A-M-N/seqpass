@@ -30,6 +30,7 @@ const (
 	MethodOpShow          = "admin.op_show"        // reviewed-envelope display for approval (SC-02)
 	MethodVerifyOutcome   = "admin.verify_outcome" // independent postcondition check (SC-14)
 	MethodRecipientStatus = "recipient.status"     // recipient acceptance/application readback (CV-10)
+	MethodAttestPublic    = "admin.attest_public"  // P0-1: executor attest public key (admin only)
 	MethodHealth          = "health"
 	// Relay handshake (QR-03): agent requests, user fulfills.
 	MethodRelayRequest = "relay.request"
@@ -154,6 +155,10 @@ var AdminAllowlist = map[string]bool{
 	MethodVerifyOutcome:     true,
 	MethodRecipientStatus:   true,
 	MethodHealth:            true,
+	// P0-1: the operator retrieves the broker's attest public key to pin
+	// it in the AegisKeys grant (attest_key). Admin-only by construction:
+	// the key is for grant authoring, not an agent surface.
+	MethodAttestPublic: true,
 }
 
 type Request struct {

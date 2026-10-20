@@ -33,7 +33,7 @@ func (s *Service) resolveCredentialMaterial(ctx context.Context, src types.Secre
 		// itself stays non-dumpable and cannot authenticate. The helper
 		// path is operator configuration, never agent-supplied input.
 		if s.cfg.AegisKeysResolveHelper != "" {
-			return aegisResolved(ctx, s.cfg.AegisKeysResolveHelper, socket, src.Binding, operation, opID)
+			return aegisResolved(ctx, s.cfg.AegisKeysResolveHelper, socket, src.Binding, operation, opID, s.cfg.AegisKeysAttestKey)
 		}
 		cli, err := aegiskeys.ConnectSocket(socket)
 		if err != nil {

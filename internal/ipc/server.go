@@ -615,6 +615,11 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 	_ = ctx
 	p := req.Params
 	switch req.Method {
+	case MethodAttestPublic:
+		if key := s.svc.AegisKeysAttestPublic(); key != "" {
+			return Response{OK: true, Data: map[string]string{"attest_public": key}}
+		}
+		return Response{OK: false, Error: "attest key not configured (no resolve helper)"}
 	case MethodHealth:
 		mode := s.AssuranceMode
 		if mode == "" {

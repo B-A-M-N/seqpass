@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/secretbridge/secretbridge/internal/aegiskeys"
 	"github.com/secretbridge/secretbridge/internal/harness"
 	"github.com/secretbridge/secretbridge/internal/intake"
 	"github.com/secretbridge/secretbridge/internal/metadata"
@@ -46,12 +47,29 @@ type Config struct {
 	// user best-effort mode and test brokers, which do not fail peer
 	// verification).
 	AegisKeysResolveHelper string
+	// AegisKeysAttestKey is the executor's in-memory ed25519 key pair for
+	// hardened-parent attestation (P0-1, attest-key grants): the broker
+	// signs each helper-carried resolve with a fresh nonce; the dumpable
+	// helper never holds the key. When nil, resolves are unattested
+	// (grants without an attest pin still match). The public half is
+	// published to the operator for the grant's attest_key pin.
+	AegisKeysAttestKey *aegiskeys.ExecutorAttestKey
 	// RequireVerifiedHostIsolation, when set by the broker for a verified
 	// isolated deployment, withholds inline native host capture unless every
 	// agent-observable boundary property has been independently verified
 	// (objective 4.3). It can only decline to offer the stronger surface; it
 	// never upgrades assurance.
 	RequireVerifiedHostIsolation bool
+}
+
+// AegisKeysAttestPublic returns the hex public half of the executor's
+// attestation key (for the operator's AegisKeys grant attest_key pin), or
+// "" when no key is configured.
+func (s *Service) AegisKeysAttestPublic() string {
+	if s.cfg.AegisKeysAttestKey == nil {
+		return ""
+	}
+	return s.cfg.AegisKeysAttestKey.PublicHex()
 }
 
 type Service struct {

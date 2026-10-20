@@ -2,7 +2,11 @@ package aegiskeys
 
 import (
 	"context"
+	"crypto"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -70,11 +74,17 @@ const helperMaxResponseBytes = maxValueBytes + 4096
 
 // HelperRequest is the framed request the broker writes to the inherited
 // descriptor. No field is ever a secret: binding identity, logical
-// operation, and correlation token only.
+// operation, correlation token, and the hardened-parent attestation
+// (nonce + ed25519 signature over AttestCanonicalString, made by the
+// NON-DUMPABLE executor with its in-memory key). The signing key never
+// crosses this protocol — the helper carries the attestation, it does not
+// hold the key.
 type HelperRequest struct {
 	Binding     string `json:"binding"`
 	Operation   string `json:"operation"`
 	OperationID string `json:"operation_id,omitempty"`
+	AttestNonce string `json:"attest_nonce,omitempty"`
+	AttestSig   []byte `json:"attest_sig,omitempty"`
 }
 
 // HelperResponse is the framed response. On success it carries credential
@@ -175,11 +185,15 @@ func sentinelError(name string) error {
 // (systemd unit / installation config); it is never agent-supplied. The
 // helper is spawned with a private CLOEXEC socketpair as fd 3; the request
 // and the credential response travel only over that descriptor.
+// attestKey is the executor's in-memory ed25519 private key: each request
+// is signed over AttestCanonicalString with a fresh nonce (hardened-parent
+// attestation) — the helper carries the signature but never sees the key.
+// A nil key sends an unattested request (grants without an attest pin).
 //
 // The context bounds the whole exchange: a helper that hangs is killed via
 // exec.CommandContext, and the broker treats a lost exchange as
 // transport_unavailable — never as a reason to retry creation elsewhere.
-func ResolveViaHelper(ctx context.Context, helperPath, aegisSocket, binding, operation, operationID string) (CredentialMaterial, error) {
+func ResolveViaHelper(ctx context.Context, helperPath, aegisSocket, binding, operation, operationID string, attestKey crypto.Signer) (CredentialMaterial, error) {
 	if helperPath == "" {
 		return CredentialMaterial{}, fmt.Errorf("%w: resolve helper not configured", ErrTransportUnavailable)
 	}
@@ -234,8 +248,21 @@ func ResolveViaHelper(ctx context.Context, helperPath, aegisSocket, binding, ope
 	}
 
 	// One small request frame (<= 4KiB) — the socket buffer absorbs it, so
-	// the synchronous write cannot deadlock against the child's read.
+	// the synchronous write cannot deadlock against the child's read. The
+	// attestation (when the executor holds a key) is fresh per request.
 	req := HelperRequest{Binding: binding, Operation: operation, OperationID: operationID}
+	if attestKey != nil {
+		nonce, nerr := newAttestNonce()
+		if nerr != nil {
+			return CredentialMaterial{}, fmt.Errorf("%w: attest nonce: %v", ErrTransportUnavailable, nerr)
+		}
+		sig, serr := signAttestation(attestKey, binding, operation, operationID, nonce)
+		if serr != nil {
+			return CredentialMaterial{}, fmt.Errorf("%w: attest sign: %v", ErrTransportUnavailable, serr)
+		}
+		req.AttestNonce = nonce
+		req.AttestSig = sig
+	}
 	if err := writeFramed(server, req, helperMaxRequestBytes); err != nil {
 		return CredentialMaterial{}, fmt.Errorf("%w: helper request: %v", ErrTransportUnavailable, err)
 	}
@@ -325,13 +352,76 @@ func resolveInHelper(aegisSocket string, req HelperRequest) (CredentialMaterial,
 	if req.OperationID != "" && !validOperationID(req.OperationID) {
 		return CredentialMaterial{}, fmt.Errorf("%w: operation_id", ErrRequestInvalid)
 	}
+	// Attestation pass-through bounds (mirror the broker's request
+	// validation; the helper is a courier, not the signer).
+	if (req.AttestNonce != "") != (len(req.AttestSig) > 0) {
+		return CredentialMaterial{}, fmt.Errorf("%w: attestation requires both nonce and signature", ErrRequestInvalid)
+	}
+	if len(req.AttestNonce) > 128 || len(req.AttestSig) > ed25519.SignatureSize {
+		return CredentialMaterial{}, fmt.Errorf("%w: attestation bounds", ErrRequestInvalid)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	cli, err := ConnectSocket(aegisSocket)
 	if err != nil {
 		return CredentialMaterial{}, err
 	}
-	return cli.Resolve(ctx, req.Binding, req.Operation, req.OperationID)
+	return cli.ResolveAttested(ctx, req.Binding, req.Operation, req.OperationID, req.AttestNonce, req.AttestSig)
+}
+
+// newAttestNonce generates a fresh single-use nonce (hardened-parent
+// attestation; the broker treats replayed request content as a fresh
+// signature requirement, so a stale nonce is useless to an attacker).
+func newAttestNonce() (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(raw[:]), nil
+}
+
+// signAttestation signs the broker's canonical request string with the
+// executor's in-memory ed25519 key. Only ed25519 keys are accepted: the
+// grant pin format is a hex ed25519 public key.
+func signAttestation(key crypto.Signer, binding, operation, operationID, nonce string) ([]byte, error) {
+	pub, ok := key.Public().(ed25519.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("attest key must be ed25519, got %T", key.Public())
+	}
+	_ = pub
+	opts := crypto.Hash(0) //nolint:staticcheck — ed25519 signs raw bytes
+	return key.Sign(nil, AttestCanonicalString(binding, operation, operationID, nonce), opts)
+}
+
+// ExecutorAttestKey is the hardened executor's in-memory ed25519 key pair
+// (P0-1 attestation). The broker is long-lived and non-dumpable
+// (PR_SET_DUMPABLE=0): its memory is the one same-UID-unreadable store the
+// kernel provides, so the private key held there cannot be read or forged
+// by same-UID code. Generate one at broker startup and pass it to every
+// ResolveViaHelper call; publish the hex public half to the operator for
+// the AegisKeys grant's attest_key pin.
+type ExecutorAttestKey struct {
+	Private crypto.Signer
+}
+
+// NewExecutorAttestKey generates a fresh ed25519 key pair.
+func NewExecutorAttestKey() (*ExecutorAttestKey, error) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	_ = pub
+	return &ExecutorAttestKey{Private: priv}, nil
+}
+
+// PublicHex returns the hex-encoded public key for the operator's grant
+// attest_key pin (display/audit only — never a secret, never agent-visible).
+func (k *ExecutorAttestKey) PublicHex() string {
+	pub, ok := k.Private.Public().(ed25519.PublicKey)
+	if !ok {
+		return ""
+	}
+	return hex.EncodeToString(pub)
 }
 
 // helperDescriptorNumber is the fd the broker passes to the helper.

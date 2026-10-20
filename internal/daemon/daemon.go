@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/secretbridge/secretbridge/internal/aegiskeys"
 	"github.com/secretbridge/secretbridge/internal/config"
 	"github.com/secretbridge/secretbridge/internal/harness"
 	"github.com/secretbridge/secretbridge/internal/intake"
@@ -93,6 +94,13 @@ type Config struct {
 	// helper executable (P0-1). Operator configuration only; empty keeps
 	// the in-process resolve path.
 	AegisKeysResolveHelper string
+	// AegisKeysAttestKey, when set, is the executor's in-memory ed25519
+	// key pair used to sign each helper-carried resolve (hardened-parent
+	// attestation for AegisKeys attest-key grants). The daemon generates
+	// one automatically when AegisKeysResolveHelper is set and this is
+	// nil; the public half is reported via the broker's attest-public
+	// status surface for the operator's grant pin.
+	AegisKeysAttestKey *aegiskeys.ExecutorAttestKey
 	// AutoExecute runs the trusted in-broker worker that executes
 	// authorized operations without manual `admin execute` (C13).
 	// Approval is still required: only authorized ops are consumed, and
@@ -261,6 +269,17 @@ func New(cfg Config) (*Daemon, error) {
 	if dbPath == "" {
 		dbPath = cfg.DBPath
 	}
+	// P0-1 hardened-parent attestation: when the helper is configured
+	// without an explicit key, generate the executor key pair here — it
+	// lives only in this process's non-dumpable memory.
+	attestKey := cfg.AegisKeysAttestKey
+	if attestKey == nil && cfg.AegisKeysResolveHelper != "" {
+		attestKey, err = aegiskeys.NewExecutorAttestKey()
+		if err != nil {
+			lease.Release()
+			return nil, fmt.Errorf("generate attest key: %w", err)
+		}
+	}
 	svc, err := service.New(service.Config{
 		DBPath:          dbPath,
 		VaultType:       cfg.VaultType,
@@ -269,6 +288,7 @@ func New(cfg Config) (*Daemon, error) {
 		// P0-1: operator-configured trusted resolve helper (isolated
 		// deployments); empty keeps the in-process resolve path.
 		AegisKeysResolveHelper: cfg.AegisKeysResolveHelper,
+		AegisKeysAttestKey:     attestKey,
 		DefaultOpTTL:           cfg.DefaultOpTTL,
 		MaxConcurrentOps:       cfg.MaxConcurrentOps,
 		// Objective 4.3: an isolated deployment withholds inline native

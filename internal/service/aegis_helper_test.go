@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,6 +48,10 @@ type helperMockBroker struct {
 	grantExe   string
 	allowedOps []string
 	value      string
+	// attestKey, when set, mirrors the AegisKeys attest-key grant: resolve
+	// requires a valid ed25519 signature over the canonical request string.
+	attestKey  ed25519.PublicKey
+	seenNonces map[string]bool
 	// SO_PEERCRED pid of the last connection, logged with the audit
 	// record so tests can assert WHICH process resolved (helper, not
 	// broker: the resolving process identity is the P0-1 mechanism).
@@ -114,6 +120,8 @@ func (m *helperMockBroker) handle(conn net.Conn) {
 		Binding     string `json:"binding"`
 		Operation   string `json:"operation"`
 		OperationID string `json:"operation_id"`
+		AttestNonce string `json:"attest_nonce"`
+		AttestSig   []byte `json:"attest_sig"`
 	}
 	if err := json.Unmarshal(req[bodyStart+4:], &body); err != nil {
 		httpError(conn, httpBadRequest)
@@ -150,7 +158,36 @@ func (m *helperMockBroker) handle(conn net.Conn) {
 		httpError(conn, httpForbidden)
 		return
 	}
-	fmt.Printf("AUDIT pid=%d %s#%s\n", peerPID, body.Operation, body.OperationID)
+	// Hardened-parent attestation (P0-1): an attest-pinned grant requires a
+	// valid ed25519 signature over the canonical request string from the
+	// executor's key. The dumpable helper is a courier — it cannot produce
+	// the signature.
+	if m.attestKey != nil {
+		if len(body.AttestNonce) == 0 || len(body.AttestSig) == 0 {
+			fmt.Printf("DENY attestation missing\n")
+			httpError(conn, httpForbidden)
+			return
+		}
+		if !ed25519.Verify(m.attestKey, aegiskeys.AttestCanonicalString(body.Binding, body.Operation, body.OperationID, body.AttestNonce), body.AttestSig) {
+			fmt.Printf("DENY attestation signature invalid\n")
+			httpError(conn, httpForbidden)
+			return
+		}
+		if m.seenNonces == nil {
+			m.seenNonces = map[string]bool{}
+		}
+		if m.seenNonces[body.AttestNonce] {
+			fmt.Printf("DENY attestation nonce replay\n")
+			httpError(conn, httpForbidden)
+			return
+		}
+		m.seenNonces[body.AttestNonce] = true
+	}
+	nonceLog := "-"
+	if len(body.AttestNonce) >= 12 {
+		nonceLog = body.AttestNonce[:12]
+	}
+	fmt.Printf("AUDIT pid=%d nonce=%s %s#%s\n", peerPID, nonceLog, body.Operation, body.OperationID)
 	writeJSONBody(conn, fmt.Sprintf(`{"protocol":"v2","binding":%q,"kind":"api-key","value":%q}`, body.Binding, m.value))
 }
 
@@ -192,6 +229,14 @@ func runMockBrokerChild() int {
 		allowedOps: allowedOps, value: "mock-credential-value",
 		listener: ln,
 	}
+	if pubHex := os.Getenv("SEQPASS_TEST_MOCK_ATTEST_KEY"); pubHex != "" {
+		pubRaw, derr := hex.DecodeString(pubHex)
+		if derr != nil || len(pubRaw) != ed25519.PublicKeySize {
+			fmt.Fprintln(os.Stderr, "mock broker child: bad attest key")
+			return 2
+		}
+		m.attestKey = ed25519.PublicKey(pubRaw)
+	}
 	m.serve() // blocks until the listener closes
 	return 0
 }
@@ -212,6 +257,13 @@ type mockBrokerChild struct {
 }
 
 func startMockBrokerChild(t *testing.T, grantUID int, grantExe string, allowedOps []string) *mockBrokerChild {
+	return startMockBrokerChildAttest(t, grantUID, grantExe, allowedOps, "")
+}
+
+// startMockBrokerChildAttest is startMockBrokerChild with an optional hex
+// ed25519 public key: when set, the mock grant requires a valid attestation
+// signature over the canonical request string (attest-key grant pin).
+func startMockBrokerChildAttest(t *testing.T, grantUID int, grantExe string, allowedOps []string, attestPubHex string) *mockBrokerChild {
 	t.Helper()
 	// Short custom temp dir: t.TempDir() embeds the full test name, and a
 	// Unix socket path is limited to 107 bytes — long subtest names push
@@ -231,6 +283,7 @@ func startMockBrokerChild(t *testing.T, grantUID int, grantExe string, allowedOp
 		"SEQPASS_TEST_MOCK_GRANT_UID="+fmt.Sprint(grantUID),
 		"SEQPASS_TEST_MOCK_GRANT_EXE="+grantExe,
 		"SEQPASS_TEST_MOCK_OPS="+strings.Join(allowedOps, ","),
+		"SEQPASS_TEST_MOCK_ATTEST_KEY="+attestPubHex,
 	)
 	// Stdout/stderr land in the log file so the parent can read the
 	// child's denial reasons and audit lines.
@@ -408,7 +461,7 @@ func helperTestingCommand(t *testing.T) {
 func TestResolveViaHelperAuthorized(t *testing.T) {
 	helperTestingCommand(t)
 	m := startMockBrokerChild(t, os.Geteuid(), selfExe(t), []string{"http.request", "transfer"})
-	cred, err := aegiskeys.ResolveViaHelper(context.Background(), selfExe(t), m.sockPath, "seqpass/example", "http.request", "op-1")
+	cred, err := aegiskeys.ResolveViaHelper(context.Background(), selfExe(t), m.sockPath, "seqpass/example", "http.request", "op-1", nil)
 	if err != nil {
 		t.Fatalf("helper resolve: %v", err)
 	}
@@ -432,7 +485,7 @@ func TestResolveViaHelperDenials(t *testing.T) {
 	helperTestingCommand(t)
 	t.Run("wrong_pinned_executable", func(t *testing.T) {
 		m := startMockBrokerChild(t, os.Geteuid(), "/usr/local/bin/definitely-not-this-binary", []string{"http.request"})
-		_, err := aegiskeys.ResolveViaHelper(context.Background(), selfExe(t), m.sockPath, "seqpass/example", "http.request", "op-1")
+		_, err := aegiskeys.ResolveViaHelper(context.Background(), selfExe(t), m.sockPath, "seqpass/example", "http.request", "op-1", nil)
 		if !errors.Is(err, aegiskeys.ErrAccessDenied) {
 			t.Fatalf("exe-mismatched helper = %v, want access_denied", err)
 		}
@@ -446,7 +499,7 @@ func TestResolveViaHelperDenials(t *testing.T) {
 		// broker would deny on SO_PEERCRED UID mismatch. This is the
 		// agent-impersonation denial without needing setuid.
 		m := startMockBrokerChild(t, os.Geteuid()+1001, selfExe(t), []string{"http.request"})
-		_, err := aegiskeys.ResolveViaHelper(context.Background(), selfExe(t), m.sockPath, "seqpass/example", "http.request", "op-1")
+		_, err := aegiskeys.ResolveViaHelper(context.Background(), selfExe(t), m.sockPath, "seqpass/example", "http.request", "op-1", nil)
 		if !errors.Is(err, aegiskeys.ErrAccessDenied) {
 			t.Fatalf("uid-mismatched helper = %v, want access_denied", err)
 		}
@@ -457,14 +510,14 @@ func TestResolveViaHelperDenials(t *testing.T) {
 	})
 	t.Run("unapproved_operation", func(t *testing.T) {
 		m := startMockBrokerChild(t, os.Geteuid(), selfExe(t), []string{"http.request"})
-		_, err := aegiskeys.ResolveViaHelper(context.Background(), selfExe(t), m.sockPath, "seqpass/example", "git.push", "op-1")
+		_, err := aegiskeys.ResolveViaHelper(context.Background(), selfExe(t), m.sockPath, "seqpass/example", "git.push", "op-1", nil)
 		if !errors.Is(err, aegiskeys.ErrAccessDenied) {
 			t.Fatalf("unapproved operation = %v, want access_denied", err)
 		}
 	})
 	t.Run("empty_operation", func(t *testing.T) {
 		m := startMockBrokerChild(t, os.Geteuid(), selfExe(t), []string{"http.request"})
-		_, err := aegiskeys.ResolveViaHelper(context.Background(), selfExe(t), m.sockPath, "seqpass/example", "", "op-1")
+		_, err := aegiskeys.ResolveViaHelper(context.Background(), selfExe(t), m.sockPath, "seqpass/example", "", "op-1", nil)
 		if !errors.Is(err, aegiskeys.ErrRequestInvalid) {
 			t.Fatalf("empty operation = %v, want request_invalid (client-side, no HTTP)", err)
 		}
@@ -507,6 +560,68 @@ func TestResolveCredentialMaterialRoutesThroughHelper(t *testing.T) {
 	if _, err := svc.resolveCredentialMaterial(context.Background(), src, "git.push", "op-wire-2"); !errors.Is(err, aegiskeys.ErrAccessDenied) {
 		t.Fatalf("forbidden op through helper wiring = %v, want access_denied", err)
 	}
+}
+
+// TestResolveViaHelperAttestKeyFlow pins the hardened-parent attestation
+// contract (AegisKeys attest-key grants): the broker signs each request
+// with its in-memory ed25519 key; the dumpable helper is a courier that
+// cannot forge it. With the key, the attested resolve succeeds and each
+// request carries a FRESH nonce (replay-visible). Without the executor key
+// (simulating a same-UID attacker who execed the helper directly), the
+// same grant denies — attestation, not the helper executable, carries the
+// authorization.
+func TestResolveViaHelperAttestKeyFlow(t *testing.T) {
+	helperTestingCommand(t)
+	key, err := aegiskeys.NewExecutorAttestKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = key // ResolveViaHelper signing is exercised through the service cfg below
+
+	t.Run("unattested_request_denied_by_attest_pinned_grant", func(t *testing.T) {
+		m := startMockBrokerChildAttest(t, os.Geteuid(), selfExe(t), []string{"http.request"}, key.PublicHex())
+		_, err := aegiskeys.ResolveViaHelper(context.Background(), selfExe(t), m.sockPath, "seqpass/example", "http.request", "op-att", nil)
+		if !errors.Is(err, aegiskeys.ErrAccessDenied) {
+			t.Fatalf("unattested request vs attest-pinned grant = %v, want access_denied", err)
+		}
+		m.refresh()
+		if !strings.Contains(m.denyReason, "attestation") {
+			t.Fatalf("denial reason = %q", m.denyReason)
+		}
+	})
+
+	t.Run("attested_resolve_authorized_and_fresh_nonce", func(t *testing.T) {
+		m := startMockBrokerChildAttest(t, os.Geteuid(), selfExe(t), []string{"http.request"}, key.PublicHex())
+		svc := testService(t)
+		svc.cfg.AegisKeysSocket = m.sockPath
+		svc.cfg.AegisKeysResolveHelper = selfExe(t)
+		svc.cfg.AegisKeysAttestKey = key
+		src := types.SecretSource{Kind: types.SourceAegisKeys, Binding: "seqpass/example"}
+		cred, err := svc.resolveCredentialMaterial(context.Background(), src, "http.request", "op-att-1")
+		if err != nil {
+			t.Fatalf("attested resolve: %v", err)
+		}
+		if cred.Value != m.value {
+			t.Fatalf("credential value = %q", cred.Value)
+		}
+		// The nonce is fresh per request: a second resolve with the same
+		// executor key also succeeds (no replay guard trip on the signer
+		// side), and the broker observed two distinct nonces.
+		if _, err := svc.resolveCredentialMaterial(context.Background(), src, "http.request", "op-att-2"); err != nil {
+			t.Fatalf("second attested resolve: %v", err)
+		}
+		m.refresh()
+		if len(m.auditOps) != 2 {
+			t.Fatalf("audit ops = %v, want 2 attested resolves", m.auditOps)
+		}
+		// Fresh nonce per request: the two audit records must carry
+		// distinct nonce prefixes (replay would repeat one).
+		n1 := strings.TrimPrefix(strings.Fields(m.auditOps[0])[1], "nonce=")
+		n2 := strings.TrimPrefix(strings.Fields(m.auditOps[1])[1], "nonce=")
+		if n1 == "" || n1 == n2 {
+			t.Fatalf("nonces not fresh per request: %q vs %q", n1, n2)
+		}
+	})
 }
 
 // TestResolveViaHelperNoOutputLeak pins the no-side-channel rule: on a
