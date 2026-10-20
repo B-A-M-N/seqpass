@@ -109,6 +109,17 @@ type HelperRequest struct {
 	// metadata. Never agent-reachable: this field can only be populated by
 	// the broker's trusted intake execution path.
 	Provision *HelperProvisionRequest `json:"provision,omitempty"`
+	// StatusRequest, when non-nil, is a METADATA-ONLY reconciliation
+	// exchange: GET /v3/intake/requests/<id> with no credential material
+	// in either direction. In helper mode the broker cannot query
+	// provisioning status directly (exe verification), so reconciliation
+	// rides the same trusted crossing.
+	StatusRequest *HelperStatusRequest `json:"status_request,omitempty"`
+}
+
+// HelperStatusRequest reconciles one provisioning request by ID.
+type HelperStatusRequest struct {
+	RequestID string `json:"request_id"`
 }
 
 // HelperProvisionRequest is the provider request body the helper forwards.
@@ -450,6 +461,34 @@ func ProvisionViaHelper(ctx context.Context, helperPath, aegisSocket string, req
 	return *resp.Provision, nil
 }
 
+// ProvisionStatusViaHelper reconciles one provisioning request through the
+// trusted helper (broker side, P0-3). METADATA ONLY: no credential material
+// crosses in either direction — the request is a request ID, the response
+// is lifecycle metadata. It rides the helper because a non-dumpable broker
+// cannot pass the provider's exe verification directly.
+//
+// Return contract mirrors ProvisionViaHelper: ErrProvisionUnknown means the
+// provider has NO durable entry under this request ID (the exactly-once
+// reconciliation signal that a resubmit of the SAME ID is safe);
+// transport failures leave the durable state uncertain.
+func ProvisionStatusViaHelper(ctx context.Context, helperPath, aegisSocket, requestID string) (ProvisionResponse, error) {
+	if requestID == "" {
+		return ProvisionResponse{}, fmt.Errorf("%w: request_id", ErrRequestInvalid)
+	}
+	hreq := HelperRequest{StatusRequest: &HelperStatusRequest{RequestID: requestID}}
+	resp, err := runHelperExchange(ctx, helperPath, aegisSocket, hreq, helperMaxRequestBytes)
+	if err != nil {
+		return ProvisionResponse{}, err
+	}
+	if resp.Provision == nil {
+		return ProvisionResponse{}, fmt.Errorf("%w: provisioning status missing metadata", ErrProtocolMismatch)
+	}
+	if resp.Provision.RequestID != requestID {
+		return ProvisionResponse{}, fmt.Errorf("%w: request_id echo mismatch", ErrProtocolMismatch)
+	}
+	return *resp.Provision, nil
+}
+
 // HelperServe is the helper side of the protocol: it runs on the inherited
 // socketpair descriptor, reads exactly one HelperRequest, resolves it
 // through the AegisKeys broker at aegisSocket, and writes exactly one
@@ -484,6 +523,22 @@ func HelperServe(conn net.Conn, aegisSocket string) error {
 	// The resolve/provision itself is budgeted; extend the descriptor
 	// deadline to cover it plus the response write.
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	if req.StatusRequest != nil {
+		resp, err := statusInHelper(aegisSocket, req.StatusRequest.RequestID)
+		if err != nil {
+			resp := HelperResponse{OK: false, Error: helperSentinel(err)}
+			if werr := writeFramed(conn, resp, helperMaxResponseBytes); werr != nil {
+				return fmt.Errorf("helper: write error response: %w", werr)
+			}
+			// Sentinel delivered (request_unknown is a valid reconciliation
+			// answer, not a helper failure: the broker decides).
+			return nil
+		}
+		if werr := writeFramed(conn, resp, helperMaxResponseBytes); werr != nil {
+			return fmt.Errorf("helper: write response: %w", werr)
+		}
+		return nil
+	}
 	if req.Provision != nil {
 		resp, err := provisionInHelper(aegisSocket, req)
 		if err != nil {
@@ -580,6 +635,25 @@ func provisionInHelper(aegisSocket string, req HelperRequest) (HelperResponse, e
 		return HelperResponse{}, err
 	}
 	out, err := cli.Provision(ctx, preq)
+	if err != nil {
+		return HelperResponse{}, err
+	}
+	return HelperResponse{OK: true, Provision: &out}, nil
+}
+
+// statusInHelper reconciles one provisioning request (helper side,
+// metadata only — no credential material crosses in either direction).
+func statusInHelper(aegisSocket, requestID string) (HelperResponse, error) {
+	if requestID == "" {
+		return HelperResponse{}, fmt.Errorf("%w: request_id", ErrRequestInvalid)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	cli, err := ConnectSocket(aegisSocket)
+	if err != nil {
+		return HelperResponse{}, err
+	}
+	out, err := cli.ProvisionStatus(ctx, requestID)
 	if err != nil {
 		return HelperResponse{}, err
 	}

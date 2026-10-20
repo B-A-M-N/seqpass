@@ -16,7 +16,36 @@ type SecretReference struct {
 	Owner       string    `json:"owner"`
 	// Binding is the authoritative AegisKeys binding, if sourced from AegisKeys.
 	Binding string `json:"binding,omitempty"`
+	// P0-3 trusted-intake provisioning state (all durable references; no
+	// credential bytes ever live in this database):
+	// ProvisionRequestID is the durable idempotency anchor shared with the
+	// provider — retries and reconciliation key on it; RecordID/BindingID
+	// are the provider's stable identities (the binding ID protects a
+	// later rebind of the binding NAME from silently redirecting an
+	// approved operation); ReconcileStatus is the lifecycle marker
+	// ('' = plain ref, or one of the ProvisionReconcile* values).
+	ProvisionRequestID string `json:"provision_request_id,omitempty"`
+	RecordID           string `json:"record_id,omitempty"`
+	BindingID          string `json:"binding_id,omitempty"`
+	ReconcileStatus    string `json:"reconcile_status,omitempty"`
+	// UseOnce marks a use-once intake reference: consumed (failed closed)
+	// after its first successful execution.
+	UseOnce bool `json:"use_once,omitempty"`
 }
+
+// ProvisionReconcile* are the durable reconcile statuses of a provisioned
+// secret reference ('uncertain' = the provider may have committed; retry
+// the SAME provision request ID to reconcile, per the exactly-once
+// contract).
+const (
+	ProvisionReconcilePending   = "pending"   // write-ahead record before the provider call
+	ProvisionReconcileUncertain = "uncertain" // exchange lost mid-commit; reconcile by request ID
+	ProvisionReconcileConflict  = "conflict"  // durable identity exists with different content
+	ProvisionReconcileCommitted = "committed" // provider committed; authorization pending
+	ProvisionReconcileReady     = "ready"     // provider reports the credential resolvable
+	ProvisionReconcileConsumed  = "consumed"  // use-once reference executed
+	ProvisionReconcileFailed    = "failed"    // provider refused (access_denied/invalid)
+)
 
 // SourceKind distinguishes credential sources.
 type SourceKind string

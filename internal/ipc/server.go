@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/secretbridge/secretbridge/internal/aegiskeys"
 	"github.com/secretbridge/secretbridge/internal/harness"
 	"github.com/secretbridge/secretbridge/internal/intake"
 	"github.com/secretbridge/secretbridge/internal/secureops"
@@ -1107,6 +1108,62 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 		return Response{OK: true, Data: map[string]interface{}{
 			"request_id": reqID, "op_id": opID, "status": "authorized",
 		}}
+	case MethodIntakeCredentialSave:
+		// P0-3: trusted-intake credential persistence. The value arrives
+		// as base64 (same envelope discipline as intake.fulfill) and
+		// crosses onward ONLY through the trusted helper crossing; it is
+		// never persisted in SeqPass, never logged, never echoed back.
+		raw, err := b64Param(p, "value_b64")
+		if err != nil {
+			return Response{OK: false, Error: "value_b64: " + err.Error()}
+		}
+		if len(raw) > aegiskeys.MaxProvisionValueLen {
+			return Response{OK: false, Error: "value too large"}
+		}
+		var ops []string
+		if opsRaw, ok := p["operations"].([]interface{}); ok {
+			for _, o := range opsRaw {
+				if os, ok := o.(string); ok {
+					ops = append(ops, os)
+				}
+			}
+		}
+		pReq := aegiskeys.ProvisionRequest{
+			RequestID:   strParam(p, "request_id"),
+			Value:       string(raw),
+			Service:     strParam(p, "service"),
+			Label:       strParam(p, "label"),
+			Kind:        strParam(p, "kind"),
+			Binding:     strParam(p, "binding"),
+			Operations:  ops,
+			Description: strParam(p, "description"),
+			EnvVarHint:  strParam(p, "env_var_hint"),
+		}
+		if pReq.RequestID == "" {
+			// The caller may supply a durable request ID for its own
+			// retry bookkeeping; otherwise the broker generates one and
+			// returns it (the reconciliation anchor for every retry).
+			pReq.RequestID = "prov-" + newRequestID()
+		}
+		report, ref, err := s.svc.ProvisionCredential(context.Background(), principal, strParam(p, "mode"), pReq)
+		if err != nil {
+			// The durable reference (if created) carries the honest
+			// reconcile state; report it alongside the error.
+			out := map[string]interface{}{}
+			if ref != nil {
+				out["ref_id"] = ref.ID
+				out["reconcile_status"] = ref.ReconcileStatus
+				out["request_id"] = pReq.RequestID
+			}
+			return Response{OK: false, Error: err.Error(), Data: out}
+		}
+		return Response{OK: true, Data: provisionReportData(report, ref, pReq.RequestID)}
+	case MethodIntakeProvisionStatus:
+		report, ref, err := s.svc.ProvisionStatusReport(context.Background(), principal, strParam(p, "request_id"))
+		if err != nil {
+			return Response{OK: false, Error: err.Error()}
+		}
+		return Response{OK: true, Data: provisionReportData(report, ref, strParam(p, "request_id"))}
 	default:
 		return Response{OK: false, Error: "unknown method"}
 	}

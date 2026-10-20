@@ -1,9 +1,14 @@
 package ipc
 
 import (
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"time"
+
+	"github.com/secretbridge/secretbridge/internal/service"
+	"github.com/secretbridge/secretbridge/internal/types"
 )
 
 // Methods exposed over the broker Unix sockets.
@@ -31,7 +36,12 @@ const (
 	MethodVerifyOutcome   = "admin.verify_outcome" // independent postcondition check (SC-14)
 	MethodRecipientStatus = "recipient.status"     // recipient acceptance/application readback (CV-10)
 	MethodAttestPublic    = "admin.attest_public"  // P0-1: executor attest public key (admin only)
-	MethodHealth          = "health"
+	// P0-3: trusted-intake credential persistence. Values cross ONLY the
+	// intake/admin sockets (trusted plaintext domains); the agent
+	// allowlist never admits these.
+	MethodIntakeCredentialSave  = "intake.credential_save"
+	MethodIntakeProvisionStatus = "intake.provision_status"
+	MethodHealth                = "health"
 	// Relay handshake (QR-03): agent requests, user fulfills.
 	MethodRelayRequest = "relay.request"
 	MethodRelayStatus  = "relay.status"
@@ -116,6 +126,12 @@ var IntakeAllowlist = map[string]bool{
 	MethodIntakeCancel:  true,
 	MethodIntakeRequest: true,
 	MethodHealth:        true,
+	// P0-3: trusted intake selects credential persistence. The VALUE
+	// arrives here (intake socket = the trusted plaintext crossing, same
+	// as intake.fulfill) and travels only onward through the trusted
+	// helper crossing. NEVER on the agent surface.
+	MethodIntakeCredentialSave:  true,
+	MethodIntakeProvisionStatus: true,
 }
 
 // AdminAllowlist = agent surface + intake surface + trusted operator
@@ -159,6 +175,10 @@ var AdminAllowlist = map[string]bool{
 	// it in the AegisKeys grant (attest_key). Admin-only by construction:
 	// the key is for grant authoring, not an agent surface.
 	MethodAttestPublic: true,
+	// P0-3: trusted-intake persistence methods (operators may also drive
+	// them from the admin terminal).
+	MethodIntakeCredentialSave:  true,
+	MethodIntakeProvisionStatus: true,
 }
 
 type Request struct {
@@ -282,4 +302,55 @@ func b64Param(p map[string]interface{}, k string) ([]byte, error) {
 		return nil, fmt.Errorf("payload must be 1..65536 bytes")
 	}
 	return raw, nil
+}
+
+// newRequestID generates a fresh durable provisioning request ID (P0-3).
+// crypto/rand: the request ID is the reconciliation anchor — an
+// unpredictable ID prevents a local attacker from pre-creating a matching
+// provider entry (grant pinning still enforces identity server-side).
+func newRequestID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// Fail closed: no ID, no provisioning.
+		return ""
+	}
+	return hex.EncodeToString(b)
+}
+
+// provisionReportData maps the separate-outcome report onto the IPC
+// response. Credential values are never included: metadata only.
+func provisionReportData(report *service.ProvisionReport, ref *types.SecretReference, requestID string) map[string]interface{} {
+	out := map[string]interface{}{
+		"request_id":      requestID,
+		"saved":           report.Saved,
+		"provider_status": report.ProviderStatus,
+	}
+	if ref != nil {
+		out["ref_id"] = ref.ID
+		out["binding"] = ref.Binding
+		out["reconcile_status"] = ref.ReconcileStatus
+		if ref.RecordID != "" {
+			out["record_id"] = ref.RecordID
+		}
+		if ref.BindingID != "" {
+			out["binding_id"] = ref.BindingID
+		}
+		out["use_once"] = ref.UseOnce
+	}
+	if report.ReEnrollmentRequired {
+		out["authorization"] = "pending: approve the staged resolver grant in AegisKeys before resolves succeed"
+	}
+	if report.UseResult != nil {
+		use := map[string]interface{}{"executed": report.UseResult.Executed}
+		if report.UseResult.OpID != "" {
+			use["op_id"] = report.UseResult.OpID
+		}
+		if report.UseResult.Err != "" {
+			use["detail"] = report.UseResult.Err
+		}
+		// Separate durable outcome: the use result stands next to the
+		// save result, never merged into it.
+		out["use_outcome"] = use
+	}
+	return out
 }

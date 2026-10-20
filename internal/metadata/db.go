@@ -92,7 +92,12 @@ CREATE TABLE IF NOT EXISTS secret_refs (
   owner TEXT,
   binding TEXT,
   created_at TIMESTAMP,
-  updated_at TIMESTAMP
+  updated_at TIMESTAMP,
+  provision_request_id TEXT,
+  record_id TEXT,
+  binding_id TEXT,
+  reconcile_status TEXT,
+  use_once BOOLEAN NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS destinations (
@@ -454,6 +459,15 @@ func (d *DB) migrate() error {
 		{"destinations", "expected_uid", "expected_uid INTEGER"},
 		{"destinations", "expected_gid", "expected_gid INTEGER"},
 		{"destinations", "source_repo", "source_repo TEXT NOT NULL DEFAULT ''"},
+		// P0-3 (schema v5): trusted-intake provisioning references. Legacy
+		// rows read back as PLAIN references (empty provisioning identity —
+		// never treated as unrestricted or auto-migrated to provisioned
+		// state; only the trusted intake creates provisioned refs).
+		{"secret_refs", "provision_request_id", "provision_request_id TEXT"},
+		{"secret_refs", "record_id", "record_id TEXT"},
+		{"secret_refs", "binding_id", "binding_id TEXT"},
+		{"secret_refs", "reconcile_status", "reconcile_status TEXT"},
+		{"secret_refs", "use_once", "use_once BOOLEAN NOT NULL DEFAULT 0"},
 		// Full read/write shape: the code SELECTs and INSERTs every
 		// column below, so a legacy table missing any of them is
 		// unusable until repaired — not just the security bindings.

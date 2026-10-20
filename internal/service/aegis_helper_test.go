@@ -118,6 +118,16 @@ func (m *helperMockBroker) handle(conn net.Conn) {
 		httpError(conn, httpBadRequest)
 		return
 	}
+	// v3 provisioning endpoints (P0-3) ride the same peer-verified HTTP
+	// surface with their own request grammar.
+	switch {
+	case hreq.URL.Path == "/v3/intake/credentials":
+		m.handleV3Provision(conn, hreq)
+		return
+	case strings.HasPrefix(hreq.URL.Path, "/v3/intake/requests/"):
+		m.handleV3Status(conn, strings.TrimPrefix(hreq.URL.Path, "/v3/intake/requests/"))
+		return
+	}
 	const maxMockBody = 64 << 10
 	raw, err := io.ReadAll(io.LimitReader(hreq.Body, maxMockBody+1))
 	hreq.Body.Close() //nolint:errcheck
@@ -201,10 +211,97 @@ func (m *helperMockBroker) handle(conn net.Conn) {
 	writeJSONBody(conn, fmt.Sprintf(`{"protocol":"v2","binding":%q,"kind":"api-key","value":%q}`, body.Binding, m.value))
 }
 
+// v3ProvisionState is the mock provider's durable provisioning table: the
+// request ID → committed response. Configured from the parent's env so
+// each test shapes its own lifecycle scenarios (status progression,
+// conflicts, unknowns).
+var v3ProvisionState = map[string]string{}
+
+// handleV3Provision mirrors the provider's /v3/intake/credentials contract:
+// peer-verified (same exe discipline as resolve), content-addressed
+// exactly-once under the request ID, and metadata-only responses.
+func (m *helperMockBroker) handleV3Provision(conn net.Conn, hreq *http.Request) {
+	raw, err := io.ReadAll(io.LimitReader(hreq.Body, 64<<10))
+	hreq.Body.Close() //nolint:errcheck
+	if err != nil {
+		httpError(conn, httpBadRequest)
+		return
+	}
+	var body struct {
+		RequestID string `json:"request_id"`
+		Binding   string `json:"binding"`
+		Value     string `json:"value"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil || body.RequestID == "" {
+		httpError(conn, httpBadRequest)
+		return
+	}
+	if _, _, perr := m.peerIdentity(conn); perr != nil {
+		fmt.Printf("DENY v3 peer-identity: %v\n", perr)
+		httpError(conn, httpForbidden)
+		return
+	}
+	// Identity contract: replayed request ID must carry the same content.
+	if prevRaw, ok := v3ProvisionState["req:"+body.RequestID]; ok {
+		var prevBody struct {
+			Binding string `json:"binding"`
+			Value   string `json:"value"`
+		}
+		_ = json.Unmarshal([]byte(prevRaw), &prevBody)
+		if prevBody.Binding != body.Binding || prevBody.Value != body.Value {
+			v3Error(conn, http.StatusConflict)
+			return
+		}
+		// Idempotent replay: same content, same durable response.
+		writeJSONBody(conn, v3ProvisionState["resp:"+body.RequestID])
+		return
+	}
+	resp := fmt.Sprintf(`{"request_id":%q,"record_id":"rec-%s","binding_id":"bid-%s","binding":%q,"status":"authorization_pending"}`,
+		body.RequestID, body.RequestID[:8], body.RequestID[:8], body.Binding)
+	v3ProvisionState["req:"+body.RequestID] = string(raw)
+	v3ProvisionState["resp:"+body.RequestID] = resp
+	fmt.Printf("AUDIT v3-provision %s %s\n", body.RequestID, body.Binding)
+	writeJSONBody(conn, resp)
+}
+
+// handleV3Status mirrors GET /v3/intake/requests/<id>: 404 when the
+// provider has no durable entry (the exactly-once reconciliation
+// signal), the committed metadata otherwise.
+func (m *helperMockBroker) handleV3Status(conn net.Conn, requestID string) {
+	if _, _, perr := m.peerIdentity(conn); perr != nil {
+		fmt.Printf("DENY v3-status peer-identity: %v\n", perr)
+		httpError(conn, httpForbidden)
+		return
+	}
+	resp, ok := v3ProvisionState["resp:"+requestID]
+	if !ok {
+		v3Error(conn, http.StatusNotFound)
+		return
+	}
+	writeJSONBody(conn, resp)
+}
+
 const (
 	httpBadRequest = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"
 	httpForbidden  = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n"
 )
+
+// v3Error mirrors the provider's v3 error envelope (status line carries
+// the sentinel the client's decodeProvisionResponse maps).
+func v3Error(conn net.Conn, status int) {
+	var line string
+	switch status {
+	case http.StatusConflict:
+		line = "409 Conflict"
+	case http.StatusNotFound:
+		line = "404 Not Found"
+	case http.StatusLocked:
+		line = "423 Locked"
+	default:
+		line = "400 Bad Request"
+	}
+	fmt.Fprintf(conn, "HTTP/1.1 %s\r\nContent-Length: 0\r\n\r\n", line) //nolint:errcheck
+}
 
 // runMockBrokerChild is the re-exec body for the mock broker process:
 // serve until the socket is removed (t.TempDir cleanup from the parent)
@@ -578,6 +675,198 @@ func TestResolveViaHelperDenials(t *testing.T) {
 			t.Fatalf("denied request reached the broker audit path: %v", m.auditOps)
 		}
 	})
+}
+
+// TestProvisionViaHelperFlow proves the P0-3 trusted provisioning exchange
+// end to end: broker → helper (private descriptor carries the value) →
+// mock provider's /v3/intake/credentials → metadata-only response. Also
+// the exactly-once contract: replaying the same request ID with the same
+// content is idempotent; with altered content it is a hard conflict.
+func TestProvisionViaHelperFlow(t *testing.T) {
+	helperTestingCommand(t)
+	m := startMockBrokerChild(t, os.Geteuid(), selfExe(t), []string{"http.request"})
+	req := aegiskeys.ProvisionRequest{
+		RequestID:  "prov-test-flow-0001",
+		Value:      "secret-value-xyz",
+		Service:    "example",
+		Label:      "Example credential",
+		Kind:       "api-key",
+		Binding:    "seqpass/example",
+		Operations: []string{"http.request"},
+	}
+	out, err := aegiskeys.ProvisionViaHelper(context.Background(), selfExe(t), m.sockPath, req)
+	if err != nil {
+		t.Fatalf("provision via helper: %v", err)
+	}
+	if out.RequestID != req.RequestID || out.RecordID == "" || out.BindingID == "" {
+		t.Fatalf("provision response missing durable identity: %+v", out)
+	}
+	if out.Status != "authorization_pending" {
+		t.Fatalf("status = %q, want authorization_pending (staged grant)", out.Status)
+	}
+	// Idempotent replay: same content under the same request ID returns
+	// the SAME durable identity (no duplicate).
+	out2, err := aegiskeys.ProvisionViaHelper(context.Background(), selfExe(t), m.sockPath, req)
+	if err != nil {
+		t.Fatalf("idempotent replay: %v", err)
+	}
+	if out2.RecordID != out.RecordID || out2.BindingID != out.BindingID {
+		t.Fatalf("replay produced different identity: %+v vs %+v", out2, out)
+	}
+	// Altered content under the same request ID: hard conflict, fail
+	// closed — never silently recreate.
+	req.Value = "DIFFERENT-SECRET"
+	if _, err := aegiskeys.ProvisionViaHelper(context.Background(), selfExe(t), m.sockPath, req); !errors.Is(err, aegiskeys.ErrProvisionConflict) {
+		t.Fatalf("altered replay = %v, want ErrProvisionConflict", err)
+	}
+}
+
+// TestProvisionStatusViaHelperFlow proves metadata-only reconciliation
+// through the helper: committed requests return their lifecycle status;
+// unknown request IDs return ErrProvisionUnknown (the exactly-once signal
+// that a same-ID resubmit is safe).
+func TestProvisionStatusViaHelperFlow(t *testing.T) {
+	helperTestingCommand(t)
+	m := startMockBrokerChild(t, os.Geteuid(), selfExe(t), []string{"http.request"})
+	// Unknown request: the provider has no durable entry.
+	if _, err := aegiskeys.ProvisionStatusViaHelper(context.Background(), selfExe(t), m.sockPath, "prov-never-seen"); !errors.Is(err, aegiskeys.ErrProvisionUnknown) {
+		t.Fatalf("unknown status = %v, want ErrProvisionUnknown", err)
+	}
+	// Commit one, then reconcile by ID.
+	req := aegiskeys.ProvisionRequest{
+		RequestID: "prov-status-0002", Value: "v2", Service: "svc", Label: "L",
+		Kind: "api-key", Binding: "seqpass/s2", Operations: []string{"http.request"},
+	}
+	out, err := aegiskeys.ProvisionViaHelper(context.Background(), selfExe(t), m.sockPath, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := aegiskeys.ProvisionStatusViaHelper(context.Background(), selfExe(t), m.sockPath, req.RequestID)
+	if err != nil {
+		t.Fatalf("status via helper: %v", err)
+	}
+	if st.RecordID != out.RecordID || st.Status != "authorization_pending" {
+		t.Fatalf("reconciled status mismatch: %+v", st)
+	}
+}
+
+// TestProvisionCredentialLifecycle proves the service-layer P0-3 flow:
+// write-ahead durable reference → provider commit → durable references
+// (record/binding IDs + reconcile status) — and the separate-outcome
+// contract for save_and_use. A denied use after a successful save is a
+// SAVED credential with authorization pending, not a failed save.
+func TestProvisionCredentialLifecycle(t *testing.T) {
+	helperTestingCommand(t)
+	m := startMockBrokerChild(t, os.Geteuid(), selfExe(t), []string{"http.request"})
+	svc := testService(t)
+	svc.cfg.AegisKeysSocket = m.sockPath
+	svc.cfg.AegisKeysResolveHelper = selfExe(t)
+
+	req := aegiskeys.ProvisionRequest{
+		RequestID: "prov-svc-0003", Value: "svc-secret", Service: "svc", Label: "L3",
+		Kind: "api-key", Binding: "seqpass/s3", Operations: []string{"http.request"},
+	}
+	report, ref, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeSaveOnly, req)
+	if err != nil {
+		t.Fatalf("ProvisionCredential: %v", err)
+	}
+	if !report.Saved {
+		t.Fatalf("report.Saved = false: %+v", report)
+	}
+	if ref.ReconcileStatus != types.ProvisionReconcileCommitted || ref.RecordID == "" || ref.BindingID == "" {
+		t.Fatalf("durable reference incomplete: %+v", ref)
+	}
+	if !report.ReEnrollmentRequired {
+		t.Fatal("staged grant pending must surface authorization pending")
+	}
+	// Durable references must round-trip: no credential bytes in metadata.
+	got, err := svc.db.GetSecretRef(ref.ID)
+	if err != nil || got == nil {
+		t.Fatalf("GetSecretRef: %v", err)
+	}
+	if got.ProvisionRequestID != req.RequestID || got.RecordID != ref.RecordID || got.BindingID != ref.BindingID {
+		t.Fatalf("durable references lost: %+v", got)
+	}
+	if strings.Contains(fmt.Sprintf("%+v", got), "svc-secret") {
+		t.Fatal("credential value leaked into metadata")
+	}
+
+	// Duplicate request (retry after crash): idempotent recovery — the
+	// SAME reference, no provider round trip, no duplicate.
+	report2, ref2, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeSaveOnly, req)
+	if err != nil {
+		t.Fatalf("idempotent retry: %v", err)
+	}
+	if ref2.ID != ref.ID || report2.Saved != true {
+		t.Fatalf("retry diverged: ref %s vs %s, saved %v", ref2.ID, ref.ID, report2.Saved)
+	}
+
+	// Identity anchor: the same request ID with a different binding is
+	// refused locally (rebind protection at the intake boundary).
+	drift := req
+	drift.Binding = "seqpass/other"
+	if _, _, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeSaveOnly, drift); err == nil {
+		t.Fatal("binding drift under the same request ID was accepted")
+	}
+
+	// save_and_use with a pending grant: TWO separate outcomes — saved
+	// credential + authorization-pending use, never a failed save.
+	reqU := aegiskeys.ProvisionRequest{
+		RequestID: "prov-svc-0004", Value: "svc-secret-4", Service: "svc", Label: "L4",
+		Kind: "api-key", Binding: "seqpass/s4", Operations: []string{"http.request"},
+	}
+	reportU, refU, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeSaveAndUse, reqU)
+	if err != nil {
+		t.Fatalf("save_and_use: %v", err)
+	}
+	if !reportU.Saved {
+		t.Fatal("save_and_use reported save=false (must be saved+pending)")
+	}
+	if reportU.UseResult == nil || reportU.UseResult.Executed {
+		t.Fatalf("use outcome must be explicit non-executed with detail: %+v", reportU.UseResult)
+	}
+	if refU.UseOnce {
+		t.Fatal("save_and_use must not mark the ref use-once")
+	}
+
+	// use_once: the ref is marked single-consumption.
+	reqO := aegiskeys.ProvisionRequest{
+		RequestID: "prov-svc-0005", Value: "svc-secret-5", Service: "svc", Label: "L5",
+		Kind: "api-key", Binding: "seqpass/s5", Operations: []string{"http.request"},
+	}
+	_, refO, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeUseOnce, reqO)
+	if err != nil {
+		t.Fatalf("use_once: %v", err)
+	}
+	if !refO.UseOnce {
+		t.Fatal("use_once ref not marked UseOnce")
+	}
+	// Consumption is exactly-once: second consume fails closed.
+	if err := svc.db.ConsumeUseOnceSecretRef(refO.ID); err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+	if err := svc.db.ConsumeUseOnceSecretRef(refO.ID); err == nil {
+		t.Fatal("second consume of a use-once ref succeeded")
+	}
+	// A use-once retry after consumption fails closed (no re-provision).
+	if _, _, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeUseOnce, reqO); err == nil {
+		t.Fatal("use-once retry after consumption was accepted")
+	}
+}
+
+// TestProvisionCredentialModeValidation fail-closes the mode selection and
+// request validation before any provider interaction.
+func TestProvisionCredentialModeValidation(t *testing.T) {
+	svc := testService(t)
+	req := aegiskeys.ProvisionRequest{RequestID: "x", Value: "v", Service: "s", Label: "l", Kind: "k", Binding: "b", Operations: []string{"http.request"}}
+	if _, _, err := svc.ProvisionCredential(context.Background(), "intake:test", "save_it", req); err == nil {
+		t.Fatal("invalid mode accepted")
+	}
+	bad := req
+	bad.Operations = nil
+	if _, _, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeSaveOnly, bad); err == nil {
+		t.Fatal("empty operations accepted (operation-scoped contract)")
+	}
 }
 
 // TestResolveCredentialMaterialRoutesThroughHelper proves the service-level
