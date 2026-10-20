@@ -57,6 +57,14 @@ import (
 //     in that mode does.
 //   - Minimal lifetime: one request, one response, exit.
 //
+// P0-3 provisioning rides the same mechanism: HelperRequest.Provision
+// switches the exchange to trusted provisioning — the credential VALUE
+// crosses on the same private descriptor, the helper forwards it to the
+// provider's /v3/intake/credentials under the helper's PROVISIONING grant
+// (a distinct executable grant from the resolve grant), and only metadata
+// returns. The broker-side entry is ProvisionViaHelper; the same
+// spawn/reap discipline (kill+Wait exactly once on every path) applies.
+//
 // Approval-bypass review: the helper is not an authorization surface. It
 // performs no approval decisions and grants nothing; it only forwards the
 // already-approved (binding, operation, operation_id) triple to AegisKeys,
@@ -66,8 +74,14 @@ import (
 // grant admits.
 
 // helperMaxRequestBytes bounds the framed request (binding + operation +
-// operation ID are bounded strings; 4KiB is generous).
+// operation ID are bounded strings; 4KiB is generous). Provisioning
+// requests (below) carry the credential value across the same crossing and
+// use their own bound.
 const helperMaxRequestBytes = 4096
+
+// helperMaxProvisionRequestBytes bounds a provisioning request frame: the
+// provider's 32KiB value bound plus request metadata slack.
+const helperMaxProvisionRequestBytes = MaxProvisionValueLen + 4096
 
 // helperMaxResponseBytes bounds the framed response: the credential wire
 // bounds (maxValueBytes) plus framing slack for components.
@@ -86,6 +100,36 @@ type HelperRequest struct {
 	OperationID string `json:"operation_id,omitempty"`
 	AttestNonce string `json:"attest_nonce,omitempty"`
 	AttestSig   []byte `json:"attest_sig,omitempty"`
+	// Provision, when non-nil, switches this helper exchange from resolve
+	// to trusted provisioning (P0-3): the same private inherited
+	// descriptor is the trusted crossing for the credential VALUE. The
+	// helper performs no persistence decisions — it forwards the
+	// already-trusted request to AegisKeys' /v3/intake/credentials under
+	// the helper executable's provisioning grant, and returns only
+	// metadata. Never agent-reachable: this field can only be populated by
+	// the broker's trusted intake execution path.
+	Provision *HelperProvisionRequest `json:"provision,omitempty"`
+}
+
+// HelperProvisionRequest is the provider request body the helper forwards.
+// Field-for-field the aegiskeys.ProvisionRequest the provider validates;
+// the value is the only secret and crosses only this descriptor.
+type HelperProvisionRequest struct {
+	RequestID   string     `json:"request_id"`
+	Value       string     `json:"value"`
+	Service     string     `json:"service"`
+	Label       string     `json:"label"`
+	Kind        string     `json:"kind"`
+	Binding     string     `json:"binding"`
+	Operations  []string   `json:"operations"`
+	Description string     `json:"description,omitempty"`
+	EnvVarHint  string     `json:"env_var_hint,omitempty"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+	// StagedResolverGrant, when set, asks AegisKeys to STAGE (never
+	// enable) the resolve grant through its durable approval machinery.
+	// AttestKey pins the executor's current public half so the staged
+	// grant is attest-enforced from birth.
+	StagedResolverGrant *ProvisionResolverGrant `json:"resolver_grant,omitempty"`
 }
 
 // HelperResponse is the framed response. On success it carries credential
@@ -101,6 +145,9 @@ type HelperResponse struct {
 	Kind       string            `json:"kind,omitempty"`
 	Value      string            `json:"value,omitempty"`
 	Components map[string]string `json:"components,omitempty"`
+	// Provision carries the v3 provisioning response metadata on the
+	// provisioning exchange (nil on resolve exchanges and on failures).
+	Provision *ProvisionResponse `json:"provision,omitempty"`
 }
 
 // SocketPath exposes the default AegisKeys broker socket path for a config
@@ -142,8 +189,10 @@ func readFramed(r io.Reader, v interface{}, max int) error {
 	return json.Unmarshal(body, v)
 }
 
-// helperSentinel maps a sentinel error to its wire name so the broker side
-// reconstructs the same typed error the in-process path would return.
+// helperSentinel maps a typed error to the wire sentinel name. The
+// provisioning additions (credential_conflict, request_unknown) mirror the
+// provider's v3ServiceError table; resolve responses never carry them, so
+// the shared table has no collision.
 func helperSentinel(err error) string {
 	switch {
 	case err == nil:
@@ -158,6 +207,10 @@ func helperSentinel(err error) string {
 		return "protocol_mismatch"
 	case errors.Is(err, ErrRequestInvalid):
 		return "request_invalid"
+	case errors.Is(err, ErrProvisionConflict):
+		return "credential_conflict"
+	case errors.Is(err, ErrProvisionUnknown):
+		return "request_unknown"
 	default:
 		return "transport_unavailable"
 	}
@@ -176,44 +229,40 @@ func sentinelError(name string) error {
 		return ErrProtocolMismatch
 	case "request_invalid":
 		return ErrRequestInvalid
+	case "credential_conflict":
+		return ErrProvisionConflict
+	case "request_unknown":
+		return ErrProvisionUnknown
 	default:
 		return ErrTransportUnavailable
 	}
 }
 
-// ResolveViaHelper performs one credential resolution through the trusted
-// helper executable (broker side). helperPath is operator configuration
-// (systemd unit / installation config); it is never agent-supplied. The
-// helper is spawned with a private CLOEXEC socketpair as fd 3; the request
-// and the credential response travel only over that descriptor.
-// attestKey is the executor's in-memory ed25519 private key: each request
-// is signed over AttestCanonicalString with a fresh nonce (hardened-parent
-// attestation) — the helper carries the signature but never sees the key.
-// A nil key sends an unattested request (grants without an attest pin).
+// runHelperExchange performs one complete trusted helper exchange (broker
+// side): spawn the helper with a private CLOEXEC socketpair as fd 3, write
+// the framed request, read the framed response, and reap the child on
+// EVERY path (kill-then-Wait exactly once on early return — the P1
+// discipline). req carries the request; maxReq bounds the outbound frame
+// (resolve 4KiB, provisioning value+slack). The response is validated for
+// frame bounds only; mode-specific validation stays with the caller.
 //
 // The context bounds the whole exchange: a helper that hangs is killed via
 // exec.CommandContext, and the broker treats a lost exchange as
 // transport_unavailable — never as a reason to retry creation elsewhere.
-func ResolveViaHelper(ctx context.Context, helperPath, aegisSocket, binding, operation, operationID string, attestKey crypto.Signer) (CredentialMaterial, error) {
+// A credential-conflict sentinel is deliberately NOT retried here: the
+// durable request identity exists with different content, and only the
+// caller's reconciliation decides what that means.
+func runHelperExchange(ctx context.Context, helperPath, aegisSocket string, req HelperRequest, maxReq int) (HelperResponse, error) {
 	if helperPath == "" {
-		return CredentialMaterial{}, fmt.Errorf("%w: resolve helper not configured", ErrTransportUnavailable)
+		return HelperResponse{}, fmt.Errorf("%w: resolve helper not configured", ErrTransportUnavailable)
 	}
 	if aegisSocket == "" {
-		return CredentialMaterial{}, fmt.Errorf("%w: AegisKeys socket not configured", ErrTransportUnavailable)
-	}
-	if binding == "" {
-		return CredentialMaterial{}, ErrBindingUnavailable
-	}
-	if !validOperationName(operation) {
-		return CredentialMaterial{}, fmt.Errorf("%w: operation", ErrRequestInvalid)
-	}
-	if operationID != "" && !validOperationID(operationID) {
-		return CredentialMaterial{}, fmt.Errorf("%w: operation_id", ErrRequestInvalid)
+		return HelperResponse{}, fmt.Errorf("%w: AegisKeys socket not configured", ErrTransportUnavailable)
 	}
 
 	server, child, err := socketPair()
 	if err != nil {
-		return CredentialMaterial{}, fmt.Errorf("%w: socketpair: %v", ErrTransportUnavailable, err)
+		return HelperResponse{}, fmt.Errorf("%w: socketpair: %v", ErrTransportUnavailable, err)
 	}
 	defer server.Close() //nolint:errcheck — best-effort close of a private pair
 
@@ -233,7 +282,7 @@ func ResolveViaHelper(ctx context.Context, helperPath, aegisSocket, binding, ope
 	cmd.Stderr = io.Discard
 	if err := cmd.Start(); err != nil {
 		child.Close() //nolint:errcheck
-		return CredentialMaterial{}, fmt.Errorf("%w: start resolve helper: %v", ErrTransportUnavailable, err)
+		return HelperResponse{}, fmt.Errorf("%w: start resolve helper: %v", ErrTransportUnavailable, err)
 	}
 	// The parent no longer needs its end once the child holds it.
 	child.Close() //nolint:errcheck
@@ -252,12 +301,12 @@ func ResolveViaHelper(ctx context.Context, helperPath, aegisSocket, binding, ope
 		waited = true
 		_ = cmd.Wait()
 	}
-	abortWith := func(origErr error) (CredentialMaterial, error) {
+	abortWith := func(origErr error) (HelperResponse, error) {
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill() // no-op (ErrProcessDone) if it already exited
 		}
 		waitOnce()
-		return CredentialMaterial{}, origErr
+		return HelperResponse{}, origErr
 	}
 
 	// Socket deadline: the caller's deadline plus slack for the helper's
@@ -270,23 +319,7 @@ func ResolveViaHelper(ctx context.Context, helperPath, aegisSocket, binding, ope
 		return abortWith(fmt.Errorf("%w: helper exchange: %v", ErrTransportUnavailable, err))
 	}
 
-	// One small request frame (<= 4KiB) — the socket buffer absorbs it, so
-	// the synchronous write cannot deadlock against the child's read. The
-	// attestation (when the executor holds a key) is fresh per request.
-	req := HelperRequest{Binding: binding, Operation: operation, OperationID: operationID}
-	if attestKey != nil {
-		nonce, nerr := newAttestNonce()
-		if nerr != nil {
-			return abortWith(fmt.Errorf("%w: attest nonce: %v", ErrTransportUnavailable, nerr))
-		}
-		sig, serr := signAttestation(attestKey, binding, operation, operationID, nonce)
-		if serr != nil {
-			return abortWith(fmt.Errorf("%w: attest sign: %v", ErrTransportUnavailable, serr))
-		}
-		req.AttestNonce = nonce
-		req.AttestSig = sig
-	}
-	if err := writeFramed(server, req, helperMaxRequestBytes); err != nil {
+	if err := writeFramed(server, req, maxReq); err != nil {
 		return abortWith(fmt.Errorf("%w: helper request: %v", ErrTransportUnavailable, err))
 	}
 
@@ -300,10 +333,53 @@ func ResolveViaHelper(ctx context.Context, helperPath, aegisSocket, binding, ope
 	waitErr := cmd.Wait()
 	waited = true
 	if waitErr != nil {
-		return CredentialMaterial{}, fmt.Errorf("%w: resolve helper exited: %v", ErrTransportUnavailable, waitErr)
+		return HelperResponse{}, fmt.Errorf("%w: resolve helper exited: %v", ErrTransportUnavailable, waitErr)
 	}
 	if !resp.OK {
-		return CredentialMaterial{}, sentinelError(resp.Error)
+		return HelperResponse{}, sentinelError(resp.Error)
+	}
+	return resp, nil
+}
+
+// ResolveViaHelper performs one credential resolution through the trusted
+// helper executable (broker side). helperPath is operator configuration
+// (systemd unit / installation config); it is never agent-supplied. The
+// helper is spawned with a private CLOEXEC socketpair as fd 3; the request
+// and the credential response travel only over that descriptor.
+// attestKey is the executor's in-memory ed25519 private key: each request
+// is signed over AttestCanonicalString with a fresh nonce (hardened-parent
+// attestation) — the helper carries the signature but never sees the key.
+// A nil key sends an unattested request (grants without an attest pin).
+func ResolveViaHelper(ctx context.Context, helperPath, aegisSocket, binding, operation, operationID string, attestKey crypto.Signer) (CredentialMaterial, error) {
+	if binding == "" {
+		return CredentialMaterial{}, ErrBindingUnavailable
+	}
+	if !validOperationName(operation) {
+		return CredentialMaterial{}, fmt.Errorf("%w: operation", ErrRequestInvalid)
+	}
+	if operationID != "" && !validOperationID(operationID) {
+		return CredentialMaterial{}, fmt.Errorf("%w: operation_id", ErrRequestInvalid)
+	}
+
+	// One small request frame (<= 4KiB) — the socket buffer absorbs it, so
+	// the synchronous write cannot deadlock against the child's read. The
+	// attestation (when the executor holds a key) is fresh per request.
+	req := HelperRequest{Binding: binding, Operation: operation, OperationID: operationID}
+	if attestKey != nil {
+		nonce, nerr := newAttestNonce()
+		if nerr != nil {
+			return CredentialMaterial{}, fmt.Errorf("%w: attest nonce: %v", ErrTransportUnavailable, nerr)
+		}
+		sig, serr := signAttestation(attestKey, binding, operation, operationID, nonce)
+		if serr != nil {
+			return CredentialMaterial{}, fmt.Errorf("%w: attest sign: %v", ErrTransportUnavailable, serr)
+		}
+		req.AttestNonce = nonce
+		req.AttestSig = sig
+	}
+	resp, err := runHelperExchange(ctx, helperPath, aegisSocket, req, helperMaxRequestBytes)
+	if err != nil {
+		return CredentialMaterial{}, err
 	}
 	// Re-validate the response with the same wire rules as a direct
 	// resolve: binding echo, component bounds, non-empty material.
@@ -324,6 +400,56 @@ func ResolveViaHelper(ctx context.Context, helperPath, aegisSocket, binding, ope
 	return CredentialMaterial{Binding: resp.Binding, Kind: resp.Kind, Value: resp.Value, Components: resp.Components}, nil
 }
 
+// ProvisionViaHelper performs one trusted provisioning exchange through the
+// same trusted helper executable (broker side, P0-3). The credential VALUE
+// crosses to the provider only over the private inherited descriptor — the
+// same trusted crossing as resolve — under the helper's PROVISIONING grant
+// (a distinct executable grant: provisioning authority is separate from
+// resolve authority on the AegisKeys side).
+//
+// Return contract:
+//   - ErrProvisionConflict: the durable request identity exists with
+//     DIFFERENT content (or promotion collided with an operator-managed
+//     binding). The caller must reconcile via ProvisionStatus and report
+//     a conflict — never silently retry with a new request ID and never
+//     auto-retry with the same one.
+//   - ErrVaultLocked: the provider vault is locked; retry with the SAME
+//     request ID after the operator unlocks.
+//   - ErrTransportUnavailable on uncertain exchanges: the provider MAY
+//     have committed. The caller MUST reconcile via ProvisionStatus with
+//     the original request ID before any retry decision.
+//   - Success: resp carries the durable metadata (record/binding IDs and
+//     lifecycle status) — never credential material.
+func ProvisionViaHelper(ctx context.Context, helperPath, aegisSocket string, req ProvisionRequest) (ProvisionResponse, error) {
+	if err := ValidProvisionRequest(req); err != nil {
+		return ProvisionResponse{}, err
+	}
+	hreq := HelperRequest{Provision: &HelperProvisionRequest{
+		RequestID:           req.RequestID,
+		Value:               req.Value,
+		Service:             req.Service,
+		Label:               req.Label,
+		Kind:                req.Kind,
+		Binding:             req.Binding,
+		Operations:          req.Operations,
+		Description:         req.Description,
+		EnvVarHint:          req.EnvVarHint,
+		ExpiresAt:           req.ExpiresAt,
+		StagedResolverGrant: req.ResolverGrant,
+	}}
+	resp, err := runHelperExchange(ctx, helperPath, aegisSocket, hreq, helperMaxProvisionRequestBytes)
+	if err != nil {
+		return ProvisionResponse{}, err
+	}
+	if resp.Provision == nil {
+		return ProvisionResponse{}, fmt.Errorf("%w: provisioning response missing metadata", ErrProtocolMismatch)
+	}
+	if resp.Provision.RequestID != req.RequestID {
+		return ProvisionResponse{}, fmt.Errorf("%w: request_id echo mismatch", ErrProtocolMismatch)
+	}
+	return *resp.Provision, nil
+}
+
 // HelperServe is the helper side of the protocol: it runs on the inherited
 // socketpair descriptor, reads exactly one HelperRequest, resolves it
 // through the AegisKeys broker at aegisSocket, and writes exactly one
@@ -338,15 +464,43 @@ func ResolveViaHelper(ctx context.Context, helperPath, aegisSocket, binding, ope
 // failing fast).
 func HelperServe(conn net.Conn, aegisSocket string) error {
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	// One read against the larger (provisioning) bound: the resolve mode
+	// re-asserts its own tighter bound after decode, so an oversized
+	// resolve request is still rejected — the frame is consumed either
+	// way, so there is no fallback re-read (a bound failure mid-frame
+	// leaves the stream misaligned).
 	var req HelperRequest
-	if err := readFramed(conn, &req, helperMaxRequestBytes); err != nil {
+	if err := readFramed(conn, &req, helperMaxProvisionRequestBytes); err != nil {
 		// A malformed request is a broker bug or tampering: no response
 		// frame can be trusted to help; exit non-zero with no output.
 		return fmt.Errorf("helper: read request: %w", err)
 	}
-	// The resolve itself is budgeted (resolveInHelper); extend the
-	// descriptor deadline to cover it plus the response write.
+	if req.Provision == nil {
+		body, merr := json.Marshal(req)
+		if merr != nil || len(body) > helperMaxRequestBytes {
+			return fmt.Errorf("helper: read request: resolve frame bounds")
+		}
+	}
+	// The resolve/provision itself is budgeted; extend the descriptor
+	// deadline to cover it plus the response write.
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	if req.Provision != nil {
+		resp, err := provisionInHelper(aegisSocket, req)
+		if err != nil {
+			resp := HelperResponse{OK: false, Error: helperSentinel(err)}
+			if werr := writeFramed(conn, resp, helperMaxResponseBytes); werr != nil {
+				return fmt.Errorf("helper: write error response: %w", werr)
+			}
+			// Sentinel denial delivered (this includes the provider's
+			// credential_conflict: the durable identity exists and the
+			// broker must reconcile, never blind-retry).
+			return nil
+		}
+		if werr := writeFramed(conn, resp, helperMaxResponseBytes); werr != nil {
+			return fmt.Errorf("helper: write response: %w", werr)
+		}
+		return nil
+	}
 	mat, err := resolveInHelper(aegisSocket, req)
 	if err != nil {
 		resp := HelperResponse{OK: false, Error: helperSentinel(err)}
@@ -391,6 +545,45 @@ func resolveInHelper(aegisSocket string, req HelperRequest) (CredentialMaterial,
 		return CredentialMaterial{}, err
 	}
 	return cli.ResolveAttested(ctx, req.Binding, req.Operation, req.OperationID, req.AttestNonce, req.AttestSig)
+}
+
+// provisionInHelper performs the trusted provisioning forward on the
+// helper side, with a short overall budget so the process lifetime stays
+// minimal. The helper holds no authorization logic: the provider enforces
+// the provisioning grant (helper executable identity + requested
+// service/kind) and the durable request-ID identity contract.
+func provisionInHelper(aegisSocket string, req HelperRequest) (HelperResponse, error) {
+	p := req.Provision
+	if p == nil || p.RequestID == "" || p.Value == "" {
+		return HelperResponse{}, fmt.Errorf("%w: provision", ErrRequestInvalid)
+	}
+	preq := ProvisionRequest{
+		RequestID:     p.RequestID,
+		Value:         p.Value,
+		Service:       p.Service,
+		Label:         p.Label,
+		Kind:          p.Kind,
+		Binding:       p.Binding,
+		Operations:    p.Operations,
+		Description:   p.Description,
+		EnvVarHint:    p.EnvVarHint,
+		ExpiresAt:     p.ExpiresAt,
+		ResolverGrant: p.StagedResolverGrant,
+	}
+	if err := ValidProvisionRequest(preq); err != nil {
+		return HelperResponse{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	cli, err := ConnectSocket(aegisSocket)
+	if err != nil {
+		return HelperResponse{}, err
+	}
+	out, err := cli.Provision(ctx, preq)
+	if err != nil {
+		return HelperResponse{}, err
+	}
+	return HelperResponse{OK: true, Provision: &out}, nil
 }
 
 // newAttestNonce generates a fresh single-use nonce (hardened-parent
