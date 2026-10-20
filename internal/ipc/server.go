@@ -1145,7 +1145,28 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 			// returns it (the reconciliation anchor for every retry).
 			pReq.RequestID = "prov-" + newRequestID()
 		}
-		report, ref, err := s.svc.ProvisionCredential(context.Background(), principal, strParam(p, "mode"), pReq)
+		// P0-B: a save_and_use request may carry the RECORDED intended
+		// use (operation/destination/params reviewed by the trusted human
+		// at save time). It is persisted as the durable pending
+		// continuation — never an authorization.
+		var intent *service.UseIntent
+		if strParam(p, "mode") == service.IntakeSaveAndUse {
+			if useRaw, ok := p["use_intent"].(map[string]interface{}); ok {
+				ui := &service.UseIntent{Operation: strParam(useRaw, "operation"), Target: strParam(useRaw, "destination_id")}
+				if paramsRaw, ok := useRaw["params"].(map[string]interface{}); ok {
+					ui.Params = map[string]string{}
+					for k, v := range paramsRaw {
+						if vs, ok := v.(string); ok {
+							ui.Params[k] = vs
+						}
+					}
+				}
+				if ui.Operation != "" {
+					intent = ui
+				}
+			}
+		}
+		report, ref, err := s.svc.ProvisionCredential(context.Background(), principal, strParam(p, "mode"), pReq, intent)
 		if err != nil {
 			// The durable reference (if created) carries the honest
 			// reconcile state; report it alongside the error.

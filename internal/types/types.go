@@ -33,6 +33,38 @@ type SecretReference struct {
 	UseOnce bool `json:"use_once,omitempty"`
 }
 
+// ProvisionUseIntent is the durable continuation record for a
+// save_and_use intake: the intended operation (destination, parameters,
+// principal, request identity) REVIEWED AT SAVE TIME, persisted before any
+// approval exists. It carries NO authorization: the recorded workflow only
+// becomes an ordinary pending use REQUEST through the continuation, which
+// still needs the operator's independent approval before execution.
+// Intent states: pending (recorded, grant not yet usable) → submitted (a
+// durable use request exists; op_id set) → completed/failed (the op's
+// terminal state) / blocked (reference conflicted or revoked pre-dispatch).
+type ProvisionUseIntent struct {
+	ID                 string            `json:"id"`
+	ProvisionRequestID string            `json:"provision_request_id"`
+	RefID              string            `json:"ref_id"`
+	Principal          string            `json:"principal"`
+	Operation          string            `json:"operation"`
+	Target             string            `json:"target,omitempty"`
+	Params             map[string]string `json:"params,omitempty"`
+	OpID               string            `json:"op_id,omitempty"`
+	State              string            `json:"state"`
+	CreatedAt          time.Time         `json:"created_at"`
+	UpdatedAt          time.Time         `json:"updated_at"`
+}
+
+// ProvisionUseIntent* are the durable intent lifecycle states.
+const (
+	ProvisionUseIntentPending   = "pending"
+	ProvisionUseIntentSubmitted = "submitted"
+	ProvisionUseIntentCompleted = "completed"
+	ProvisionUseIntentFailed    = "failed"
+	ProvisionUseIntentBlocked   = "blocked"
+)
+
 // ProvisionReconcile* are the durable reconcile statuses of a provisioned
 // secret reference ('uncertain' = the provider may have committed; retry
 // the SAME provision request ID to reconcile, per the exactly-once

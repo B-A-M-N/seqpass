@@ -25,14 +25,32 @@ import (
 // Trusted-intake persistence modes.
 const (
 	// IntakeUseOnce: the credential is saved in AegisKeys and consumable
-	// for exactly one authorized execution.
+	// for exactly one authorized execution. PERSISTED single-use: the
+	// provider retains the encrypted credential durably; SeqPass limits
+	// its use to one authorized execution (distinct from the transient
+	// relay handoff, P0-C).
 	IntakeUseOnce = "use_once"
 	// IntakeSaveOnly: the credential is saved and bound; no immediate use.
 	IntakeSaveOnly = "save_only"
-	// IntakeSaveAndUse: save, then attempt an immediate authorized use —
-	// reported as TWO separate durable outcomes (storage vs execution).
+	// IntakeSaveAndUse: save, then record the intended use as a durable
+	// PENDING CONTINUATION — reported as TWO separate durable outcomes
+	// (storage vs execution). Saving NEVER authorizes use: the recorded
+	// intent becomes an ordinary pending use request only when the
+	// provider grant is usable, and still requires the operator's
+	// independent operation approval before any dispatch.
 	IntakeSaveAndUse = "save_and_use"
 )
+
+// UseIntent is the intended operation of a save_and_use request, REVIEWED
+// by the trusted human at save time and persisted as the durable
+// continuation record. It carries no authorization and no credential
+// material — only the operation shape (destination, parameters, scope)
+// the continuation replays into the existing use-request machinery.
+type UseIntent struct {
+	Operation string
+	Target    string
+	Params    map[string]string
+}
 
 // validIntakePersistence fail-closes the mode selection.
 func validIntakePersistence(mode string) bool {
@@ -72,10 +90,16 @@ type ProvisionReport struct {
 	// outcome. A nil UseResult with Saved=true means the use phase never
 	// started (not approved / not ready), NOT a failed save.
 	UseResult *UseOutcomeReport
+	// IntentState (save_and_use with a recorded intent): the durable
+	// continuation state — pending (awaiting grant + operator approval),
+	// submitted (use request exists; approve op <UseResult.OpID>),
+	// completed/failed (the op's terminal outcome), blocked (reference
+	// conflicted or policy denied before any dispatch).
+	IntentState string
 }
 
-// UseOutcomeReport is the execution outcome of the immediate use attempt
-// (save_and_use only): a distinct durable event from the save.
+// UseOutcomeReport is the outcome of the recorded save_and_use
+// continuation (a distinct durable event from the save).
 type UseOutcomeReport struct {
 	Executed bool
 	OpID     string
@@ -99,17 +123,36 @@ func (s *Service) provisionedSocket() string {
 // the direct client path stands in, with the in-process identity as the
 // provisioning peer.
 //
-// Reconcile-before-recreate: an existing durable reference under the same
-// request ID drives the whole flow — pending/uncertain reconcile by
-// status (resubmitting the SAME request ID when the provider never
-// committed), committed/ready return idempotently, conflict/failed fail
-// closed until the operator reconciles.
-func (s *Service) ProvisionCredential(ctx context.Context, caller, mode string, req aegiskeys.ProvisionRequest) (*ProvisionReport, *types.SecretReference, error) {
+// ProvisionCredential creates (or idempotently recovers) one provisioned
+// credential under mode. caller is the authenticated trusted-intake
+// principal (audit only — the provider enforces its own provisioning
+// grant). The credential VALUE travels only through the trusted helper
+// crossing (ProvisionViaHelper); in test/dev mode (no helper configured)
+// the direct client path stands in, with the in-process identity as the
+// provisioning peer.
+//
+// intent (save_and_use only) is the intended operation reviewed by the
+// trusted human at save time: it is persisted as the durable pending
+// continuation BEFORE any approval exists, and progressed exclusively
+// through the existing use-request machinery (SubmitUse/ApproveUse/
+// ExecuteUse) — no second scheduler, no implicit authorization.
+func (s *Service) ProvisionCredential(ctx context.Context, caller, mode string, req aegiskeys.ProvisionRequest, intent *UseIntent) (*ProvisionReport, *types.SecretReference, error) {
 	if !validIntakePersistence(mode) {
 		return nil, nil, fmt.Errorf("unknown persistence mode %q: use use_once, save_only or save_and_use", mode)
 	}
 	if err := aegiskeys.ValidProvisionRequest(req); err != nil {
 		return nil, nil, err
+	}
+	if intent != nil && mode != IntakeSaveAndUse {
+		return nil, nil, fmt.Errorf("use intent requires mode %q", IntakeSaveAndUse)
+	}
+	if mode == IntakeSaveAndUse && intent != nil {
+		if intent.Operation == "" {
+			return nil, nil, errors.New("save_and_use intent requires an operation")
+		}
+		if _, err := validateDriverParams(intent.Operation, intent.Params); err != nil {
+			return nil, nil, fmt.Errorf("save_and_use intent invalid: %w", err)
+		}
 	}
 
 	ref, err := s.db.GetSecretRefByProvisionRequest(req.RequestID)
@@ -117,7 +160,7 @@ func (s *Service) ProvisionCredential(ctx context.Context, caller, mode string, 
 		return nil, nil, fmt.Errorf("provision lookup failed: %w", err)
 	}
 	if ref != nil {
-		return s.reconcileProvision(ctx, caller, mode, req, ref)
+		return s.reconcileProvision(ctx, caller, mode, req, intent, ref)
 	}
 
 	// Write-ahead durable reference BEFORE any provider call: a crash
@@ -135,7 +178,23 @@ func (s *Service) ProvisionCredential(ctx context.Context, caller, mode string, 
 	if err := s.db.CreateSecretRef(ref); err != nil {
 		return nil, nil, fmt.Errorf("provision write-ahead failed: %w", err)
 	}
-	return s.submitProvision(ctx, caller, mode, req, ref)
+	if intent != nil {
+		// The recorded workflow is durable before the provider call: a
+		// crash mid-provision leaves the intent pending; the retry
+		// (same request ID) recovers the SAME intent — never a new one.
+		if err := s.db.CreateProvisionUseIntent(&types.ProvisionUseIntent{
+			ProvisionRequestID: req.RequestID,
+			RefID:              ref.ID,
+			Principal:          caller,
+			Operation:          intent.Operation,
+			Target:             intent.Target,
+			Params:             intent.Params,
+			State:              types.ProvisionUseIntentPending,
+		}); err != nil {
+			return nil, ref, fmt.Errorf("provision use intent persist failed: %w", err)
+		}
+	}
+	return s.submitProvision(ctx, caller, mode, req, intent, ref)
 }
 
 // reconcileProvision advances an existing durable reference. The request
@@ -143,10 +202,16 @@ func (s *Service) ProvisionCredential(ctx context.Context, caller, mode string, 
 // with the same request ID but different content is refused locally
 // before any provider interaction (the provider would also conflict, but
 // the local check keeps SeqPass's durable identity the anchor).
-func (s *Service) reconcileProvision(ctx context.Context, caller, mode string, req aegiskeys.ProvisionRequest, ref *types.SecretReference) (*ProvisionReport, *types.SecretReference, error) {
+//
+// P0-D note: the binding/owner anchor below is the legacy check; the full
+// request-identity reconciliation (service, kind, label, operations,
+// expiry, mode, value commitment) is enforced by validateRequestIdentity.
+func (s *Service) reconcileProvision(ctx context.Context, caller, mode string, req aegiskeys.ProvisionRequest, intent *UseIntent, ref *types.SecretReference) (*ProvisionReport, *types.SecretReference, error) {
 	switch ref.ReconcileStatus {
 	case types.ProvisionReconcileConflict:
 		return nil, ref, errors.New("provisioning request conflicts with committed content: operator reconciliation required")
+	case types.ProvisionReconcileIdentityConflict:
+		return nil, ref, errors.New("provisioning request identity conflict: operator reconciliation required")
 	case types.ProvisionReconcileConsumed:
 		return nil, ref, errors.New("use-once credential already consumed")
 	case types.ProvisionReconcileFailed:
@@ -159,25 +224,31 @@ func (s *Service) reconcileProvision(ctx context.Context, caller, mode string, r
 		return nil, ref, errors.New("provisioning request identity mismatch (binding/owner changed under the same request ID)")
 	}
 	switch ref.ReconcileStatus {
-	case types.ProvisionReconcileCommitted, types.ProvisionReconcileReady:
+	case types.ProvisionReconcileCommitted, types.ProvisionReconcileReady, types.ProvisionReconcileGrantPresent:
 		// Already durable: idempotent recovery, no provider round trip.
-		return &ProvisionReport{
+		// The cached provider status is the LAST OBSERVED state, never a
+		// freshly verified readiness verdict (P1-A).
+		report := &ProvisionReport{
 			Saved:                true,
 			ProviderStatus:       providerStatusOf(ref),
 			ReEnrollmentRequired: ref.ReconcileStatus == types.ProvisionReconcileCommitted,
 			RefID:                ref.ID,
-		}, ref, nil
+		}
+		if mode == IntakeSaveAndUse {
+			s.reportIntentOutcome(ref, report)
+		}
+		return report, ref, nil
 	}
 	// pending/uncertain: reconcile with the provider by the ORIGINAL
 	// request ID before resubmitting.
 	st, err := s.provisionStatus(ctx, req.RequestID)
 	switch {
 	case err == nil:
-		return s.advanceProvision(ctx, caller, mode, req, ref, st, true)
+		return s.advanceProvision(ctx, caller, mode, req, intent, ref, st, true)
 	case errors.Is(err, aegiskeys.ErrProvisionUnknown):
 		// The provider never committed this request: resubmit the SAME
 		// request ID (exactly-once retry).
-		return s.submitProvision(ctx, caller, mode, req, ref)
+		return s.submitProvision(ctx, caller, mode, req, intent, ref)
 	case errors.Is(err, aegiskeys.ErrTransportUnavailable), errors.Is(err, aegiskeys.ErrVaultLocked):
 		return nil, ref, fmt.Errorf("provision reconciliation unavailable (still uncertain): %w", err)
 	default:
@@ -187,12 +258,12 @@ func (s *Service) reconcileProvision(ctx context.Context, caller, mode string, r
 
 // submitProvision performs the provider call for a write-ahead reference
 // and advances the durable state from the outcome.
-func (s *Service) submitProvision(ctx context.Context, caller, mode string, req aegiskeys.ProvisionRequest, ref *types.SecretReference) (*ProvisionReport, *types.SecretReference, error) {
+func (s *Service) submitProvision(ctx context.Context, caller, mode string, req aegiskeys.ProvisionRequest, intent *UseIntent, ref *types.SecretReference) (*ProvisionReport, *types.SecretReference, error) {
 	st, err := s.provisionCall(ctx, req)
 	if err != nil {
 		return s.failProvision(ctx, req, ref, err)
 	}
-	return s.advanceProvision(ctx, caller, mode, req, ref, st, true)
+	return s.advanceProvision(ctx, caller, mode, req, intent, ref, st, true)
 }
 
 // provisionCall routes the provider call through the trusted crossing.
@@ -238,7 +309,7 @@ func (s *Service) provisionStatus(ctx context.Context, requestID string) (aegisk
 // metadata, altered replay) is never adopted: the original pins are
 // preserved and a durable identity conflict blocks all subsequent
 // execution until explicit operator reconciliation.
-func (s *Service) advanceProvision(ctx context.Context, caller, mode string, req aegiskeys.ProvisionRequest, ref *types.SecretReference, st aegiskeys.ProvisionResponse, contacted bool) (*ProvisionReport, *types.SecretReference, error) {
+func (s *Service) advanceProvision(ctx context.Context, caller, mode string, req aegiskeys.ProvisionRequest, intent *UseIntent, ref *types.SecretReference, st aegiskeys.ProvisionResponse, contacted bool) (*ProvisionReport, *types.SecretReference, error) {
 	report := &ProvisionReport{ProviderStatus: st.Status, RefID: ref.ID}
 	switch st.Status {
 	case aegiskeys.ProvisionStatusCredentialCommitted, aegiskeys.ProvisionStatusBindingPending:
@@ -319,29 +390,211 @@ func (s *Service) advanceProvision(ctx context.Context, caller, mode string, req
 	default:
 		return nil, ref, fmt.Errorf("unknown provider status %q", st.Status)
 	}
-	// save_and_use: the SECOND durable outcome. Only a ready credential
-	// can be used immediately; otherwise the report carries the saved
-	// state with an explicit non-executed use outcome — the operator
-	// approves the staged grant, and the normal protected-use flow
-	// executes later. The use outcome is always PRESENT for save_and_use:
-	// absence would read as a skipped phase, not a pending authorization.
+	// save_and_use: the SECOND durable outcome. Saving NEVER authorizes
+	// use — the recorded intent (if any) is progressed only through the
+	// continuation (grant usable → durable pending use request → operator
+	// approval → existing driver execution). The use outcome is always
+	// PRESENT for save_and_use: absence would read as a skipped phase,
+	// not a pending authorization.
 	if mode == IntakeSaveAndUse {
-		if ref.ReconcileStatus != types.ProvisionReconcileReady {
-			report.UseResult = &UseOutcomeReport{
-				Executed: false,
-				Err:      "authorization_pending: approve the staged resolver grant, then submit a protected-use request against the binding",
-			}
-			return report, ref, nil
-		}
-		report.UseResult = s.immediateUse(ctx, caller, req, ref)
+		s.progressProvisionUseIntent(ctx, caller, ref, report)
 	}
 	return report, ref, nil
+}
+
+// progressProvisionUseIntent advances the recorded save_and_use workflow
+// one honest step and reflects it in the report (P0-B). Continuation is
+// STATE-DRIVEN and idempotent:
+//   - pending intent + grant NOT usable → stays pending (no dispatch, no
+//     use request yet — the operator approves the staged grant first).
+//   - pending intent + grant usable → the intent CAS (pending→submitted)
+//     is taken FIRST with a DETERMINISTIC use-request ID; only the winner
+//     calls SubmitUse, and a crash-recovery retry reuses the same ID (the
+//     uses PK refuses duplicates) → submitted; the operator's
+//     independent approval is still required.
+//   - submitted → report the use request's CURRENT durable status
+//     (reconcile, never re-submit, never duplicate a dispatch).
+//   - reference conflicted/blocked → intent blocked; no request created.
+//
+// The intent is recovered on every later poll: a restart never loses the
+// recorded workflow.
+func (s *Service) progressProvisionUseIntent(ctx context.Context, caller string, ref *types.SecretReference, report *ProvisionReport) {
+	it, err := s.db.GetProvisionUseIntentByRequest(ref.ProvisionRequestID)
+	if err != nil {
+		report.UseResult = &UseOutcomeReport{Err: fmt.Sprintf("intent lookup failed: %v", err)}
+		return
+	}
+	if it == nil {
+		// save_and_use without an explicit intent: awaiting_authorization
+		// is a legitimate terminal report for this call.
+		report.UseResult = &UseOutcomeReport{
+			Err: "saved; no use intent recorded — submit a protected-use request against the binding when ready",
+		}
+		return
+	}
+	report.IntentState = it.State
+	switch it.State {
+	case types.ProvisionUseIntentCompleted, types.ProvisionUseIntentFailed, types.ProvisionUseIntentBlocked:
+		// Terminal: report the recorded outcome, never re-dispatch.
+		report.UseResult = s.intentOutcomeReport(it)
+		return
+	case types.ProvisionUseIntentSubmitted:
+		// Reconcile the recorded request; NEVER create a second one.
+		report.UseResult = s.intentOutcomeReport(it)
+		// The outcome mirror may have advanced the intent to its terminal
+		// state (completed/failed) — reflect the durable truth.
+		report.IntentState = it.State
+		return
+	}
+	// Pending: the grant must be usable BEFORE the request is created so
+	// the operator's approval leads directly to an executable state
+	// (grant approval, then operation approval).
+	switch ref.ReconcileStatus {
+	case types.ProvisionReconcileGrantPresent, types.ProvisionReconcileReady:
+		// EXACTLY-ONCE submission anchor: the use request's ID is
+		// DETERMINISTIC ("intentop-"+intent ID) and the intent CAS
+		// (pending→submitted) is taken BEFORE SubmitUse. Only the CAS
+		// winner ever creates the request; a concurrent or recovered
+		// continuation sees submitted and reconciles instead. If the
+		// winner crashes before SubmitUse, the next continuation retries
+		// with the SAME deterministic ID — the uses-table PRIMARY KEY
+		// makes the retry idempotent (a duplicate INSERT is refused), so
+		// no orphan request and no duplicate dispatch can ever exist.
+		opID := "intentop-" + it.ID
+		// intentRacerHook widens the inter-continuation window in tests
+		// ONLY (nil in production): the mutation NC proves the CAS-first
+		// ordering is load-bearing by racing through this exact point.
+		if intentRacerHook != nil {
+			intentRacerHook()
+		}
+		taken, terr := s.db.TakeProvisionUseIntent(it.ID, opID)
+		if terr != nil {
+			report.UseResult = &UseOutcomeReport{Err: fmt.Sprintf("intent claim failed: %v", terr)}
+			return
+		}
+		if !taken {
+			// Lost the CAS: a concurrent continuation already submitted
+			// THIS intent. Report that request; never a duplicate.
+			fresh, gerr := s.db.GetProvisionUseIntentByRequest(ref.ProvisionRequestID)
+			if gerr == nil && fresh != nil {
+				report.IntentState = fresh.State
+				report.UseResult = s.intentOutcomeReport(fresh)
+				return
+			}
+			report.UseResult = &UseOutcomeReport{OpID: opID, Err: "intent already submitted"}
+			return
+		}
+		// grant usable → submit the recorded workflow as an ordinary
+		// pending use request (policy revalidated inside SubmitUse).
+		useReq := &types.UseRequest{
+			ID:        opID,
+			SecretRef: ref.ID,
+			Operation: it.Operation,
+			Target:    it.Target,
+			Params:    it.Params,
+		}
+		if _, serr := s.SubmitUse(it.Principal, useReq); serr != nil {
+			// Policy denial or invalid shape: the recorded workflow can
+			// never be submitted as-is. Durable terminal state; the SAVE
+			// stands (independent outcomes).
+			_, _ = s.db.AdvanceProvisionUseIntent(it.ID, types.ProvisionUseIntentFailed)
+			report.IntentState = types.ProvisionUseIntentFailed
+			report.UseResult = &UseOutcomeReport{Err: "recorded use intent denied at submission: " + serr.Error()}
+			s.audit(ref.ID, "credential_use_intent_failed", caller, it.Target, "submit-denied")
+			return
+		}
+		report.IntentState = types.ProvisionUseIntentSubmitted
+		report.UseResult = &UseOutcomeReport{
+			OpID: opID,
+			Err:  "use request created; independent operation approval required: approve op " + opID,
+		}
+		s.audit(ref.ID, "credential_use_intent_submitted", caller, it.Target, opID)
+	case types.ProvisionReconcileCommitted, types.ProvisionReconcilePending, types.ProvisionReconcileUncertain:
+		report.UseResult = &UseOutcomeReport{
+			Err: "authorization_pending: approve the staged resolver grant (aegiskeys access provision approve --request " +
+				ref.ProvisionRequestID + "); the recorded use intent is preserved and progresses automatically",
+		}
+	default:
+		// conflict/identity_conflict/failed/consumed: blocked pre-dispatch.
+		_, _ = s.db.AdvanceProvisionUseIntent(it.ID, types.ProvisionUseIntentBlocked)
+		report.IntentState = types.ProvisionUseIntentBlocked
+		report.UseResult = &UseOutcomeReport{Err: "recorded use intent blocked: reference is " + ref.ReconcileStatus}
+		s.audit(ref.ID, "credential_use_intent_blocked", caller, it.Target, ref.ReconcileStatus)
+	}
+}
+
+// intentOutcomeReport mirrors the recorded use request's CURRENT durable
+// status into the report (reconciliation, not re-execution). A terminal
+// request status is mirrored into the intent's terminal state exactly
+// once (CAS-guarded): the recorded workflow closes when its request
+// closes, and a later poll re-reports the closed state.
+func (s *Service) intentOutcomeReport(it *types.ProvisionUseIntent) *UseOutcomeReport {
+	out := &UseOutcomeReport{OpID: it.OpID}
+	if it.OpID == "" {
+		out.Err = "intent " + it.State + " without a recorded use request"
+		return out
+	}
+	ur, err := s.db.GetUse(it.OpID)
+	if err != nil || ur == nil {
+		// The durable intent state is authoritative: a terminal intent
+		// reports itself even if its request row was ever pruned.
+		switch it.State {
+		case types.ProvisionUseIntentCompleted:
+			out.Executed = true
+		case types.ProvisionUseIntentFailed:
+			out.Err = "recorded use workflow failed"
+		case types.ProvisionUseIntentBlocked:
+			out.Err = "recorded use workflow blocked before dispatch"
+		default:
+			out.Err = "recorded use request missing"
+		}
+		return out
+	}
+	switch ur.Status {
+	case types.StatusCompleted:
+		out.Executed = true
+		if it.State != types.ProvisionUseIntentCompleted {
+			if _, aerr := s.db.AdvanceProvisionUseIntent(it.ID, types.ProvisionUseIntentCompleted); aerr == nil {
+				it.State = types.ProvisionUseIntentCompleted
+			}
+		}
+	case types.StatusFailed:
+		out.Err = "recorded use request failed"
+		if it.State != types.ProvisionUseIntentFailed {
+			if _, aerr := s.db.AdvanceProvisionUseIntent(it.ID, types.ProvisionUseIntentFailed); aerr == nil {
+				it.State = types.ProvisionUseIntentFailed
+			}
+		}
+	case types.StatusUncertain:
+		out.Err = "recorded use request uncertain: reconcile the external outcome; do not re-dispatch"
+	default:
+		out.Err = "recorded use request " + ur.Status + "; awaiting operator approval" +
+			" (aegiskeys-independent: approve the SeqPass operation, then execute)"
+	}
+	return out
+}
+
+// reportIntentOutcome is the idempotent-recovery variant: reflect the
+// recorded intent's state on a cached (no provider round trip) report.
+func (s *Service) reportIntentOutcome(ref *types.SecretReference, report *ProvisionReport) {
+	it, err := s.db.GetProvisionUseIntentByRequest(ref.ProvisionRequestID)
+	if err != nil || it == nil {
+		return
+	}
+	report.IntentState = it.State
+	report.UseResult = s.intentOutcomeReport(it)
 }
 
 // expectedPendingOrUncertain are the pre-assignment lifecycle states: only
 // a reference that has NOT yet been assigned a stable provider identity
 // may take one.
 var expectedPendingOrUncertain = []string{types.ProvisionReconcilePending, types.ProvisionReconcileUncertain}
+
+// intentRacerHook is a test-only seam (always nil in production builds):
+// invoked at the exact point the continuation CAS makes the submission
+// exactly-once, so the concurrency regression can deterministically
+// interleave racers there.
+var intentRacerHook func()
 
 // applyIdentity mirrors the (verified, already-transitioned) provider
 // identity into the in-memory reference.
@@ -405,6 +658,15 @@ func (s *Service) recordIdentityConflict(ctx context.Context, caller string, ref
 	s.audit(ref.ID, "credential_identity_conflict", caller, ref.Binding,
 		fmt.Sprintf("provider record_id=%q binding_id=%q diverges from pinned record_id=%q binding_id=%q; original pins preserved; execution blocked pending operator reconciliation",
 			st.RecordID, st.BindingID, ref.RecordID, ref.BindingID))
+	// P0-B: a recorded save_and_use workflow cannot progress past a
+	// conflicted reference — block it durably (pre-dispatch) so no later
+	// poll submits it against an unresolvable identity.
+	if it, ierr := s.db.GetProvisionUseIntentByRequest(ref.ProvisionRequestID); ierr == nil && it != nil &&
+		(it.State == types.ProvisionUseIntentPending || it.State == types.ProvisionUseIntentSubmitted) {
+		if _, aerr := s.db.AdvanceProvisionUseIntent(it.ID, types.ProvisionUseIntentBlocked); aerr == nil {
+			s.audit(ref.ID, "credential_use_intent_blocked", caller, ref.Binding, "identity_conflict")
+		}
+	}
 	return nil
 }
 
@@ -412,12 +674,20 @@ func (s *Service) recordIdentityConflict(ctx context.Context, caller string, ref
 // report carries the conflict so trusted surfaces can render the
 // reconciliation procedure instead of a generic error.
 func (s *Service) refuseConflicted(ref *types.SecretReference) (*ProvisionReport, *types.SecretReference, error) {
-	return &ProvisionReport{
+	report := &ProvisionReport{
 		ProviderStatus:   providerStatusOf(ref),
 		RefID:            ref.ID,
 		IdentityConflict: true,
 		ConflictNextStep: "operator reconciliation required: verify the provider binding/record identities, then resolve the conflict via an operator-authorized procedure before any further use",
-	}, ref, errors.New("provider identity diverges from the pinned record/binding identity: execution blocked pending operator reconciliation")
+	}
+	// P0-B: recordIdentityConflict blocked the recorded intent — surface it.
+	if it, ierr := s.db.GetProvisionUseIntentByRequest(ref.ProvisionRequestID); ierr == nil && it != nil {
+		report.IntentState = it.State
+		if it.State == types.ProvisionUseIntentBlocked {
+			report.UseResult = &UseOutcomeReport{Err: "recorded use intent blocked: provider identity divergence"}
+		}
+	}
+	return report, ref, errors.New("provider identity diverges from the pinned record/binding identity: execution blocked pending operator reconciliation")
 }
 
 // failProvision durably records the provider refusal. access_denied /
@@ -439,21 +709,6 @@ func (s *Service) failProvision(ctx context.Context, req aegiskeys.ProvisionRequ
 		// retries the same request ID.
 		_ = s.db.UpdateSecretRefProvisionState(ref.ID, types.ProvisionReconcileUncertain, "", "")
 		return nil, ref, fmt.Errorf("provision uncertain (reconcile by request_id): %w", err)
-	}
-}
-
-// immediateUse executes the immediate-use half of save_and_use through the
-// normal protected-use authorization path. This implementation defers to
-// the existing flow: an immediate use still requires an APPROVED operation
-// (the approval machinery is unchanged — provisioning never grants live
-// authorization), so the report's UseResult states that no execution was
-// possible yet, with the exact next step. It never fabricates an
-// execution outcome.
-func (s *Service) immediateUse(ctx context.Context, caller string, req aegiskeys.ProvisionRequest, ref *types.SecretReference) *UseOutcomeReport {
-	s.audit(ref.ID, "credential_use_deferred", caller, req.Binding, "authorization_pending")
-	return &UseOutcomeReport{
-		Executed: false,
-		Err:      "authorization_pending: submit a protected-use request against the binding; provisioning never grants live authorization",
 	}
 }
 
@@ -551,6 +806,13 @@ func (s *Service) ProvisionStatusReport(ctx context.Context, caller, requestID s
 		report.Saved = ref.ReconcileStatus == types.ProvisionReconcileCommitted ||
 			ref.ReconcileStatus == types.ProvisionReconcileGrantPresent ||
 			ref.ReconcileStatus == types.ProvisionReconcileReady
+	}
+	// P0-B continuation: the poll is the progression driver. A recorded
+	// save_and_use intent is progressed/reconciled on every status
+	// refresh — a restart or a missed poll never stalls the recorded
+	// workflow, and a submitted intent is reconciled (never re-submitted).
+	if it, ierr := s.db.GetProvisionUseIntentByRequest(requestID); ierr == nil && it != nil {
+		s.progressProvisionUseIntent(ctx, caller, ref, report)
 	}
 	return report, ref, nil
 }

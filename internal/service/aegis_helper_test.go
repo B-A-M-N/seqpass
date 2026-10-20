@@ -417,6 +417,18 @@ func (m *helperMockBroker) handleV3Status(conn net.Conn, requestID string) {
 			}
 		}
 	}
+	// Grant-approval simulation (P0-B tests): a control file named
+	// grantready-<requestID> rewrites the status to "ready" — modeling
+	// the operator approving the staged resolver grant in AegisKeys.
+	if _, gerr := os.Stat(filepath.Join(filepath.Dir(m.sockPath), "grantready-"+requestID)); gerr == nil {
+		var body map[string]interface{}
+		if jerr := json.Unmarshal([]byte(resp), &body); jerr == nil {
+			body["status"] = "ready"
+			if rewritten, merr := json.Marshal(body); merr == nil {
+				resp = string(rewritten)
+			}
+		}
+	}
 	writeJSONBody(conn, resp)
 }
 
@@ -609,6 +621,16 @@ func (m *mockBrokerChild) divergeStatusResponse(requestID, recordID, bindingID s
 	path := filepath.Join(filepath.Dir(m.sockPath), "statusdiverge-"+requestID)
 	if err := os.WriteFile(path, []byte(recordID+" "+bindingID), 0600); err != nil {
 		m.t.Fatalf("statusdiverge control file: %v", err)
+	}
+}
+
+// grantReady models the operator approving the staged resolver grant:
+// the next status reconciliation reports the request as ready.
+func (m *mockBrokerChild) grantReady(requestID string) {
+	m.t.Helper()
+	path := filepath.Join(filepath.Dir(m.sockPath), "grantready-"+requestID)
+	if err := os.WriteFile(path, []byte("ready"), 0600); err != nil {
+		m.t.Fatalf("grantready control file: %v", err)
 	}
 }
 
@@ -1005,7 +1027,7 @@ func TestProvisionCredentialLifecycle(t *testing.T) {
 		RequestID: "prov-svc-0003", Value: "svc-secret", Service: "svc", Label: "L3",
 		Kind: "api-key", Binding: "seqpass/s3", Operations: []string{"http.request"},
 	}
-	report, ref, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeSaveOnly, req)
+	report, ref, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeSaveOnly, req, nil)
 	if err != nil {
 		t.Fatalf("ProvisionCredential: %v", err)
 	}
@@ -1032,7 +1054,7 @@ func TestProvisionCredentialLifecycle(t *testing.T) {
 
 	// Duplicate request (retry after crash): idempotent recovery — the
 	// SAME reference, no provider round trip, no duplicate.
-	report2, ref2, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeSaveOnly, req)
+	report2, ref2, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeSaveOnly, req, nil)
 	if err != nil {
 		t.Fatalf("idempotent retry: %v", err)
 	}
@@ -1044,7 +1066,7 @@ func TestProvisionCredentialLifecycle(t *testing.T) {
 	// refused locally (rebind protection at the intake boundary).
 	drift := req
 	drift.Binding = "seqpass/other"
-	if _, _, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeSaveOnly, drift); err == nil {
+	if _, _, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeSaveOnly, drift, nil); err == nil {
 		t.Fatal("binding drift under the same request ID was accepted")
 	}
 
@@ -1054,7 +1076,7 @@ func TestProvisionCredentialLifecycle(t *testing.T) {
 		RequestID: "prov-svc-0004", Value: "svc-secret-4", Service: "svc", Label: "L4",
 		Kind: "api-key", Binding: "seqpass/s4", Operations: []string{"http.request"},
 	}
-	reportU, refU, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeSaveAndUse, reqU)
+	reportU, refU, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeSaveAndUse, reqU, nil)
 	if err != nil {
 		t.Fatalf("save_and_use: %v", err)
 	}
@@ -1073,7 +1095,7 @@ func TestProvisionCredentialLifecycle(t *testing.T) {
 		RequestID: "prov-svc-0005", Value: "svc-secret-5", Service: "svc", Label: "L5",
 		Kind: "api-key", Binding: "seqpass/s5", Operations: []string{"http.request"},
 	}
-	_, refO, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeUseOnce, reqO)
+	_, refO, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeUseOnce, reqO, nil)
 	if err != nil {
 		t.Fatalf("use_once: %v", err)
 	}
@@ -1088,7 +1110,7 @@ func TestProvisionCredentialLifecycle(t *testing.T) {
 		t.Fatal("second consume of a use-once ref succeeded")
 	}
 	// A use-once retry after consumption fails closed (no re-provision).
-	if _, _, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeUseOnce, reqO); err == nil {
+	if _, _, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeUseOnce, reqO, nil); err == nil {
 		t.Fatal("use-once retry after consumption was accepted")
 	}
 }
@@ -1098,12 +1120,12 @@ func TestProvisionCredentialLifecycle(t *testing.T) {
 func TestProvisionCredentialModeValidation(t *testing.T) {
 	svc := testService(t)
 	req := aegiskeys.ProvisionRequest{RequestID: "x", Value: "v", Service: "s", Label: "l", Kind: "k", Binding: "b", Operations: []string{"http.request"}}
-	if _, _, err := svc.ProvisionCredential(context.Background(), "intake:test", "save_it", req); err == nil {
+	if _, _, err := svc.ProvisionCredential(context.Background(), "intake:test", "save_it", req, nil); err == nil {
 		t.Fatal("invalid mode accepted")
 	}
 	bad := req
 	bad.Operations = nil
-	if _, _, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeSaveOnly, bad); err == nil {
+	if _, _, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeSaveOnly, bad, nil); err == nil {
 		t.Fatal("empty operations accepted (operation-scoped contract)")
 	}
 }

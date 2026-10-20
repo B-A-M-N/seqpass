@@ -338,6 +338,27 @@ CREATE TABLE IF NOT EXISTS outcome_observations (
   details TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS obs_op_idx ON outcome_observations(operation_id, observed_at);
+
+-- P0-B (schema v6): the durable save_and_use continuation record. The
+-- intended operation is REVIEWED AT SAVE TIME and persisted BEFORE any
+-- approval exists; the continuation converts it into an ordinary pending
+-- use request through the existing SubmitUse machinery (never a second
+-- scheduler). op_id is UNIQUE-anchored: a recovered continuation cannot
+-- duplicate a submitted dispatch. No credential material is stored here.
+CREATE TABLE IF NOT EXISTS provision_use_intents (
+  id TEXT PRIMARY KEY,
+  provision_request_id TEXT NOT NULL UNIQUE,
+  ref_id TEXT NOT NULL,
+  principal TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  target TEXT NOT NULL DEFAULT '',
+  params TEXT NOT NULL DEFAULT '',
+  op_id TEXT NOT NULL DEFAULT '',
+  state TEXT NOT NULL,
+  created_at TIMESTAMP,
+  updated_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS pui_ref_idx ON provision_use_intents(ref_id);
 `
 	if _, err := d.db.Exec(schema); err != nil {
 		return err
@@ -362,8 +383,11 @@ CREATE INDEX IF NOT EXISTS obs_op_idx ON outcome_observations(operation_id, obse
 // (a security binding: it participates in the destination digest); version
 // 5 adds broker_state (the persisted executor ATTEST PUBLIC key half for
 // restart rotation detection — the private key never leaves non-dumpable
-// memory). Older databases take the repair path below.
-const schemaVersion = 5
+// memory); version 6 adds provision_use_intents (the durable save_and_use
+// continuation record — the intended operation reviewed at save time,
+// persisted BEFORE any approval exists; P0-B). Older databases take the
+// repair path below.
+const schemaVersion = 6
 
 func (d *DB) currentVersion() (int, error) {
 	var v int
@@ -568,6 +592,28 @@ func (d *DB) migrate() error {
 		rollback()
 		return err
 	}
+	// Version 6 ensure (P0-B): the durable save_and_use continuation
+	// record. The intended operation is REVIEWED AT SAVE TIME and
+	// persisted BEFORE any approval exists; the continuation converts it
+	// into an ordinary pending use request through SubmitUse (never a
+	// second scheduler). op_id is UNIQUE-anchored. No credential material
+	// is ever stored here.
+	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS provision_use_intents (
+	  id TEXT PRIMARY KEY,
+	  provision_request_id TEXT NOT NULL UNIQUE,
+	  ref_id TEXT NOT NULL,
+	  principal TEXT NOT NULL,
+	  operation TEXT NOT NULL,
+	  target TEXT NOT NULL DEFAULT '',
+	  params TEXT NOT NULL DEFAULT '',
+	  op_id TEXT NOT NULL DEFAULT '',
+	  state TEXT NOT NULL,
+	  created_at TIMESTAMP,
+	  updated_at TIMESTAMP
+	)`); err != nil {
+		rollback()
+		return err
+	}
 	// Quarantine: live legacy operations missing any approval binding
 	// (epoch, hash or digest) can never be proven valid. Mark them failed
 	// inside the same transaction so no restart can resurrect them.
@@ -642,6 +688,7 @@ func (d *DB) verifySchema() error {
 		"host_principal_bindings": {"human_principal", "agent_principal", "host_kind", "expires_at", "revision"},
 		"relay_host_sessions":     {"relay_id", "session_id", "agent_principal", "human_principal", "host_kind"},
 		"host_sessions":           {"id", "host_kind", "agent_principal", "human_principal", "expires_at", "revision", "input_mode", "input_assurance", "input_reason"},
+		"provision_use_intents":   {"id", "provision_request_id", "ref_id", "principal", "operation", "state"},
 	}
 	for table, columns := range expected {
 		rows, err := d.db.Query(`SELECT name FROM pragma_table_info(?)`, table)

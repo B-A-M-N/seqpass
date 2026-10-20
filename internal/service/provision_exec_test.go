@@ -71,7 +71,7 @@ func provisionedRefFor(t *testing.T, svc *Service, requestID, binding, mode stri
 		RequestID: requestID, Value: "exec-secret-" + requestID, Service: "svc", Label: "L" + requestID,
 		Kind: "api-key", Binding: binding, Operations: []string{"test.credential_save"},
 	}
-	_, ref, err := svc.ProvisionCredential(context.Background(), "intake:test", mode, req)
+	_, ref, err := svc.ProvisionCredential(context.Background(), "intake:test", mode, req, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +255,7 @@ func TestProvisionedRefSurvivesRestart(t *testing.T) {
 		RequestID: "prov-restart-0004", Value: "restart-secret", Service: "svc", Label: "L4",
 		Kind: "api-key", Binding: "seqpass/restart", Operations: []string{"test.credential_save"},
 	}
-	report1, ref1, err := svc1.ProvisionCredential(context.Background(), "intake:test", IntakeSaveOnly, req)
+	report1, ref1, err := svc1.ProvisionCredential(context.Background(), "intake:test", IntakeSaveOnly, req, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +276,7 @@ func TestProvisionedRefSurvivesRestart(t *testing.T) {
 			got, ref1.ID, ref1.BindingID, ref1.RecordID)
 	}
 	// Idempotent recovery: the retry returns the SAME durable identity.
-	report2, ref2, err := svc2.ProvisionCredential(context.Background(), "intake:test", IntakeSaveOnly, req)
+	report2, ref2, err := svc2.ProvisionCredential(context.Background(), "intake:test", IntakeSaveOnly, req, nil)
 	if err != nil {
 		t.Fatalf("post-restart idempotent retry: %v", err)
 	}

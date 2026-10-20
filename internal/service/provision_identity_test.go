@@ -20,7 +20,7 @@ func provisionRefForStatus(t *testing.T, svc *Service, m *mockBrokerChild, reque
 		RequestID: requestID, Value: "status-secret-" + requestID, Service: "svc", Label: "L" + requestID,
 		Kind: "api-key", Binding: binding, Operations: []string{"test.credential_save"},
 	}
-	_, ref, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeSaveOnly, req)
+	_, ref, err := svc.ProvisionCredential(context.Background(), "intake:test", IntakeSaveOnly, req, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

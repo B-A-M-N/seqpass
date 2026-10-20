@@ -340,6 +340,13 @@ func provisionReportData(report *service.ProvisionReport, ref *types.SecretRefer
 	if report.ReEnrollmentRequired {
 		out["authorization"] = "pending: approve the staged resolver grant in AegisKeys before resolves succeed"
 	}
+	if report.IdentityConflict {
+		out["identity_conflict"] = true
+		out["conflict_next_step"] = report.ConflictNextStep
+	}
+	if report.IntentState != "" {
+		out["use_intent_state"] = report.IntentState
+	}
 	if report.UseResult != nil {
 		use := map[string]interface{}{"executed": report.UseResult.Executed}
 		if report.UseResult.OpID != "" {
