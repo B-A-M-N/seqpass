@@ -71,6 +71,7 @@ func relayCmd(args []string) {
 		fmt.Fprintln(os.Stderr, "  status <request-id>  check handoff outcome")
 		fmt.Fprintln(os.Stderr, "  cancel <request-id>  withdraw a request")
 		fmt.Fprintln(os.Stderr, "  request --to DEST --kind KIND [--purpose TEXT] [--ttl 90s] [--file PATH]")
+		fmt.Fprintln(os.Stderr, "  credential-save --binding BINDING --kind KIND --service SVC [--mode save_only|save_and_use|use_once] [--file PATH]")
 		os.Exit(1)
 	}
 	switch args[0] {
@@ -84,8 +85,10 @@ func relayCmd(args []string) {
 		relayCancel(args[1:])
 	case "request":
 		relayRequestCmd(args[1:])
+	case "credential-save":
+		credentialSaveCmd(args[1:])
 	default:
-		fatal("unknown relay subcommand (inbox|fulfill|status|cancel|request)")
+		fatal("unknown relay subcommand (inbox|fulfill|status|cancel|request|credential-save)")
 	}
 }
 
@@ -387,6 +390,83 @@ func relayRequestCmd(args []string) {
 		fatal("broker refused the request")
 	}
 	fmt.Printf("Authorized, operation %v. Poll `seqpass relay status %s`.\n", opID, reqID)
+}
+
+// credentialSaveCmd is the P0-3 trusted-intake credential persistence
+// entry (intake socket): save a submitted credential in AegisKeys
+// (save_only), save it and stage the protected-use flow
+// (save_and_use), or save it for exactly one authorized use (use_once).
+// The value is collected hidden (TTY) or from a 0600 file, crosses the
+// wire once as base64 over the trusted intake socket, and is never
+// echoed, logged, or persisted by SeqPass — only stable references
+// (request ID, record ID, binding ID) come back.
+func credentialSaveCmd(args []string) {
+	fs := flag.NewFlagSet("relay credential-save", flag.ExitOnError)
+	intakeF := fs.String("intake-socket", resolveIntakeSocket(""), "Broker intake socket")
+	bindingF := fs.String("binding", "", "AegisKeys binding under which the credential becomes resolvable")
+	kindF := fs.String("kind", "", "credential kind (api-key|token|password|...)")
+	serviceF := fs.String("service", "", "service identity for the provider record")
+	labelF := fs.String("label", "", "human-readable label")
+	modeF := fs.String("mode", "save_only", "use_once|save_only|save_and_use")
+	opsF := fs.String("operations", "", "comma-separated operation scope (required; operation-scoped binding contract)")
+	descF := fs.String("description", "", "optional description")
+	fileF := fs.String("file", "", "read credential from file instead of terminal")
+	requestIDF := fs.String("request-id", "", "durable request ID for retries (default: broker-generated)")
+	statusF := fs.Bool("status", false, "reconcile an existing request ID instead of saving")
+	_ = fs.Parse(args)
+	icli := dialIntake(*intakeF)
+	defer icli.Close()
+
+	if *statusF {
+		if *requestIDF == "" {
+			fatal("usage: seqpass relay credential-save --status --request-id ID")
+		}
+		data, err := icli.Call(ipc.MethodIntakeProvisionStatus, map[string]interface{}{
+			"request_id": *requestIDF,
+		})
+		must(err)
+		printJSON(data)
+		return
+	}
+
+	if *bindingF == "" || *kindF == "" || *serviceF == "" || *opsF == "" {
+		fatal("usage: seqpass relay credential-save --binding BINDING --kind KIND --service SVC --operations OP[,OP...] [--mode MODE] [--file PATH]")
+	}
+	var ops []string
+	for _, op := range strings.Split(*opsF, ",") {
+		if op = strings.TrimSpace(op); op != "" {
+			ops = append(ops, op)
+		}
+	}
+	var payload []byte
+	var err error
+	if *fileF != "" {
+		payload, err = readSecretFile(*fileF)
+		must(err)
+	} else {
+		payload, err = readSecretTTY(fmt.Sprintf("Enter credential for %s (input hidden): ", *bindingF))
+		must(err)
+	}
+	defer clearCLISecret(payload)
+	params := map[string]interface{}{
+		"binding": *bindingF, "kind": *kindF, "service": *serviceF,
+		"label": *labelF, "mode": *modeF, "operations": ops,
+		"value_b64": base64.StdEncoding.EncodeToString(payload),
+	}
+	if *descF != "" {
+		params["description"] = *descF
+	}
+	if *requestIDF != "" {
+		params["request_id"] = *requestIDF
+	}
+	data, err := icli.Call(ipc.MethodIntakeCredentialSave, params)
+	must(err)
+	m, _ := data.(map[string]interface{})
+	// The durable request ID is the reconciliation anchor for every
+	// retry: always surfaced, prominently.
+	reqID, _ := m["request_id"].(string)
+	fmt.Printf("request_id: %s (reconciliation anchor — reuse with --request-id on retries)\n", reqID)
+	printJSON(data)
 }
 
 // readSecretTTY collects one hidden field from the user's own terminal

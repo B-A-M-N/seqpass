@@ -287,6 +287,10 @@ func (s *session) loop() error {
 			if err := s.doReject(); err != nil {
 				return err
 			}
+		case 's':
+			if err := s.doCredentialSave(); err != nil {
+				return err
+			}
 		case '\r', '\n':
 			if err := s.doFulfill(); err != nil {
 				return err
@@ -448,7 +452,7 @@ func (s *session) doFulfill() error {
 func (s *session) render() {
 	var b strings.Builder
 	b.WriteString("\x1b[H\x1b[2J") // home + clear (fullscreen, no scrollback growth)
-	b.WriteString("SeqPass trusted intake — j/k move, Enter fulfill, r reject, R refresh, q quit\r\n")
+	b.WriteString("SeqPass trusted intake — j/k move, Enter fulfill, r reject, s credential-save, R refresh, q quit\r\n")
 	b.WriteString("Input route: external TTY. Protection depends on broker topology;\r\n")
 	b.WriteString("same-UID best-effort deployments are NOT protected from the agent.\r\n")
 	b.WriteString("Agent purpose lines below are UNTRUSTED agent text (neutralized).\r\n")
@@ -473,6 +477,137 @@ func (s *session) render() {
 func (s *session) renderDetail(it item) {
 	fmt.Fprintf(s.tty, "\r\nREQUEST REVIEW (broker-verified — approve only what is shown)\r\n  Requester: %s\r\n  Recipient: %s (registered destination)\r\n  Action:    supply %s\r\n  Usage:     %s\r\n  Expires:   %s\r\n  Agent note (UNTRUSTED): %s\r\n",
 		neutralize(it.agent), neutralize(it.dest), neutralize(it.kind), usage(it), expiresLabel(it.expires), sanitize(it.purpose))
+}
+
+// readLine collects one visible single-line field from the shared input
+// channel (TUI credentials-save form fields — never secret material; the
+// secret uses readMasked). Empty string = cancelled/empty field.
+func (s *session) readLine(prompt string) string {
+	fmt.Fprint(s.tty, "\r\n"+prompt)
+	defer s.clearScreen()
+	var line []byte
+	for {
+		b, ok := <-s.input
+		if !ok {
+			return ""
+		}
+		switch b {
+		case 0x03: // Ctrl+C
+			return ""
+		case '\r', '\n':
+			return string(line)
+		case 0x7f, 0x08: // backspace
+			if len(line) > 0 {
+				line = line[:len(line)-1]
+				fmt.Fprint(s.tty, "\b \b")
+			}
+		default:
+			if b >= 0x20 && b < 0x7f && len(line) < 256 {
+				line = append(line, b)
+				fmt.Fprint(s.tty, string(b))
+			}
+		}
+	}
+}
+
+// doCredentialSave is the P0-3 trusted-intake persistence action (key
+// 's'): collect a credential via the EXISTING masked-input capability and
+// submit it through intake.credential_save. The TUI reuses the same
+// trusted envelope discipline as fulfillment: the value crosses once as
+// base64 over the intake socket and is never echoed, logged, or persisted
+// by SeqPass — only stable references (request ID, record ID, binding ID)
+// come back. Persistence is a trusted-operator decision with an explicit
+// confirmation; the agent surface has no equivalent capability.
+func (s *session) doCredentialSave() error {
+	binding := s.readLine("Binding (e.g. seqpass/deploy-token): ")
+	if binding == "" {
+		s.setSticky("cancelled: binding required")
+		return nil
+	}
+	kind := s.readLine("Kind (api-key|token|password|...): ")
+	if kind == "" {
+		s.setSticky("cancelled: kind required")
+		return nil
+	}
+	serviceName := s.readLine("Service identity: ")
+	if serviceName == "" {
+		s.setSticky("cancelled: service required")
+		return nil
+	}
+	ops := s.readLine("Operation scope (comma-separated, e.g. http.request): ")
+	if ops == "" {
+		s.setSticky("cancelled: operation scope required (operation-scoped binding contract)")
+		return nil
+	}
+	mode := s.readLine("Persistence mode (save_only|save_and_use|use_once) [save_only]: ")
+	if mode == "" {
+		mode = "save_only"
+	}
+	secret, err := s.readMasked("Credential value (hidden, not echoed; Enter accepts, Ctrl+C cancels): ")
+	if err != nil {
+		// A termination request absorbed by the prompt must end the session,
+		// not be misread as the operator declining.
+		if ie := s.interrupted(); ie != nil {
+			return ie
+		}
+		s.setSticky("cancelled: no credential sent")
+		return nil
+	}
+	defer clearBytes(secret)
+	if len(secret) == 0 {
+		s.setSticky("empty value refused")
+		return nil
+	}
+	if !s.confirm(fmt.Sprintf("Save credential for %s in AegisKeys (mode %s)? [y/N]: ", neutralize(binding), neutralize(mode))) {
+		if ie := s.interrupted(); ie != nil {
+			return ie
+		}
+		s.setSticky("declined: no credential sent")
+		return nil
+	}
+	cli, err := s.dial()
+	if err != nil {
+		s.setSticky("broker unreachable")
+		return nil
+	}
+	defer cli.Close()
+	var opList []interface{}
+	for _, op := range strings.Split(ops, ",") {
+		if op = strings.TrimSpace(op); op != "" {
+			opList = append(opList, op)
+		}
+	}
+	res, err := cli.Call(ipc.MethodIntakeCredentialSave, map[string]interface{}{
+		"binding":    binding,
+		"kind":       kind,
+		"service":    serviceName,
+		"label":      serviceName,
+		"mode":       mode,
+		"operations": opList,
+		"value_b64":  base64.StdEncoding.EncodeToString(secret),
+	})
+	if err != nil {
+		// The durable reference may still exist (write-ahead): surface the
+		// reconciliation anchor so the operator can retry/reconcile.
+		s.setSticky("save failed: " + err.Error() + " (retry reuses the same request ID)")
+		return nil
+	}
+	m, _ := res.(map[string]interface{})
+	if saved, _ := m["saved"].(bool); !saved {
+		s.setSticky("not saved: " + neutralize(str(m["provider_status"])))
+		return nil
+	}
+	reqID := neutralize(str(m["request_id"]))
+	if use, ok := m["use_outcome"].(map[string]interface{}); ok {
+		if executed, _ := use["executed"].(bool); executed {
+			s.setSticky(fmt.Sprintf("saved + used (request %s)", reqID))
+		} else {
+			s.setSticky(fmt.Sprintf("SAVED, authorization pending (request %s) — approve the staged grant, then submit the protected-use request", reqID))
+		}
+		return nil
+	}
+	s.setSticky(fmt.Sprintf("saved, authorization pending (request %s) — approve the staged resolver grant before resolves succeed", reqID))
+	return nil
 }
 
 // confirm reads a y/N answer through the shared input channel, so no

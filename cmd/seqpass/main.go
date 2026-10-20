@@ -98,7 +98,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  seqpass broker --vault memory-test --dev  # development only, never production")
 	fmt.Fprintln(os.Stderr, "  seqpass mcp [--socket PATH]   # stdio adapter; register in Codex/Claude/Hermes")
 	fmt.Fprintln(os.Stderr, "  seqpass admin <catalog|pending|show|approve|reject|add-secret|add-dest|add-policy|set-policy|update-dest|execute|host-binding> ...")
-	fmt.Fprintln(os.Stderr, "  seqpass relay <inbox|fulfill|status|cancel|request> ...  # trusted human handoff (intake socket)")
+	fmt.Fprintln(os.Stderr, "  seqpass relay <inbox|fulfill|status|cancel|request|credential-save> ...  # trusted human handoff (intake socket)")
 	fmt.Fprintln(os.Stderr, "  seqpass agent <capabilities|request|status|cancel> ...  # generic agent adapter over the broker socket")
 	fmt.Fprintln(os.Stderr, "  seqpass recipient --socket PATH --journal DIR [--consumer-dir DIR]  # trusted credential consumer endpoint")
 	fmt.Fprintln(os.Stderr, "  seqpass tui [--intake-socket PATH]  # persistent native inbox TUI (own terminal, never the agent's)")
