@@ -78,6 +78,21 @@ func (s *Service) resolveCredentialMaterial(ctx context.Context, src types.Secre
 			}
 			return secureops.Credential{Value: v}, nil
 		}
+		// P0-C transient use-once: the same reservation-gated read for
+		// the staged intake payload. The bytes are deleted AFTER the
+		// dispatch barrier commits (ExecuteUse), so this read is the
+		// operation's one look at the credential.
+		if id, ok := transientIDOf(src.Ref); ok {
+			raw, err := s.eph.GetFor(transientPayloadKey(id), opID)
+			if err != nil {
+				return secureops.Credential{}, err
+			}
+			v := string(raw)
+			for i := range raw {
+				raw[i] = 0
+			}
+			return secureops.Credential{Value: v}, nil
+		}
 		raw, err := s.vault.Get(src.Ref)
 		if err != nil {
 			return secureops.Credential{}, err
@@ -117,6 +132,17 @@ func (s *Service) admitUse(ur *types.UseRequest, worker string) (secureops.Opera
 	if src.UseOnce {
 		ref, gerr := s.db.GetSecretRef(ur.SecretRef)
 		if gerr != nil || ref == nil || ref.ReconcileStatus == types.ProvisionReconcileConsumed {
+			return nil, "", failUsePreClaim(s, ur, "credential revoked", "")
+		}
+	}
+	// P0-C transient use-once: register THIS operation as the payload's
+	// authorized holder NOW (same ordering as the relay transfer path).
+	// A missing/expired payload fails closed generically — the transient
+	// credential is unrecoverable by design. The read itself stays
+	// reservation-gated at resolve time, and the bytes are deleted at the
+	// dispatch barrier (at-most-once dispatch).
+	if id, ok := transientIDOf(src.Ref); ok && src.Kind == types.SourceEphemeral {
+		if err := s.eph.Reserve(transientPayloadKey(id), ur.ID, time.Now()); err != nil {
 			return nil, "", failUsePreClaim(s, ur, "credential revoked", "")
 		}
 	}
@@ -171,6 +197,10 @@ func (s *Service) admitUse(ur *types.UseRequest, worker string) (secureops.Opera
 	// revocation always defeats a racing claim (C04).
 	attemptID, claimed, err := s.db.ClaimUse(ur.ID, ur.OpHash, destDigest, ur.Revision, worker, time.Now())
 	if err != nil || !claimed {
+		// The transient payload hold (if any) dies with the failed claim.
+		if id, ok := transientIDOf(src.Ref); ok && src.Kind == types.SourceEphemeral {
+			s.eph.Release(transientPayloadKey(id), ur.ID)
+		}
 		return nil, "", fmt.Errorf("operation not claimable (status=%s)", ur.Status)
 	}
 	return driver, attemptID, nil
@@ -235,6 +265,15 @@ func (s *Service) ExecuteUse(ctx context.Context, useID, worker string) (map[str
 	// window resolving credentials cannot dispatch after expiry (P0).
 	if err := s.db.BeginDispatch("use", ur.ID, attemptID, ur.OpHash, ur.DestDigest, worker, time.Now()); err != nil {
 		return s.finalizeDispatchDenied("use", ur.ID, attemptID, ur.RequestedBy, ur.Target, ur.ExpiresAt, err)
+	}
+	// P0-C transient use-once: the dispatch barrier commit is the point
+	// of no return — destroy the staged bytes NOW. At-most-once dispatch:
+	// a post-dispatch failure has already consumed the transient
+	// credential and is reported honestly (never silently retried); a
+	// denied barrier never reaches here, so the credential survives for
+	// its remaining lifetime.
+	if tid, ok := transientIDOf(ur.Source.Ref); ok && ur.Source.Kind == types.SourceEphemeral {
+		s.eph.Delete(transientPayloadKey(tid))
 	}
 	result, err := driver.Execute(ctx, cred, input)
 	if err != nil {

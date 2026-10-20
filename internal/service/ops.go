@@ -43,6 +43,12 @@ func (s *Service) resolveSource(secretRef string) (types.SecretSource, error) {
 	case types.ProvisionReconcileFailed:
 		return types.SecretSource{}, fmt.Errorf("credential provisioning failed")
 	}
+	// P0-C transient use-once: the staged in-memory credential resolves
+	// ONLY through the ephemeral boundary (reservation-gated, deleted at
+	// the dispatch barrier). The durable row is metadata only.
+	if sr.ReconcileStatus == types.ProvisionReconcileTransient {
+		return types.SecretSource{Kind: types.SourceEphemeral, Ref: TransientRefPrefix + sr.ID, UseOnce: true}, nil
+	}
 	if sr.Binding != "" {
 		src := types.SecretSource{Kind: types.SourceAegisKeys, Binding: sr.Binding}
 		// P0-3 rebind protection: provisioned refs carry their stable

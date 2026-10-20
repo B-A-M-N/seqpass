@@ -71,7 +71,7 @@ func relayCmd(args []string) {
 		fmt.Fprintln(os.Stderr, "  status <request-id>  check handoff outcome")
 		fmt.Fprintln(os.Stderr, "  cancel <request-id>  withdraw a request")
 		fmt.Fprintln(os.Stderr, "  request --to DEST --kind KIND [--purpose TEXT] [--ttl 90s] [--file PATH]")
-		fmt.Fprintln(os.Stderr, "  credential-save --binding BINDING --kind KIND --service SVC [--mode save_only|save_and_use|use_once] [--file PATH]")
+		fmt.Fprintln(os.Stderr, "  credential-save --binding BINDING --kind KIND --service SVC [--mode save_only|save_and_use|use_once|transient_once] [--file PATH]")
 		os.Exit(1)
 	}
 	switch args[0] {
@@ -395,7 +395,11 @@ func relayRequestCmd(args []string) {
 // credentialSaveCmd is the P0-3 trusted-intake credential persistence
 // entry (intake socket): save a submitted credential in AegisKeys
 // (save_only), save it and stage the protected-use flow
-// (save_and_use), or save it for exactly one authorized use (use_once).
+// (save_and_use), save it for exactly one authorized use with the
+// credential RETAINED at the provider (use_once — persisted
+// single-use), or stage a genuinely TRANSIENT single-use credential
+// that never persists anywhere (transient_once — no AegisKeys record;
+// unrecoverable after expiry or restart).
 // The value is collected hidden (TTY) or from a 0600 file, crosses the
 // wire once as base64 over the trusted intake socket, and is never
 // echoed, logged, or persisted by SeqPass — only stable references
@@ -407,7 +411,7 @@ func credentialSaveCmd(args []string) {
 	kindF := fs.String("kind", "", "credential kind (api-key|token|password|...)")
 	serviceF := fs.String("service", "", "service identity for the provider record")
 	labelF := fs.String("label", "", "human-readable label")
-	modeF := fs.String("mode", "save_only", "use_once|save_only|save_and_use")
+	modeF := fs.String("mode", "save_only", "use_once|save_only|save_and_use|transient_once")
 	opsF := fs.String("operations", "", "comma-separated operation scope (required; operation-scoped binding contract)")
 	descF := fs.String("description", "", "optional description")
 	fileF := fs.String("file", "", "read credential from file instead of terminal")

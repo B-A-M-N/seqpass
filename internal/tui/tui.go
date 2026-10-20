@@ -539,9 +539,12 @@ func (s *session) doCredentialSave() error {
 		s.setSticky("cancelled: operation scope required (operation-scoped binding contract)")
 		return nil
 	}
-	mode := s.readLine("Persistence mode (save_only|save_and_use|use_once) [save_only]: ")
+	mode := s.readLine("Persistence mode (save_only|save_and_use|use_once|transient_once) [save_only]: ")
 	if mode == "" {
 		mode = "save_only"
+	}
+	if mode == "transient_once" {
+		s.setSticky("transient_once: the credential is staged in broker memory ONLY — one approved use consumes it; no AegisKeys record is created; unrecoverable after expiry or restart")
 	}
 	secret, err := s.readMasked("Credential value (hidden, not echoed; Enter accepts, Ctrl+C cancels): ")
 	if err != nil {

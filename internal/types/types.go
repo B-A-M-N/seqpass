@@ -89,6 +89,15 @@ const (
 	// new identity); every subsequent use fails closed until an explicit
 	// operator-authorized reconciliation resolves the divergence.
 	ProvisionReconcileIdentityConflict = "identity_conflict"
+	// ProvisionReconcileTransient (P0-C): a GENUINELY TRANSIENT use-once
+	// intake. The credential lives ONLY in the broker's in-memory
+	// ephemeral spool under its bounded lifetime — NO durable AegisKeys
+	// credential exists, and the payload is unrecoverable after expiry
+	// or restart (the reference row is metadata only). Distinct from the
+	// persisted single-use contract (use_once), where AegisKeys
+	// deliberately retains the encrypted credential and SeqPass limits
+	// its use to one authorized execution.
+	ProvisionReconcileTransient = "transient"
 )
 
 // SourceKind distinguishes credential sources.

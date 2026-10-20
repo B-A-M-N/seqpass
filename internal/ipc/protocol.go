@@ -347,6 +347,11 @@ func provisionReportData(report *service.ProvisionReport, ref *types.SecretRefer
 	if report.IntentState != "" {
 		out["use_intent_state"] = report.IntentState
 	}
+	if !report.StagedUntil.IsZero() {
+		// P0-C transient staging: metadata only, never the credential.
+		out["transient"] = true
+		out["staged_until"] = report.StagedUntil.UTC().Format(time.RFC3339)
+	}
 	if report.UseResult != nil {
 		use := map[string]interface{}{"executed": report.UseResult.Executed}
 		if report.UseResult.OpID != "" {

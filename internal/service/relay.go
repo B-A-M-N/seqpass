@@ -28,6 +28,13 @@ func newRelayID() (string, error) {
 // approved — never a standing credential, never a broad policy rule.
 const RelayRefPrefix = "relay:"
 
+// TransientRefPrefix namespaces synthetic secret refs bound to one
+// TRANSIENT use-once intake (P0-C). Like a relay ref it resolves ONLY
+// through the ephemeral spool under a live reservation — but it backs a
+// protected-USE operation (one approved driver execution), not a relay
+// transfer, and its payload is deleted at the dispatch barrier.
+const TransientRefPrefix = "tuse:"
+
 func relayIDOf(secretRef string) (string, bool) {
 	if !strings.HasPrefix(secretRef, RelayRefPrefix) {
 		return "", false
@@ -38,6 +45,22 @@ func relayIDOf(secretRef string) (string, bool) {
 	}
 	return id, true
 }
+
+// transientIDOf parses a transient use-once source ref.
+func transientIDOf(secretRef string) (string, bool) {
+	if !strings.HasPrefix(secretRef, TransientRefPrefix) {
+		return "", false
+	}
+	id := strings.TrimPrefix(secretRef, TransientRefPrefix)
+	if id == "" {
+		return "", false
+	}
+	return id, true
+}
+
+// transientPayloadKey namespaces the ephemeral spool entry holding a
+// transient credential (never a durable table; restart loses it by design).
+func transientPayloadKey(refID string) string { return "transient-payload:" + refID }
 
 // relayDataKinds is the closed vocabulary an agent may request (QR-03 /
 // SP-TUI-08): the kind tells the user WHAT is being asked for, and the

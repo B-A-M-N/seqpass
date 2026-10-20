@@ -20,15 +20,17 @@ import (
 
 	"github.com/secretbridge/secretbridge/internal/aegiskeys"
 	"github.com/secretbridge/secretbridge/internal/types"
+	"github.com/secretbridge/secretbridge/internal/vault"
 )
 
 // Trusted-intake persistence modes.
 const (
-	// IntakeUseOnce: the credential is saved in AegisKeys and consumable
-	// for exactly one authorized execution. PERSISTED single-use: the
-	// provider retains the encrypted credential durably; SeqPass limits
-	// its use to one authorized execution (distinct from the transient
-	// relay handoff, P0-C).
+	// IntakeUseOnce is the PERSISTED SINGLE-USE contract: AegisKeys
+	// deliberately retains the encrypted credential (a durable provider
+	// record is created), and SeqPass limits its use to ONE authorized
+	// execution (the durable reference is consumed at dispatch). This is
+	// explicitly distinct from IntakeTransientOnce, which never persists
+	// the credential anywhere.
 	IntakeUseOnce = "use_once"
 	// IntakeSaveOnly: the credential is saved and bound; no immediate use.
 	IntakeSaveOnly = "save_only"
@@ -39,7 +41,21 @@ const (
 	// provider grant is usable, and still requires the operator's
 	// independent operation approval before any dispatch.
 	IntakeSaveAndUse = "save_and_use"
+	// IntakeTransientOnce is the TRANSIENT USE-ONCE contract (P0-C): the
+	// human-supplied credential exists ONLY inside the protected
+	// ephemeral handoff/execution boundary (the broker's in-memory
+	// spool, reservation-gated like relay payloads). ONE approved
+	// operation can consume it; NO durable AegisKeys credential is
+	// created; the payload is unrecoverable after expiry or restart.
+	// Dispatch stays at-most-once: a post-dispatch failure has already
+	// consumed the transient credential — the failure is reported
+	// honestly, never retried silently.
+	IntakeTransientOnce = "transient_once"
 )
+
+// transientOnceTTL bounds a transient credential's lifetime inside the
+// ephemeral spool. Test-overridable; production keeps the default.
+var transientOnceTTL = 15 * time.Minute
 
 // UseIntent is the intended operation of a save_and_use request, REVIEWED
 // by the trusted human at save time and persisted as the durable
@@ -55,7 +71,7 @@ type UseIntent struct {
 // validIntakePersistence fail-closes the mode selection.
 func validIntakePersistence(mode string) bool {
 	switch mode {
-	case IntakeUseOnce, IntakeSaveOnly, IntakeSaveAndUse:
+	case IntakeUseOnce, IntakeSaveOnly, IntakeSaveAndUse, IntakeTransientOnce:
 		return true
 	}
 	return false
@@ -96,6 +112,9 @@ type ProvisionReport struct {
 	// completed/failed (the op's terminal outcome), blocked (reference
 	// conflicted or policy denied before any dispatch).
 	IntentState string
+	// StagedUntil (transient_once only): when the staged in-memory
+	// payload expires. Saved stays FALSE — nothing durable was created.
+	StagedUntil time.Time
 }
 
 // UseOutcomeReport is the outcome of the recorded save_and_use
@@ -155,6 +174,15 @@ func (s *Service) ProvisionCredential(ctx context.Context, caller, mode string, 
 		}
 	}
 
+	// P0-C transient use-once: the credential NEVER reaches the provider
+	// or any durable store. It is staged only in the broker's in-memory
+	// ephemeral spool under a bounded lifetime; the durable reference row
+	// is metadata only (policy/approval anchor). No provider round trip,
+	// no provider request ID, unrecoverable after expiry or restart.
+	if mode == IntakeTransientOnce {
+		return s.stageTransientOnce(caller, req)
+	}
+
 	ref, err := s.db.GetSecretRefByProvisionRequest(req.RequestID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("provision lookup failed: %w", err)
@@ -196,6 +224,65 @@ func (s *Service) ProvisionCredential(ctx context.Context, caller, mode string, 
 	}
 	return s.submitProvision(ctx, caller, mode, req, intent, ref)
 }
+
+// stageTransientOnce implements the TRANSIENT USE-ONCE intake (P0-C).
+// The credential is staged ONLY in the broker's in-memory ephemeral
+// spool (the same protected boundary relay payloads use) under a
+// bounded lifetime; the durable SecretReference row is metadata only
+// (its request ID is retained for audit bookkeeping but never sent to
+// the provider — a retry with that ID below is refused, never re-staged
+// or reconciled: transient intake is single-shot). No AegisKeys
+// credential is created and the payload is unrecoverable after expiry
+// or restart; the reference dies with it. Dispatch remains
+// at-most-once: one approved operation consumes the staged bytes at the
+// dispatch barrier.
+func (s *Service) stageTransientOnce(caller string, req aegiskeys.ProvisionRequest) (*ProvisionReport, *types.SecretReference, error) {
+	if prior, err := s.db.GetSecretRefByProvisionRequest(req.RequestID); err == nil && prior != nil {
+		// A retry (new staging attempt under the same request ID) can
+		// never resurrect the ephemeral bytes — refuse both re-staging
+		// and provider-style reconciliation.
+		return nil, prior, errors.New("transient intake is single-shot: the request ID already staged a credential that is unrecoverable by design; submit a NEW request ID")
+	}
+	if req.Value == "" {
+		return nil, nil, errors.New("transient intake requires a credential value")
+	}
+	if len(req.Value) > ephMaxPayload() {
+		return nil, nil, fmt.Errorf("transient credential too large (max %d bytes)", ephMaxPayload())
+	}
+	if req.Binding == "" {
+		return nil, nil, errors.New("transient intake requires a binding")
+	}
+	ref := &types.SecretReference{
+		Name:               req.Label,
+		Description:        req.Description,
+		Owner:              caller,
+		Binding:            req.Binding,
+		ProvisionRequestID: req.RequestID,
+		ReconcileStatus:    types.ProvisionReconcileTransient,
+		UseOnce:            true,
+	}
+	if err := s.db.CreateSecretRef(ref); err != nil {
+		return nil, nil, fmt.Errorf("transient reference persist failed: %w", err)
+	}
+	key := transientPayloadKey(ref.ID)
+	if err := s.eph.Store(key, []byte(req.Value), transientOnceTTL); err != nil {
+		// Refuse closed: without staged bytes the reference is dead —
+		// mark it failed so surfaces never present it as usable.
+		_ = s.db.UpdateSecretRefProvisionState(ref.ID, types.ProvisionReconcileFailed, "", "")
+		return nil, ref, fmt.Errorf("transient staging failed: %w", err)
+	}
+	s.audit(ref.ID, "credential_transient_staged", caller, req.Binding, transientOnceTTL.String())
+	report := &ProvisionReport{
+		Saved:          false,
+		ProviderStatus: "transient_staged",
+		RefID:          ref.ID,
+		StagedUntil:    time.Now().Add(transientOnceTTL),
+	}
+	return report, ref, nil
+}
+
+// ephMaxPayload is the ephemeral spool's per-payload bound.
+func ephMaxPayload() int { return vault.MaxEphemeralBytes }
 
 // reconcileProvision advances an existing durable reference. The request
 // shape is validated for identity consistency FIRST: a caller retrying
@@ -746,6 +833,15 @@ func (s *Service) ProvisionStatusReport(ctx context.Context, caller, requestID s
 	}
 	if ref.Owner != caller {
 		return nil, nil, errors.New("access denied")
+	}
+	// P0-C: a transient reference has NO provider counterpart — never
+	// contact the provider for it; report the durable metadata only.
+	if ref.ReconcileStatus == types.ProvisionReconcileTransient {
+		return &ProvisionReport{
+			Saved:          false,
+			ProviderStatus: "transient_staged",
+			RefID:          ref.ID,
+		}, ref, nil
 	}
 	st, err := s.provisionStatus(ctx, requestID)
 	if err != nil {
