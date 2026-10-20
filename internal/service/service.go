@@ -85,6 +85,10 @@ type Service struct {
 	// cannot set or override them.
 	hostInputMode string
 	hostAssurance string
+	// attestRotation is set once at startup when the persisted attest
+	// PUBLIC half differs from the current one: the AegisKeys grant pin
+	// plausibly needs re-enrollment. Startup-only write, lock-free reads.
+	attestRotation bool
 	// hostReason is set when a trusted wiring path (best-effort downgrade
 	// or security drift) has an explicit explanation to report.
 	hostReason string
@@ -201,8 +205,49 @@ func New(config Config) (*Service, error) {
 			Outcome: fmt.Sprintf("failed=%d uncertain=%d", failed, uncertain),
 		})
 	}
+	// Attest-key rotation detection (P0-1 restart strategy): the private
+	// key never leaves non-dumpable memory, so every restart generates a
+	// fresh pair. Persisting the PUBLIC half (not a secret) lets the
+	// broker tell the operator, concretely, that the AegisKeys grant's
+	// attest_key pin needs re-enrollment after rotation — instead of
+	// leaving resolves failing with an unexplained access_denied.
+	if config.AegisKeysAttestKey != nil {
+		pub := config.AegisKeysAttestKey.PublicHex()
+		prev, found, err := db.GetBrokerState(brokerStateAttestPublic)
+		if err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("attest key state read failed: %w", err)
+		}
+		if found && prev != "" && prev != pub {
+			if err := db.WriteAuditLog(&types.AuditLog{
+				OperationID: "", Action: "attest_key_rotated", Actor: "broker",
+				Outcome: "attestation key rotated across restart: re-pin the AegisKeys grant attest_key (admin attest_public)",
+			}); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("attest rotation audit failed: %w", err)
+			}
+			svc.attestRotation = true
+		}
+		if err := db.SetBrokerState(brokerStateAttestPublic, pub); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("attest key state persist failed: %w", err)
+		}
+	}
 	return svc, nil
 }
+
+// brokerStateAttestPublic is the broker_state key holding the hex public
+// half of the executor's attestation key. The private half is never
+// persisted anywhere.
+const brokerStateAttestPublic = "attest_public"
+
+// AttestRotationPending reports whether the executor's attestation key
+// changed across a restart and the AegisKeys grant's attest_key pin has
+// plausibly NOT been re-enrolled yet (resolves signed with the new key
+// will be denied until the operator re-pins). Surfaced on the admin
+// health surface so the operator receives an actionable re-enrollment
+// requirement rather than an unexplained denial.
+func (s *Service) AttestRotationPending() bool { return s.attestRotation }
 
 // SetHostInputAssurance installs broker-configured presentation facts.
 // It is callable only from trusted broker/server wiring, never through an

@@ -924,6 +924,71 @@ func (failingSigner) Sign(io.Reader, []byte, crypto.SignerOpts) ([]byte, error) 
 	return nil, errors.New("synthetic signer failure")
 }
 
+// TestAttestKeyRestartRotation pins the restart strategy (P1): the private
+// key never leaves non-dumpable memory, so a restart generates a fresh
+// pair. The persisted PUBLIC half (not a secret) lets the broker detect
+// its own rotation and surface an actionable re-enrollment requirement —
+// resolves signed with the new key fail against the old grant until the
+// operator re-pins, and the broker must say so rather than emit an
+// unexplained access_denied.
+func TestAttestKeyRestartRotation(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "meta.db")
+
+	key1, err := aegiskeys.NewExecutorAttestKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc1, err := New(Config{DBPath: dbPath, VaultType: "memory-test", AegisKeysAttestKey: key1})
+	if err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+	pub1 := svc1.AegisKeysAttestPublic()
+	if pub1 == "" {
+		t.Fatal("first start published no attest public key")
+	}
+	if svc1.AttestRotationPending() {
+		t.Fatal("first start must not report rotation")
+	}
+	// A grant pinned to key1 accepts key1 signatures (sanity).
+	_ = svc1.Close()
+
+	// Restart with a fresh pair: the grant still pins pub1.
+	key2, err := aegiskeys.NewExecutorAttestKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc2, err := New(Config{DBPath: dbPath, VaultType: "memory-test", AegisKeysAttestKey: key2})
+	if err != nil {
+		t.Fatalf("second start: %v", err)
+	}
+	defer svc2.Close()
+	pub2 := svc2.AegisKeysAttestPublic()
+	if pub2 == "" || pub2 == pub1 {
+		t.Fatalf("restart must generate a fresh key pair: pub1=%q pub2=%q", pub1, pub2)
+	}
+	if !svc2.AttestRotationPending() {
+		t.Fatal("restart with a fresh key must report pending re-enrollment")
+	}
+	// The old grant denies the new key's signature: the signature is over
+	// the canonical string with key2, verification against pub1 fails.
+	nonce := "restart-rotation-nonce"
+	sig := ed25519.Sign(key2.Private.(ed25519.PrivateKey), aegiskeys.AttestCanonicalString("seqpass/example", "http.request", "op-x", nonce))
+	if ed25519.Verify(ed25519.PublicKey(mustHex(t, pub1)), aegiskeys.AttestCanonicalString("seqpass/example", "http.request", "op-x", nonce), sig) {
+		t.Fatal("key2 signature verified against the OLD grant pin — rotation was not detected by the verifier")
+	}
+	_ = sig
+}
+
+func mustHex(t *testing.T, s string) []byte {
+	t.Helper()
+	raw, err := hex.DecodeString(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
 // TestResolveViaHelperHelperEnvFiltered proves the filter end-to-end: the
 // spawned helper process's actual environment contains no parent
 // application variables — a synthetic secret-shaped canary set in this

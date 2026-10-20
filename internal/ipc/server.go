@@ -617,7 +617,12 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 	switch req.Method {
 	case MethodAttestPublic:
 		if key := s.svc.AegisKeysAttestPublic(); key != "" {
-			return Response{OK: true, Data: map[string]string{"attest_public": key}}
+			data := map[string]string{"attest_public": key}
+			if s.svc.AttestRotationPending() {
+				data["attest_rotation"] = "pending"
+				data["re_enrollment"] = "attestation key rotated across restart: update the AegisKeys grant attest_key pin to attest_public before resolves succeed"
+			}
+			return Response{OK: true, Data: data}
 		}
 		return Response{OK: false, Error: "attest key not configured (no resolve helper)"}
 	case MethodHealth:

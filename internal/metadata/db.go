@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -353,9 +354,11 @@ CREATE INDEX IF NOT EXISTS obs_op_idx ON outcome_observations(operation_id, obse
 // dispatch record, observation record/commit timestamps, and evidence
 // kinds (G02/G07); version 3 added the auth-epoch and destination-digest
 // binding columns; version 4 adds the git.push pinned source repository
-// (a security binding: it participates in the destination digest). Older
-// databases take the repair path below.
-const schemaVersion = 4
+// (a security binding: it participates in the destination digest); version
+// 5 adds broker_state (the persisted executor ATTEST PUBLIC key half for
+// restart rotation detection — the private key never leaves non-dumpable
+// memory). Older databases take the repair path below.
+const schemaVersion = 5
 
 func (d *DB) currentVersion() (int, error) {
 	var v int
@@ -536,6 +539,21 @@ func (d *DB) migrate() error {
 			return err
 		}
 	}
+	// Version 5 ensure (P0-1 restart strategy): broker_state persists the
+	// executor's attest PUBLIC key half so a restart can detect rotation.
+	// The PRIVATE key is never persisted — it lives only in the broker's
+	// non-dumpable memory, which is the same-UID-unreadable store the
+	// attestation scheme's security rests on. A restart regenerates it;
+	// the persisted public half lets the broker tell the operator exactly
+	// which grant pin needs re-enrollment.
+	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS broker_state (
+	  key TEXT PRIMARY KEY,
+	  value TEXT NOT NULL,
+	  updated_at TIMESTAMP
+	)`); err != nil {
+		rollback()
+		return err
+	}
 	// Quarantine: live legacy operations missing any approval binding
 	// (epoch, hash or digest) can never be proven valid. Mark them failed
 	// inside the same transaction so no restart can resurrect them.
@@ -650,6 +668,32 @@ func (d *DB) CurrentEpoch() (int64, error) {
 	var epoch int64
 	err := d.db.QueryRow(`SELECT epoch FROM authorization_state WHERE id = 1`).Scan(&epoch)
 	return epoch, err
+}
+
+// GetBrokerState reads one persisted broker_state value ("", nil) when
+// absent. Used for the attest public key half (restart rotation
+// detection) and future broker-level durable state.
+func (d *DB) GetBrokerState(key string) (string, bool, error) {
+	var value string
+	err := d.db.QueryRow(`SELECT value FROM broker_state WHERE key = ?`, key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return value, true, nil
+}
+
+// SetBrokerState upserts one broker_state value. It deliberately does NOT
+// bump the authorization epoch: this is broker-local identity state, not
+// an authorization-relevant mutation.
+func (d *DB) SetBrokerState(key, value string) error {
+	_, err := d.db.Exec(`INSERT INTO broker_state (key, value, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		key, value, time.Now())
+	return err
 }
 
 // withAuthMutation runs fn inside a single IMMEDIATE transaction and bumps
