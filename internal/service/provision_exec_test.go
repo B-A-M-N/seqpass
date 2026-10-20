@@ -111,14 +111,29 @@ func TestProvisionedRefExecuteUseOnceConsumes(t *testing.T) {
 	if got.ReconcileStatus != types.ProvisionReconcileConsumed {
 		t.Fatalf("reconcile status after first use = %q, want consumed", got.ReconcileStatus)
 	}
-	// Second execution: fails closed at admission (generic outcome).
-	id2 := submitApprovedUse(t, svc, "uid:1000", ref.ID, "test.credential_save")
-	if _, err := svc.ExecuteUse(context.Background(), id2, "worker"); err == nil {
-		t.Fatal("second use-once execution succeeded")
-	}
-	st, _ := svc.db.GetUse(id2)
-	if st == nil || st.Status != types.StatusFailed {
-		t.Fatalf("second use status = %+v, want failed", st)
+	// Second use: fails closed at SUBMISSION — a consumed reference can
+	// never resolve, so no approval-queue entry is created for it (the
+	// resolveSource lifecycle gate). If a request were ever created
+	// despite that, its approved execution must still fail.
+	id2, serr := svc.SubmitUse("uid:1000", &types.UseRequest{
+		SecretRef: ref.ID, Operation: "test.credential_save", Params: map[string]string{},
+	})
+	if serr != nil {
+		// Expected: generic denial, request never exists.
+		if id2 != "" {
+			t.Fatalf("denied submission left a durable request: %s", id2)
+		}
+	} else {
+		if aerr := svc.ApproveUse(id2, "operator", -1); aerr != nil {
+			t.Fatalf("second use approval failed unexpectedly: %v", aerr)
+		}
+		if _, xerr := svc.ExecuteUse(context.Background(), id2, "worker"); xerr == nil {
+			t.Fatal("second use-once execution succeeded")
+		}
+		st, _ := svc.db.GetUse(id2)
+		if st == nil || st.Status != types.StatusFailed {
+			t.Fatalf("second use status = %+v, want failed", st)
+		}
 	}
 }
 

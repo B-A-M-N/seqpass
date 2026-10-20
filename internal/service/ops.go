@@ -28,6 +28,21 @@ func (s *Service) resolveSource(secretRef string) (types.SecretSource, error) {
 	if sr == nil {
 		return types.SecretSource{}, fmt.Errorf("unknown secret ref")
 	}
+	// Provisioned-reference lifecycle gate (P0-A/P0-3): terminal or
+	// conflicted references never resolve. Identity conflicts in
+	// particular block ALL subsequent execution until explicit operator
+	// reconciliation, so an existing operation approval cannot dispatch
+	// against a drifted credential.
+	switch sr.ReconcileStatus {
+	case types.ProvisionReconcileIdentityConflict:
+		return types.SecretSource{}, fmt.Errorf("credential identity conflict: provider identity diverges from the pinned record/binding identity; execution blocked pending operator reconciliation")
+	case types.ProvisionReconcileConflict:
+		return types.SecretSource{}, fmt.Errorf("credential provisioning conflict: operator reconciliation required")
+	case types.ProvisionReconcileConsumed:
+		return types.SecretSource{}, fmt.Errorf("credential revoked")
+	case types.ProvisionReconcileFailed:
+		return types.SecretSource{}, fmt.Errorf("credential provisioning failed")
+	}
 	if sr.Binding != "" {
 		src := types.SecretSource{Kind: types.SourceAegisKeys, Binding: sr.Binding}
 		// P0-3 rebind protection: provisioned refs carry their stable

@@ -43,8 +43,20 @@ const (
 	ProvisionReconcileConflict  = "conflict"  // durable identity exists with different content
 	ProvisionReconcileCommitted = "committed" // provider committed; authorization pending
 	ProvisionReconcileReady     = "ready"     // provider reports the credential resolvable
-	ProvisionReconcileConsumed  = "consumed"  // use-once reference executed
-	ProvisionReconcileFailed    = "failed"    // provider refused (access_denied/invalid)
+	// ProvisionReconcileGrantPresent (P1-A): the resolve grant EXISTS at
+	// the provider, but no unlocked/policy-valid/executable-pin-valid
+	// readiness verdict has been reported. Distinct from ready — surfaces
+	// must not present grant_present as executable readiness.
+	ProvisionReconcileGrantPresent = "grant_present"
+	ProvisionReconcileConsumed     = "consumed" // use-once reference executed
+	ProvisionReconcileFailed       = "failed"   // provider refused (access_denied/invalid)
+	// ProvisionReconcileIdentityConflict: a committed reference's stable
+	// provider identity (record/binding ID) DIVERGED at the provider —
+	// rebind, rotation, corrupted metadata, or an altered replay. The
+	// ORIGINAL pins are preserved (never overwritten with the provider's
+	// new identity); every subsequent use fails closed until an explicit
+	// operator-authorized reconciliation resolves the divergence.
+	ProvisionReconcileIdentityConflict = "identity_conflict"
 )
 
 // SourceKind distinguishes credential sources.

@@ -61,6 +61,13 @@ type ProvisionReport struct {
 	ReEnrollmentRequired bool
 	// RefID is the durable SeqPass reference.
 	RefID string
+	// IdentityConflict marks a durable identity divergence: the provider
+	// now reports a different record/binding ID than the reference's
+	// pinned identity. The original pins are preserved; execution is
+	// blocked until operator reconciliation. ConflictNextStep carries the
+	// operator-facing procedure.
+	IdentityConflict bool
+	ConflictNextStep string
 	// UseResult is set only for save_and_use: the second, independent
 	// outcome. A nil UseResult with Saved=true means the use phase never
 	// started (not approved / not ready), NOT a failed save.
@@ -223,35 +230,90 @@ func (s *Service) provisionStatus(ctx context.Context, requestID string) (aegisk
 // advanceProvision commits the provider outcome durably and builds the
 // separate-outcome report. resubmitted records whether this call actually
 // contacted the provider (idempotent recoveries skip the use phase).
+//
+// Identity immutability (P0-A): the provider's RecordID/BindingID are
+// assigned to the durable reference EXACTLY ONCE, via an expected-state
+// atomic transition on a reference that has no stable identity yet. After
+// assignment, a DIVERGENT provider identity (rebind, rotation, corrupted
+// metadata, altered replay) is never adopted: the original pins are
+// preserved and a durable identity conflict blocks all subsequent
+// execution until explicit operator reconciliation.
 func (s *Service) advanceProvision(ctx context.Context, caller, mode string, req aegiskeys.ProvisionRequest, ref *types.SecretReference, st aegiskeys.ProvisionResponse, contacted bool) (*ProvisionReport, *types.SecretReference, error) {
 	report := &ProvisionReport{ProviderStatus: st.Status, RefID: ref.ID}
 	switch st.Status {
 	case aegiskeys.ProvisionStatusCredentialCommitted, aegiskeys.ProvisionStatusBindingPending:
 		// Transient commit stage: retrying the same request ID continues
 		// the promotion. Keep the durable record 'uncertain' until the
-		// provider reports a binding.
-		if err := s.db.UpdateSecretRefProvisionState(ref.ID, types.ProvisionReconcileUncertain, st.RecordID, st.BindingID); err != nil {
+		// provider reports a binding. First identity sighting is bound
+		// immediately (it exists at the provider); state stays uncertain.
+		assigned, err := s.transitionProvisionIdentity(ref, types.ProvisionReconcileUncertain, st, expectedPendingOrUncertain...)
+		if err != nil {
 			return nil, ref, fmt.Errorf("provision state update failed: %w", err)
 		}
+		if !assigned {
+			if err := s.recordIdentityConflict(ctx, caller, ref, st); err != nil {
+				return nil, ref, err
+			}
+			return s.refuseConflicted(ref)
+		}
+		ref.ReconcileStatus = types.ProvisionReconcileUncertain
+		applyIdentity(ref, st)
 		report.ReEnrollmentRequired = true
 		return report, ref, nil
 	case aegiskeys.ProvisionStatusAuthorizationPending:
 		// Credential + binding durable; the resolve grant awaits operator
 		// approval. This is a SAVED credential.
-		if err := s.db.UpdateSecretRefProvisionState(ref.ID, types.ProvisionReconcileCommitted, st.RecordID, st.BindingID); err != nil {
+		assigned, err := s.transitionProvisionIdentity(ref, types.ProvisionReconcileCommitted, st, expectedPendingOrUncertain...)
+		if err != nil {
 			return nil, ref, fmt.Errorf("provision state update failed: %w", err)
 		}
+		if !assigned {
+			if err := s.recordIdentityConflict(ctx, caller, ref, st); err != nil {
+				return nil, ref, err
+			}
+			return s.refuseConflicted(ref)
+		}
 		ref.ReconcileStatus = types.ProvisionReconcileCommitted
-		ref.RecordID, ref.BindingID = st.RecordID, st.BindingID
+		applyIdentity(ref, st)
 		report.Saved = true
 		report.ReEnrollmentRequired = true
 		s.audit(ref.ID, "credential_saved", caller, req.Binding, st.Status)
-	case aegiskeys.ProvisionStatusGrantPresent, aegiskeys.ProvisionStatusReady:
-		if err := s.db.UpdateSecretRefProvisionState(ref.ID, types.ProvisionReconcileReady, st.RecordID, st.BindingID); err != nil {
+	case aegiskeys.ProvisionStatusGrantPresent:
+		// grant_present ≠ ready: the resolve grant EXISTS but the provider
+		// has not reported an unlocked, policy-valid, executable-pin-valid
+		// readiness verdict. The durable state records that distinction;
+		// only the provider's own resolve-time authorization revalidation
+		// (which always runs at dispatch) is the final gate.
+		assigned, err := s.transitionProvisionIdentity(ref, types.ProvisionReconcileGrantPresent, st,
+			append(expectedPendingOrUncertain, types.ProvisionReconcileCommitted)...)
+		if err != nil {
 			return nil, ref, fmt.Errorf("provision state update failed: %w", err)
 		}
+		if !assigned {
+			if err := s.recordIdentityConflict(ctx, caller, ref, st); err != nil {
+				return nil, ref, err
+			}
+			return s.refuseConflicted(ref)
+		}
+		ref.ReconcileStatus = types.ProvisionReconcileGrantPresent
+		applyIdentity(ref, st)
+		report.Saved = true
+		report.ReEnrollmentRequired = true
+		s.audit(ref.ID, "credential_saved", caller, req.Binding, st.Status)
+	case aegiskeys.ProvisionStatusReady:
+		assigned, err := s.transitionProvisionIdentity(ref, types.ProvisionReconcileReady, st,
+			append(expectedPendingOrUncertain, types.ProvisionReconcileCommitted, types.ProvisionReconcileGrantPresent)...)
+		if err != nil {
+			return nil, ref, fmt.Errorf("provision state update failed: %w", err)
+		}
+		if !assigned {
+			if err := s.recordIdentityConflict(ctx, caller, ref, st); err != nil {
+				return nil, ref, err
+			}
+			return s.refuseConflicted(ref)
+		}
 		ref.ReconcileStatus = types.ProvisionReconcileReady
-		ref.RecordID, ref.BindingID = st.RecordID, st.BindingID
+		applyIdentity(ref, st)
 		report.Saved = true
 		s.audit(ref.ID, "credential_saved", caller, req.Binding, st.Status)
 	default:
@@ -274,6 +336,88 @@ func (s *Service) advanceProvision(ctx context.Context, caller, mode string, req
 		report.UseResult = s.immediateUse(ctx, caller, req, ref)
 	}
 	return report, ref, nil
+}
+
+// expectedPendingOrUncertain are the pre-assignment lifecycle states: only
+// a reference that has NOT yet been assigned a stable provider identity
+// may take one.
+var expectedPendingOrUncertain = []string{types.ProvisionReconcilePending, types.ProvisionReconcileUncertain}
+
+// applyIdentity mirrors the (verified, already-transitioned) provider
+// identity into the in-memory reference.
+func applyIdentity(ref *types.SecretReference, st aegiskeys.ProvisionResponse) {
+	ref.RecordID, ref.BindingID = st.RecordID, st.BindingID
+}
+
+// transitionProvisionIdentity performs the durable identity transition for
+// one provider observation:
+//   - ref still uninitialized → FIRST assignment (empty-identity CAS).
+//   - ref identity already assigned AND matches the provider → state-only
+//     advance (identity CAS).
+//   - ref identity assigned and DIVERGES → no write here; the caller
+//     records the durable conflict (false, nil).
+func (s *Service) transitionProvisionIdentity(ref *types.SecretReference, newStatus string, st aegiskeys.ProvisionResponse, expectedStatuses ...string) (bool, error) {
+	if ref.RecordID == "" && ref.BindingID == "" {
+		return s.db.TransitionSecretRefProvisionState(ref.ID, newStatus, st.RecordID, st.BindingID, true, expectedStatuses...)
+	}
+	if identityDiverged(ref, st) {
+		return false, nil
+	}
+	// Same identity: a pure status promotion. If the row already sits at
+	// newStatus the CAS simply affects zero rows, which is still success.
+	advanced, err := s.db.TransitionSecretRefProvisionState(ref.ID, newStatus, ref.RecordID, ref.BindingID, false, expectedStatuses...)
+	if err != nil || advanced {
+		return advanced, err
+	}
+	// Zero rows with matching identity = the row is already AT newStatus
+	// (outside the expected set). Not a divergence: verify durably.
+	fresh, err := s.db.GetSecretRef(ref.ID)
+	if err != nil || fresh == nil {
+		return false, err
+	}
+	if fresh.ReconcileStatus == newStatus && !identityDiverged(fresh, st) {
+		ref.ReconcileStatus = fresh.ReconcileStatus
+		return true, nil
+	}
+	return false, nil
+}
+
+// identityDiverged reports whether the provider's returned stable identity
+// differs from the reference's committed identity.
+func identityDiverged(ref *types.SecretReference, st aegiskeys.ProvisionResponse) bool {
+	return (st.RecordID != "" && st.RecordID != ref.RecordID) ||
+		(st.BindingID != "" && st.BindingID != ref.BindingID)
+}
+
+// recordIdentityConflict durably records a divergent provider identity:
+// the ORIGINAL pins are preserved in the reference row, the conflict is
+// audited, and every subsequent execution fails closed (P0-A).
+func (s *Service) recordIdentityConflict(ctx context.Context, caller string, ref *types.SecretReference, st aegiskeys.ProvisionResponse) error {
+	marked, err := s.db.MarkSecretRefIdentityConflict(ref.ID)
+	if err != nil {
+		return fmt.Errorf("identity conflict record failed: %w", err)
+	}
+	if !marked {
+		// Consumed refs keep their decisive terminal state; nothing to do.
+		return nil
+	}
+	ref.ReconcileStatus = types.ProvisionReconcileIdentityConflict
+	s.audit(ref.ID, "credential_identity_conflict", caller, ref.Binding,
+		fmt.Sprintf("provider record_id=%q binding_id=%q diverges from pinned record_id=%q binding_id=%q; original pins preserved; execution blocked pending operator reconciliation",
+			st.RecordID, st.BindingID, ref.RecordID, ref.BindingID))
+	return nil
+}
+
+// refuseConflicted is the typed refusal for a conflicted reference. The
+// report carries the conflict so trusted surfaces can render the
+// reconciliation procedure instead of a generic error.
+func (s *Service) refuseConflicted(ref *types.SecretReference) (*ProvisionReport, *types.SecretReference, error) {
+	return &ProvisionReport{
+		ProviderStatus:   providerStatusOf(ref),
+		RefID:            ref.ID,
+		IdentityConflict: true,
+		ConflictNextStep: "operator reconciliation required: verify the provider binding/record identities, then resolve the conflict via an operator-authorized procedure before any further use",
+	}, ref, errors.New("provider identity diverges from the pinned record/binding identity: execution blocked pending operator reconciliation")
 }
 
 // failProvision durably records the provider refusal. access_denied /
@@ -314,16 +458,29 @@ func (s *Service) immediateUse(ctx context.Context, caller string, req aegiskeys
 }
 
 // providerStatusOf maps a durable reconcile status back to the provider's
-// lifecycle label for idempotent recovery reports.
+// lifecycle label for idempotent recovery reports. Cached by definition:
+// the caller has not contacted the provider on this path, so the value is
+// the LAST OBSERVED provider state, never a freshly verified readiness
+// verdict (P1-A) — surfaces must label it as such.
 func providerStatusOf(ref *types.SecretReference) string {
-	if ref.ReconcileStatus == types.ProvisionReconcileReady {
+	switch ref.ReconcileStatus {
+	case types.ProvisionReconcileReady:
 		return aegiskeys.ProvisionStatusReady
+	case types.ProvisionReconcileGrantPresent:
+		return aegiskeys.ProvisionStatusGrantPresent
 	}
 	return aegiskeys.ProvisionStatusAuthorizationPending
 }
 
 // ProvisionStatusReport reconciles one provisioned reference for the
 // trusted surface (admin/intake poll this between operator steps).
+//
+// Identity immutability (P0-A): a reference with assigned stable identity
+// NEVER adopts the provider's returned record/binding ID. Divergence is a
+// durable identity conflict (original pins preserved, audited, execution
+// blocked); matching identity only promotes the lifecycle state through
+// expected-state atomic transitions. A first-assignment (empty identity)
+// path is the only writer of the identity columns here.
 func (s *Service) ProvisionStatusReport(ctx context.Context, caller, requestID string) (*ProvisionReport, *types.SecretReference, error) {
 	ref, err := s.db.GetSecretRefByProvisionRequest(requestID)
 	if err != nil {
@@ -345,19 +502,68 @@ func (s *Service) ProvisionStatusReport(ctx context.Context, caller, requestID s
 		RefID:          ref.ID,
 	}
 	report.ReEnrollmentRequired = st.Status == aegiskeys.ProvisionStatusAuthorizationPending
-	if st.BindingID != ref.BindingID || st.RecordID != ref.RecordID {
-		if err := s.db.UpdateSecretRefProvisionState(ref.ID, reconcileStatusFor(st.Status), st.RecordID, st.BindingID); err != nil {
+	if identityDiverged(ref, st) {
+		// Divergent identity: PRESERVE the original pins, record the
+		// durable conflict, refuse. Never adopt the provider's new
+		// identity as a "status refresh".
+		if err := s.recordIdentityConflict(ctx, caller, ref, st); err != nil {
 			return nil, ref, err
 		}
-		ref.RecordID, ref.BindingID, ref.ReconcileStatus = st.RecordID, st.BindingID, reconcileStatusFor(st.Status)
+		return s.refuseConflicted(ref)
+	}
+	if ref.RecordID == "" && ref.BindingID == "" {
+		// First assignment: only under the expected pre-assignment
+		// lifecycle states, atomically (concurrent status updates race
+		// through the CAS, not through read-modify-write).
+		assigned, err := s.transitionProvisionIdentity(ref, reconcileStatusFor(st.Status), st, expectedPendingOrUncertain...)
+		if err != nil {
+			return nil, ref, fmt.Errorf("provision state update failed: %w", err)
+		}
+		if !assigned {
+			// Lost the race: re-read and continue with the durable state.
+			fresh, gerr := s.db.GetSecretRef(ref.ID)
+			if gerr != nil || fresh == nil {
+				return nil, ref, fmt.Errorf("provision state re-read failed: %v", gerr)
+			}
+			ref = fresh
+		}
+	} else {
+		// Matching identity: promote the lifecycle state via identity CAS
+		// (never the identity columns).
+		advanced, err := s.db.TransitionSecretRefProvisionState(ref.ID, reconcileStatusFor(st.Status), ref.RecordID, ref.BindingID, false,
+			types.ProvisionReconcilePending, types.ProvisionReconcileUncertain, types.ProvisionReconcileCommitted, types.ProvisionReconcileGrantPresent)
+		if err != nil {
+			return nil, ref, fmt.Errorf("provision state update failed: %w", err)
+		}
+		if advanced {
+			ref.ReconcileStatus = reconcileStatusFor(st.Status)
+		} else {
+			// Row already at the target status (or elsewhere): re-read the
+			// durable state as the anchor for the report.
+			fresh, gerr := s.db.GetSecretRef(ref.ID)
+			if gerr != nil || fresh == nil {
+				return nil, ref, fmt.Errorf("provision state re-read failed: %v", gerr)
+			}
+			ref = fresh
+		}
+	}
+	if report.Saved {
+		report.Saved = ref.ReconcileStatus == types.ProvisionReconcileCommitted ||
+			ref.ReconcileStatus == types.ProvisionReconcileGrantPresent ||
+			ref.ReconcileStatus == types.ProvisionReconcileReady
 	}
 	return report, ref, nil
 }
 
 func reconcileStatusFor(status string) string {
 	switch status {
-	case aegiskeys.ProvisionStatusGrantPresent, aegiskeys.ProvisionStatusReady:
+	case aegiskeys.ProvisionStatusReady:
 		return types.ProvisionReconcileReady
+	case aegiskeys.ProvisionStatusGrantPresent:
+		// P1-A: grant_present ≠ ready. The grant exists but the provider
+		// has not reported an unlocked/policy-valid/executable-pin-valid
+		// readiness verdict; the durable states stay distinct.
+		return types.ProvisionReconcileGrantPresent
 	case aegiskeys.ProvisionStatusAuthorizationPending:
 		return types.ProvisionReconcileCommitted
 	default:

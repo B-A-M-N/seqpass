@@ -373,6 +373,11 @@ func (m *helperMockBroker) handleV3Provision(conn net.Conn, hreq *http.Request) 
 	}
 	resp := fmt.Sprintf(`{"request_id":%q,"record_id":"rec-%s","binding_id":"bid-%s","binding":%q,"status":"authorization_pending"}`,
 		body.RequestID, body.RequestID[:8], body.RequestID[:8], body.Binding)
+	if body.Binding == "" {
+		// Status-only registration (no binding): no stable identity —
+		// the response carries metadata only.
+		resp = fmt.Sprintf(`{"request_id":%q,"status":"authorization_pending"}`, body.RequestID)
+	}
 	v3ProvisionState["req:"+body.RequestID] = string(raw)
 	v3ProvisionState["resp:"+body.RequestID] = resp
 	fmt.Printf("AUDIT v3-provision %s %s\n", body.RequestID, body.Binding)
@@ -392,6 +397,25 @@ func (m *helperMockBroker) handleV3Status(conn net.Conn, requestID string) {
 	if !ok {
 		v3Error(conn, http.StatusNotFound)
 		return
+	}
+	// Divergence injection (P0-A tests): a control file named
+	// statusdiverge-<requestID> substitutes the stored stable identity
+	// with a divergent one — modeling a provider-side rebind/rotation
+	// observed through status reconciliation.
+	if raw, rerr := os.ReadFile(filepath.Join(filepath.Dir(m.sockPath), "statusdiverge-"+requestID)); rerr == nil {
+		var parts [2]string
+		fields := strings.Fields(string(raw))
+		if len(fields) == 2 {
+			parts = [2]string{fields[0], fields[1]}
+		}
+		var body map[string]interface{}
+		if jerr := json.Unmarshal([]byte(resp), &body); jerr == nil {
+			body["record_id"] = parts[0]
+			body["binding_id"] = parts[1]
+			if rewritten, merr := json.Marshal(body); merr == nil {
+				resp = string(rewritten)
+			}
+		}
 	}
 	writeJSONBody(conn, resp)
 }
@@ -572,6 +596,19 @@ func (m *mockBrokerChild) revoke(binding string) {
 	path := filepath.Join(filepath.Dir(m.sockPath), "revoke-"+safe)
 	if err := os.WriteFile(path, []byte("revoked"), 0600); err != nil {
 		m.t.Fatalf("revoke control file: %v", err)
+	}
+}
+
+// divergeStatusResponse rewrites the mock's v3 status response for a
+// request ID via a control file read by the mock child: the next status
+// reconciliation returns the substituted stable identity — modeling a
+// provider-side rebind/rotation that SeqPass observes through
+// ProvisionStatusReport (P0-A divergence injection).
+func (m *mockBrokerChild) divergeStatusResponse(requestID, recordID, bindingID string) {
+	m.t.Helper()
+	path := filepath.Join(filepath.Dir(m.sockPath), "statusdiverge-"+requestID)
+	if err := os.WriteFile(path, []byte(recordID+" "+bindingID), 0600); err != nil {
+		m.t.Fatalf("statusdiverge control file: %v", err)
 	}
 }
 
