@@ -63,10 +63,23 @@ type helperMockBroker struct {
 	lastPID int
 }
 
+// serve accepts until the listener dies. The parent-side liveness
+// diagnostics read MOCK-UP/MOCK-DOWN markers from the log to tell a
+// healthy mock from one that exited early.
 func (m *helperMockBroker) serve() {
 	for {
 		conn, err := m.listener.Accept()
 		if err != nil {
+			// Transient accept errors (EINTR/EMFILE/ENFILE/ECONNABORTED)
+			// must not kill the mock: under suite load the parent sees
+			// them as connection resets and the positive control flakes.
+			if errors.Is(err, syscall.EINTR) || errors.Is(err, syscall.EMFILE) ||
+				errors.Is(err, syscall.ENFILE) || errors.Is(err, syscall.ECONNABORTED) ||
+				errors.Is(err, syscall.EAGAIN) {
+				time.Sleep(5 * time.Millisecond)
+				continue
+			}
+			fmt.Printf("MOCK-ACCEPT-ERR: %v\n", err) //nolint:errcheck // fixture diagnostic
 			return
 		}
 		go m.handle(conn)
@@ -105,38 +118,62 @@ func (m *helperMockBroker) peerIdentity(conn net.Conn) (uid int, exe string, err
 
 func (m *helperMockBroker) handle(conn net.Conn) {
 	defer conn.Close() //nolint:errcheck
-	// Read one bounded HTTP request with real framing: http.ReadRequest
-	// honors Content-Length/chunked encoding, and the body is drained to
-	// EOF before decoding — a request whose headers and body arrive in
-	// separate segments must not be mistaken for a malformed one (that
-	// race once reset connections mid-exchange and intermittently failed
-	// the positive control).
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	// Keep-alive loop: the client's http.Transport pools connections and
+	// REUSES the stage-1 connection for the stage-2 control resolve.
+	// Serving exactly one request per accept and closing the connection
+	// raced that reuse — the client would hit the closing socket
+	// ("connection reset by peer") and intermittently fail the positive
+	// control under load. The real broker is a keep-alive HTTP server;
+	// the mock mirrors it.
+	for {
+		if m.handleOne(conn) {
+			return // transport-level fatal (bad frame / read error)
+		}
+	}
+}
+
+// handleOne reads and serves ONE request. Returns true when the
+// connection must be abandoned (transport error or unreadable request).
+// The read uses a real bounded HTTP parse: http.ReadRequest honors
+// Content-Length/chunked encoding, and the body is drained to EOF before
+// decoding — a request whose headers and body arrive in separate segments
+// must not be mistaken for a malformed one (that race once reset
+// connections mid-exchange and intermittently failed the positive
+// control).
+func (m *helperMockBroker) handleOne(conn net.Conn) bool {
+	// 60s read deadline: with keep-alive, pooled connections idle BETWEEN
+	// requests; a short deadline would close them and re-create the
+	// reset race the loop exists to fix. The parent kills the child at
+	// cleanup.
+	_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	bufr := bufio.NewReaderSize(conn, 4096)
 	hreq, err := http.ReadRequest(bufr)
 	if err != nil {
+		fmt.Printf("MOCK-READ-ERR: %v\n", err) //nolint:errcheck // fixture diagnostic
 		httpError(conn, httpBadRequest)
-		return
+		return true
 	}
 	// v3 provisioning endpoints (P0-3) ride the same peer-verified HTTP
 	// surface with their own request grammar.
 	switch {
 	case hreq.URL.Path == "/v3/intake/credentials":
 		m.handleV3Provision(conn, hreq)
-		return
+		return false
 	case strings.HasPrefix(hreq.URL.Path, "/v3/intake/requests/"):
 		m.handleV3Status(conn, strings.TrimPrefix(hreq.URL.Path, "/v3/intake/requests/"))
-		return
+		return false
 	}
 	const maxMockBody = 64 << 10
 	raw, err := io.ReadAll(io.LimitReader(hreq.Body, maxMockBody+1))
 	hreq.Body.Close() //nolint:errcheck
 	if err != nil || len(raw) > maxMockBody {
 		httpError(conn, httpBadRequest)
-		return
+		return true
 	}
 	var body struct {
 		Binding     string `json:"binding"`
+		BindingID   string `json:"binding_id"`
+		RecordID    string `json:"record_id"`
 		Operation   string `json:"operation"`
 		OperationID string `json:"operation_id"`
 		AttestNonce string `json:"attest_nonce"`
@@ -145,25 +182,25 @@ func (m *helperMockBroker) handle(conn net.Conn) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	if err := dec.Decode(&body); err != nil || dec.More() {
 		httpError(conn, httpBadRequest)
-		return
+		return true
 	}
 
 	uid, exe, perr := m.peerIdentity(conn)
 	if perr != nil {
 		fmt.Printf("DENY peer-identity: %v\n", perr)
 		httpError(conn, httpForbidden)
-		return
+		return false
 	}
 	peerPID := m.lastPID
 	if uid != m.grantUID {
 		fmt.Printf("DENY uid %d != grant %d\n", uid, m.grantUID)
 		httpError(conn, httpForbidden)
-		return
+		return false
 	}
 	if exe != m.grantExe {
 		fmt.Printf("DENY exe %q != grant %q\n", exe, m.grantExe)
 		httpError(conn, httpForbidden)
-		return
+		return false
 	}
 	// Scoped-binding semantics: empty or unlisted operations are denied.
 	scoped := false
@@ -176,7 +213,29 @@ func (m *helperMockBroker) handle(conn net.Conn) {
 	if !scoped {
 		fmt.Printf("DENY operation %q not allowed\n", body.Operation)
 		httpError(conn, httpForbidden)
-		return
+		return false
+	}
+	// P0-3 rebind protection: when the resolve request carries stable
+	// identity pins, the mock enforces the same contract as the real
+	// provider — pins must match the binding's CURRENT identity. A rebind
+	// (control file written by the parent) changes the current identity;
+	// the pinned resolve then fails generically, exactly like the real
+	// broker's ErrBindingUnavailable denial. Unpinned resolves keep
+	// resolving by name (real-provider semantics: pin-carrying is
+	// SeqPass's defense, asserted via the audit marker).
+	if cur, ok := m.currentBindingIdentity(body.Binding); ok {
+		hadPins := body.BindingID != "" || body.RecordID != ""
+		if hadPins && (body.BindingID != cur.bindingID || body.RecordID != cur.recordID) {
+			fmt.Printf("DENY identity pin mismatch (binding_id=%q record_id=%q vs current %q/%q)\n",
+				body.BindingID, body.RecordID, cur.bindingID, cur.recordID)
+			httpError(conn, httpForbidden)
+			return false
+		}
+	}
+	if m.revoked(body.Binding) {
+		fmt.Printf("DENY binding revoked by provider\n")
+		httpError(conn, httpForbidden)
+		return false
 	}
 	// Hardened-parent attestation (P0-1): an attest-pinned grant requires a
 	// valid ed25519 signature over the canonical request string from the
@@ -186,12 +245,12 @@ func (m *helperMockBroker) handle(conn net.Conn) {
 		if len(body.AttestNonce) == 0 || len(body.AttestSig) == 0 {
 			fmt.Printf("DENY attestation missing\n")
 			httpError(conn, httpForbidden)
-			return
+			return false
 		}
 		if !ed25519.Verify(m.attestKey, aegiskeys.AttestCanonicalString(body.Binding, body.Operation, body.OperationID, body.AttestNonce), body.AttestSig) {
 			fmt.Printf("DENY attestation signature invalid\n")
 			httpError(conn, httpForbidden)
-			return
+			return false
 		}
 		if m.seenNonces == nil {
 			m.seenNonces = map[string]bool{}
@@ -199,7 +258,7 @@ func (m *helperMockBroker) handle(conn net.Conn) {
 		if m.seenNonces[body.AttestNonce] {
 			fmt.Printf("DENY attestation nonce replay\n")
 			httpError(conn, httpForbidden)
-			return
+			return false
 		}
 		m.seenNonces[body.AttestNonce] = true
 	}
@@ -207,8 +266,13 @@ func (m *helperMockBroker) handle(conn net.Conn) {
 	if len(body.AttestNonce) >= 12 {
 		nonceLog = body.AttestNonce[:12]
 	}
-	fmt.Printf("AUDIT pid=%d nonce=%s %s#%s\n", peerPID, nonceLog, body.Operation, body.OperationID)
+	pins := "pins=no"
+	if body.BindingID != "" || body.RecordID != "" {
+		pins = "pins=yes"
+	}
+	fmt.Printf("AUDIT pid=%d nonce=%s %s#%s %s\n", peerPID, nonceLog, body.Operation, body.OperationID, pins)
 	writeJSONBody(conn, fmt.Sprintf(`{"protocol":"v2","binding":%q,"kind":"api-key","value":%q}`, body.Binding, m.value))
+	return false
 }
 
 // v3ProvisionState is the mock provider's durable provisioning table: the
@@ -216,6 +280,57 @@ func (m *helperMockBroker) handle(conn net.Conn) {
 // each test shapes its own lifecycle scenarios (status progression,
 // conflicts, unknowns).
 var v3ProvisionState = map[string]string{}
+
+// bindingIdentity is the provider-side identity a binding NAME currently
+// points at (mirrors broker.CredentialBinding.ID/SecretID).
+type bindingIdentity struct {
+	bindingID string
+	recordID  string
+}
+
+// currentBindingIdentity derives the current identity for a binding name:
+// a rebind control file (written by the parent mid-test) overrides; else
+// the identity committed via v3 provisioning (rec-<reqid[:8]>/bid-…)
+// applies. ok=false when the mock has never seen the binding (unpinned
+// pre-P0-3 resolves keep working unchanged).
+func (m *helperMockBroker) currentBindingIdentity(binding string) (bindingIdentity, bool) {
+	dir := filepath.Dir(m.sockPath)
+	safe := strings.ReplaceAll(binding, "/", "_")
+	if raw, err := os.ReadFile(filepath.Join(dir, "rebind-"+safe)); err == nil {
+		parts := strings.SplitN(strings.TrimSpace(string(raw)), " ", 2)
+		if len(parts) == 2 {
+			return bindingIdentity{bindingID: parts[0], recordID: parts[1]}, true
+		}
+	}
+	// First committed v3 entry whose binding matches defines the original
+	// identity (same derivation as handleV3Provision's response).
+	for key, raw := range v3ProvisionState {
+		if !strings.HasPrefix(key, "req:") {
+			continue
+		}
+		var body struct {
+			RequestID string `json:"request_id"`
+			Binding   string `json:"binding"`
+		}
+		if json.Unmarshal([]byte(raw), &body) != nil || body.Binding != binding || len(body.RequestID) < 8 {
+			continue
+		}
+		return bindingIdentity{
+			bindingID: "bid-" + body.RequestID[:8],
+			recordID:  "rec-" + body.RequestID[:8],
+		}, true
+	}
+	return bindingIdentity{}, false
+}
+
+// revoked reports whether the parent wrote the provider-revocation control
+// file for the binding (models AegisKeys deleting/revoking the binding:
+// any resolve referencing it is denied generically).
+func (m *helperMockBroker) revoked(binding string) bool {
+	safe := strings.ReplaceAll(binding, "/", "_")
+	_, err := os.Stat(filepath.Join(filepath.Dir(m.sockPath), "revoke-"+safe))
+	return err == nil
+}
 
 // handleV3Provision mirrors the provider's /v3/intake/credentials contract:
 // peer-verified (same exe discipline as resolve), content-addressed
@@ -344,8 +459,13 @@ func runMockBrokerChild() int {
 		}
 		m.attestKey = ed25519.PublicKey(pubRaw)
 	}
-	m.serve() // blocks until the listener closes
-	return 0
+	fmt.Printf("MOCK-UP pid=%d\n", os.Getpid()) //nolint:errcheck // fixture diagnostic
+	m.serve()                                   // blocks until the listener closes
+	// serve() only returns on a listener failure: log it and exit
+	// NON-zero so the parent's liveness check can tell "exited" from
+	// "zombie-alive" via WaitStatus instead of guessing.
+	fmt.Printf("MOCK-DOWN: accept loop ended\n") //nolint:errcheck // fixture diagnostic
+	return 3
 }
 
 // mockBrokerChild is a mock broker served by a SEPARATE process. denyReason
@@ -360,6 +480,7 @@ type mockBrokerChild struct {
 	auditOps   []string
 	auditPIDs  []int // resolving process pids parsed from AUDIT lines
 	lastSize   int64
+	proc       *exec.Cmd // mock child process (diagnostics: liveness)
 	t          *testing.T
 }
 
@@ -408,24 +529,71 @@ func startMockBrokerChildAttest(t *testing.T, grantUID int, grantExe string, all
 		_, _ = cmd.Process.Wait()
 		_ = logFile.Close()
 	})
-	// Wait for the socket to appear. Under residual system load the child
-	// (a Go binary doing full runtime init) can take seconds to bind.
+	// Wait for the socket to appear AND to accept: os.Stat succeeds after
+	// bind() but before listen(), a window in which a dial is refused
+	// with ECONNREFUSED. The parent's stage-1 test treats ANY stage-1
+	// error as the dumpability denial, so a refused dial would make that
+	// check vacuous — probe with a real connection instead (under
+	// residual system load the child can take seconds to bind).
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		if _, err := os.Stat(sock); err == nil {
+		if conn, derr := net.DialTimeout("unix", sock, time.Second); derr == nil {
+			_ = conn.Close()
 			break
-		}
-		if time.Now().After(deadline) {
+		} else if time.Now().After(deadline) {
 			logData, _ := os.ReadFile(logPath)
-			t.Fatalf("mock broker child did not create its socket; child log: %s", string(logData))
+			t.Fatalf("mock broker child never became reachable; child log: %s", string(logData))
+		} else {
+			time.Sleep(5 * time.Millisecond)
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
-	return &mockBrokerChild{sockPath: sock, value: "mock-credential-value", logPath: logPath, t: t}
+	return &mockBrokerChild{sockPath: sock, value: "mock-credential-value", logPath: logPath, proc: cmd, t: t}
+}
+
+// rebind models the provider re-binding a binding NAME to a different
+// vault record (rotation of identity, not value): the control file is read
+// by the mock child on the next resolve. bindingID/recordID become the
+// CURRENT identity; provisioned refs still holding the ORIGINAL pins are
+// denied generically from then on.
+func (m *mockBrokerChild) rebind(binding, bindingID, recordID string) {
+	m.t.Helper()
+	safe := strings.ReplaceAll(binding, "/", "_")
+	path := filepath.Join(filepath.Dir(m.sockPath), "rebind-"+safe)
+	if err := os.WriteFile(path, []byte(bindingID+" "+recordID), 0600); err != nil {
+		m.t.Fatalf("rebind control file: %v", err)
+	}
+}
+
+// revoke models the provider revoking/deleting the binding: every resolve
+// referencing the name is denied from then on.
+func (m *mockBrokerChild) revoke(binding string) {
+	m.t.Helper()
+	safe := strings.ReplaceAll(binding, "/", "_")
+	path := filepath.Join(filepath.Dir(m.sockPath), "revoke-"+safe)
+	if err := os.WriteFile(path, []byte("revoked"), 0600); err != nil {
+		m.t.Fatalf("revoke control file: %v", err)
+	}
 }
 
 // refresh parses new log lines for denial reasons and audit records.
 func (m *mockBrokerChild) refresh() {
+	// The child's fmt.Printf goes through Go's buffered stdout; a just-
+	// denied request may still sit in that buffer. Under load the delay
+	// is observable, so a short bounded retry keeps the assertion honest
+	// without masking a REAL absence of denial (the deadline is generous
+	// relative to the buffering, and the mock logs within milliseconds
+	// when it denied anything).
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		m.refreshOnce()
+		if m.denyReason != "" || time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func (m *mockBrokerChild) refreshOnce() {
 	f, err := os.Open(m.logPath)
 	if err != nil {
 		return
@@ -548,28 +716,62 @@ func TestBrokerNonDumpableCannotAuthenticate(t *testing.T) {
 	}
 
 	// Stage 1: non-dumpable (the broker's §11 posture) -> peer-identity
-	// authentication failure.
+	// authentication failure. The denial observable (the mock's DENY
+	// line) is checked BELOW — a stage-1 error alone is not proof: a
+	// client-side transport failure also returns an error, and accepting
+	// it as the dumpability signal would make this test vacuous.
 	setDumpable(t, 0)
-	if _, rerr := cli.Resolve(context.Background(), "seqpass/example", "http.request", "op-dumpable"); rerr == nil {
+	_, stage1Err := cli.Resolve(context.Background(), "seqpass/example", "http.request", "op-dumpable")
+	if stage1Err == nil {
 		setDumpable(t, 1)
 		t.Fatal("non-dumpable process resolved from the mock broker; the qualification finding is not reproduced")
 	}
 	m.refresh()
+	// The denial observable must exist. stdout buffering was ruled out
+	// (refresh retries up to 2s — see refresh) and a mock crash would
+	// surface in the diagnostics, so an empty denial reason after the
+	// deadline means the error came from the client side: dump the log
+	// verbatim and fail with BOTH observations.
 	if !strings.Contains(m.denyReason, "peer-identity") {
 		setDumpable(t, 1)
-		t.Fatalf("denial was not at the peer-identity layer: %q", m.denyReason)
+		m.dumpDiagnostics(t)
+		t.Fatalf("denial was not at the peer-identity layer: %q (stage1 err: %v)", m.denyReason, stage1Err)
 	}
 
 	// Stage 2 (control): same process, dumpable again -> authorized.
 	setDumpable(t, 1)
 	mat, rerr := cli.Resolve(context.Background(), "seqpass/example", "http.request", "op-dumpable")
 	if rerr != nil || mat.Value != m.value {
+		m.dumpDiagnostics(t)
 		t.Fatalf("dumpable control resolve = %v, %v (mock works; stage 1 failure is dumpability-specific)", mat.Value, rerr)
 	}
 	m.refresh()
-	if len(m.auditOps) != 1 || !strings.HasSuffix(m.auditOps[0], " http.request#op-dumpable") {
+	if len(m.auditOps) != 1 || !strings.Contains(m.auditOps[0], " http.request#op-dumpable ") || !strings.HasSuffix(m.auditOps[0], " pins=no") {
 		t.Fatalf("audit correlation = %v", m.auditOps)
 	}
+}
+
+// dumpDiagnostics surfaces the mock child's full log and liveness on any
+// failure whose root cause lives in the fixture (transient transport
+// errors must be diagnosable from the test output alone).
+func (m *mockBrokerChild) dumpDiagnostics(t *testing.T) {
+	t.Helper()
+	logData, _ := os.ReadFile(m.logPath)
+	alive := "unknown"
+	if m.proc != nil && m.proc.Process != nil {
+		// kill(pid,0) cannot distinguish a live process from a zombie;
+		// probe the socket instead — a listening mock always answers.
+		conn, derr := net.DialTimeout("unix", m.sockPath, time.Second)
+		if derr == nil {
+			_ = conn.Close()
+			alive = "listening"
+		} else if werr := syscall.Kill(m.proc.Process.Pid, 0); werr == nil {
+			alive = "zombie-or-unresponsive"
+		} else {
+			alive = "exited"
+		}
+	}
+	t.Logf("mock diagnostics: alive=%v log=%q", alive, string(logData))
 }
 
 // helperTestingCommand installs the test re-exec builder: instead of argv
@@ -618,7 +820,7 @@ func TestResolveViaHelperAuthorized(t *testing.T) {
 		t.Fatalf("credential = %+v", cred)
 	}
 	m.refresh()
-	if len(m.auditOps) != 1 || !strings.HasSuffix(m.auditOps[0], " http.request#op-1") {
+	if len(m.auditOps) != 1 || !strings.Contains(m.auditOps[0], " http.request#op-1 ") || !strings.HasSuffix(m.auditOps[0], " pins=no") {
 		t.Fatalf("audit correlation = %v", m.auditOps)
 	}
 }
@@ -889,7 +1091,7 @@ func TestResolveCredentialMaterialRoutesThroughHelper(t *testing.T) {
 		t.Fatalf("credential value = %q", cred.Value)
 	}
 	m.refresh()
-	if len(m.auditOps) != 1 || !strings.HasSuffix(m.auditOps[0], " http.request#op-wire") || !strings.HasPrefix(m.auditOps[0], "pid=") {
+	if len(m.auditOps) != 1 || !strings.Contains(m.auditOps[0], " http.request#op-wire ") || !strings.HasPrefix(m.auditOps[0], "pid=") || !strings.HasSuffix(m.auditOps[0], " pins=no") {
 		t.Fatalf("audit correlation = %v (want pid=<helper> http.request#op-wire)", m.auditOps)
 	}
 	if len(m.auditPIDs) == 1 && m.auditPIDs[0] == os.Getpid() {
@@ -1071,7 +1273,9 @@ func TestMockBrokerHandlesFragmentedRequest(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() {
-		m.handle(serverConn)
+		// One request per handleOne: the fragmented-request fixture pins
+		// single-request framing, not the keep-alive loop.
+		m.handleOne(serverConn)
 		close(done)
 	}()
 

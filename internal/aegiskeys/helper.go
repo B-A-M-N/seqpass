@@ -98,6 +98,12 @@ type HelperRequest struct {
 	Binding     string `json:"binding"`
 	Operation   string `json:"operation"`
 	OperationID string `json:"operation_id,omitempty"`
+	// Stable identity pins (P0-3 rebind protection): carried through to
+	// the provider's resolve request so a rebind of the binding NAME
+	// cannot silently redirect an approved operation. Empty on pre-P0-3
+	// refs.
+	BindingID   string `json:"binding_id,omitempty"`
+	RecordID    string `json:"record_id,omitempty"`
 	AttestNonce string `json:"attest_nonce,omitempty"`
 	AttestSig   []byte `json:"attest_sig,omitempty"`
 	// Provision, when non-nil, switches this helper exchange from resolve
@@ -362,7 +368,20 @@ func runHelperExchange(ctx context.Context, helperPath, aegisSocket string, req 
 // attestation) — the helper carries the signature but never sees the key.
 // A nil key sends an unattested request (grants without an attest pin).
 func ResolveViaHelper(ctx context.Context, helperPath, aegisSocket, binding, operation, operationID string, attestKey crypto.Signer) (CredentialMaterial, error) {
-	if binding == "" {
+	return ResolvePinnedViaHelper(ctx, helperPath, aegisSocket, ResolvePin{Binding: binding, Operation: operation, OperationID: operationID}, attestKey)
+}
+
+// ResolvePinnedViaHelper is ResolveViaHelper with stable identity pins
+// (P0-3 rebind protection): bindingID/recordID travel through the helper
+// frame to the provider, which denies generically when a pin no longer
+// matches — a rebind of the binding NAME cannot silently redirect an
+// approved operation. attestBindingRef (the canonical-string binding
+// reference) is the NAME when present (the executor signs the reference it
+// holds), the stable ID otherwise — mirroring the provider's
+// bindingRefForAttest.
+func ResolvePinnedViaHelper(ctx context.Context, helperPath, aegisSocket string, pin ResolvePin, attestKey crypto.Signer) (CredentialMaterial, error) {
+	binding, operation, operationID := pin.Binding, pin.Operation, pin.OperationID
+	if binding == "" && pin.BindingID == "" {
 		return CredentialMaterial{}, ErrBindingUnavailable
 	}
 	if !validOperationName(operation) {
@@ -375,13 +394,17 @@ func ResolveViaHelper(ctx context.Context, helperPath, aegisSocket, binding, ope
 	// One small request frame (<= 4KiB) — the socket buffer absorbs it, so
 	// the synchronous write cannot deadlock against the child's read. The
 	// attestation (when the executor holds a key) is fresh per request.
-	req := HelperRequest{Binding: binding, Operation: operation, OperationID: operationID}
+	req := HelperRequest{Binding: binding, BindingID: pin.BindingID, RecordID: pin.RecordID, Operation: operation, OperationID: operationID}
 	if attestKey != nil {
+		attestRef := binding
+		if attestRef == "" {
+			attestRef = pin.BindingID
+		}
 		nonce, nerr := newAttestNonce()
 		if nerr != nil {
 			return CredentialMaterial{}, fmt.Errorf("%w: attest nonce: %v", ErrTransportUnavailable, nerr)
 		}
-		sig, serr := signAttestation(attestKey, binding, operation, operationID, nonce)
+		sig, serr := signAttestation(attestKey, attestRef, operation, operationID, nonce)
 		if serr != nil {
 			return CredentialMaterial{}, fmt.Errorf("%w: attest sign: %v", ErrTransportUnavailable, serr)
 		}
@@ -394,7 +417,15 @@ func ResolveViaHelper(ctx context.Context, helperPath, aegisSocket, binding, ope
 	}
 	// Re-validate the response with the same wire rules as a direct
 	// resolve: binding echo, component bounds, non-empty material.
-	if resp.Binding != binding {
+	respRef := resp.Binding
+	if respRef == "" {
+		respRef = pin.BindingID
+	}
+	wantRef := binding
+	if wantRef == "" {
+		wantRef = pin.BindingID
+	}
+	if respRef != wantRef {
 		return CredentialMaterial{}, fmt.Errorf("%w: binding mismatch", ErrProtocolMismatch)
 	}
 	if resp.Value == "" && len(resp.Components) == 0 {
@@ -585,6 +616,14 @@ func resolveInHelper(aegisSocket string, req HelperRequest) (CredentialMaterial,
 	if req.OperationID != "" && !validOperationID(req.OperationID) {
 		return CredentialMaterial{}, fmt.Errorf("%w: operation_id", ErrRequestInvalid)
 	}
+	// Identity-pin bounds (P0-3): same grammar the broker validates; the
+	// helper refuses to courier malformed pins rather than forwarding them.
+	if req.BindingID != "" && !validOperationID(req.BindingID) {
+		return CredentialMaterial{}, fmt.Errorf("%w: binding_id", ErrRequestInvalid)
+	}
+	if req.RecordID != "" && !validOperationID(req.RecordID) {
+		return CredentialMaterial{}, fmt.Errorf("%w: record_id", ErrRequestInvalid)
+	}
 	// Attestation pass-through bounds (mirror the broker's request
 	// validation; the helper is a courier, not the signer).
 	if (req.AttestNonce != "") != (len(req.AttestSig) > 0) {
@@ -599,7 +638,15 @@ func resolveInHelper(aegisSocket string, req HelperRequest) (CredentialMaterial,
 	if err != nil {
 		return CredentialMaterial{}, err
 	}
-	return cli.ResolveAttested(ctx, req.Binding, req.Operation, req.OperationID, req.AttestNonce, req.AttestSig)
+	return cli.ResolvePinned(ctx, ResolvePin{
+		Binding:     req.Binding,
+		BindingID:   req.BindingID,
+		RecordID:    req.RecordID,
+		Operation:   req.Operation,
+		OperationID: req.OperationID,
+		AttestNonce: req.AttestNonce,
+		AttestSig:   req.AttestSig,
+	})
 }
 
 // provisionInHelper performs the trusted provisioning forward on the

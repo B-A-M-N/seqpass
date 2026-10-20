@@ -32,14 +32,16 @@ func (s *Service) resolveCredentialMaterial(ctx context.Context, src types.Secre
 		// helper so AegisKeys can verify /proc/<pid>/exe — the broker
 		// itself stays non-dumpable and cannot authenticate. The helper
 		// path is operator configuration, never agent-supplied input.
+		// P0-3: src.BindingID/RecordID (when provisioned) pin the stable
+		// identity through to the provider — rebind protection.
 		if s.cfg.AegisKeysResolveHelper != "" {
-			return aegisResolved(ctx, s.cfg.AegisKeysResolveHelper, socket, src.Binding, operation, opID, s.cfg.AegisKeysAttestKey)
+			return aegisResolved(ctx, s.cfg.AegisKeysResolveHelper, socket, src, operation, opID, s.cfg.AegisKeysAttestKey)
 		}
 		cli, err := aegiskeys.ConnectSocket(socket)
 		if err != nil {
 			return secureops.Credential{}, err
 		}
-		mat, err := cli.Resolve(ctx, src.Binding, operation, opID)
+		mat, err := cli.ResolvePinned(ctx, aegiskeys.ResolvePinFromSource(src.Binding, src.BindingID, src.RecordID, operation, opID))
 		if err != nil {
 			return secureops.Credential{}, err
 		}
@@ -47,8 +49,13 @@ func (s *Service) resolveCredentialMaterial(ctx context.Context, src types.Secre
 		// AegisKeys already validates raw.Binding == requested binding at
 		// the wire layer; this check is defense in depth against a future
 		// client regression.
-		if mat.Binding != src.Binding {
-			return secureops.Credential{}, fmt.Errorf("binding identity mismatch: requested %q, resolved %q", src.Binding, mat.Binding)
+		respRef := mat.Binding
+		wantRef := src.Binding
+		if wantRef == "" {
+			wantRef = src.BindingID
+		}
+		if respRef != wantRef {
+			return secureops.Credential{}, fmt.Errorf("binding identity mismatch: requested %q, resolved %q", wantRef, respRef)
 		}
 		return secureops.Credential{Value: mat.Value, Components: mat.Components}, nil
 	case types.SourceEphemeral:
@@ -104,9 +111,27 @@ func (s *Service) admitUse(ur *types.UseRequest, worker string) (secureops.Opera
 	if err != nil {
 		return nil, "", failUsePreClaim(s, ur, "credential revoked", "")
 	}
-	if src != ur.Source {
+	// P0-3 use-once: a consumed use-once reference fails closed BEFORE
+	// any claim or resolve. Consumption itself happens at dispatch (after
+	// resolve) so a failed execution does not burn the single use.
+	if src.UseOnce {
+		ref, gerr := s.db.GetSecretRef(ur.SecretRef)
+		if gerr != nil || ref == nil || ref.ReconcileStatus == types.ProvisionReconcileConsumed {
+			return nil, "", failUsePreClaim(s, ur, "credential revoked", "")
+		}
+	}
+	// Source-changed check against the PERSISTED identity triple (the use
+	// row stores kind/binding/ref, not the derived pins): a
+	// binding-association change between approval and execution still
+	// trips it. The stable identity pins are enforced by the provider at
+	// resolve time (generic denial on pin mismatch).
+	if src.Kind != ur.Source.Kind || src.Binding != ur.Source.Binding || src.Ref != ur.Source.Ref {
 		return nil, "", failUsePreClaim(s, ur, "credential binding changed", "")
 	}
+	// In-memory enrichment: the execution path resolves with the CURRENT
+	// identity pins (P0-3 rebind protection); the DB row persists only
+	// the identity triple.
+	ur.Source = src
 	driver, err := validateDriverParams(ur.Operation, ur.Params)
 	if err != nil {
 		return nil, "", failUsePreClaim(s, ur, err.Error(), "")
@@ -185,6 +210,17 @@ func (s *Service) ExecuteUse(ctx context.Context, useID, worker string) (map[str
 		s.audit(ur.ID, "secret_use_failed", ur.RequestedBy, ur.Target, "resolve-failed")
 		_ = s.db.FinalizeOp("use", ur.ID, attemptID, types.StatusFailed, "", nil)
 		return nil, err
+	}
+	// P0-3 use-once: the guarded exactly-once consumption commits only
+	// after the credential resolved (a resolve failure leaves the single
+	// use intact). The guarded UPDATE fails closed if a concurrent
+	// dispatch consumed it first — that dispatch owns the credential.
+	if ur.Source.UseOnce {
+		if err := s.db.ConsumeUseOnceSecretRef(ur.SecretRef); err != nil {
+			s.audit(ur.ID, "secret_use_failed", ur.RequestedBy, ur.Target, "use-once already consumed")
+			_ = s.db.FinalizeOp("use", ur.ID, attemptID, types.StatusFailed, "", nil)
+			return nil, fmt.Errorf("use-once credential already consumed")
+		}
 	}
 	defer func() {
 		cred.Value = ""
@@ -299,9 +335,12 @@ func (s *Service) admitTransfer(tr *types.TransferRequest, worker string) (*type
 	if err != nil {
 		return nil, "", failTransferPreClaim(s, tr, "credential revoked", "")
 	}
-	if src != tr.Source {
+	// Source-changed check against the PERSISTED identity triple, then
+	// in-memory pin enrichment — same P0-3 semantics as admitUse.
+	if src.Kind != tr.Source.Kind || src.Binding != tr.Source.Binding || src.Ref != tr.Source.Ref {
 		return nil, "", failTransferPreClaim(s, tr, "credential binding changed", "")
 	}
+	tr.Source = src
 	if metadata.TransferOpHash(tr.RequestedBy, tr.SecretRef, tr.DestinationID, tr.PayloadRef) != tr.OpHash {
 		return nil, "", failTransferPreClaim(s, tr, "operation tampered", "")
 	}

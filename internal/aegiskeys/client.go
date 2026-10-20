@@ -166,6 +166,14 @@ type ResolveRequest struct {
 	Binding     string `json:"binding"`
 	Operation   string `json:"operation,omitempty"`
 	OperationID string `json:"operation_id,omitempty"`
+	// Stable identity pins (P0-3 rebind protection): binding_id selects
+	// the binding by stable generated identity, record_id pins the exact
+	// vault record. The provider denies generically when a pin no longer
+	// matches (a rebind must never silently redirect an approved
+	// operation); rotation of the same record keeps the record pin valid.
+	// Mirrors broker.Request.BindingID/RecordID.
+	BindingID string `json:"binding_id,omitempty"`
+	RecordID  string `json:"record_id,omitempty"`
 	// Hardened-parent attestation (AegisKeys attest-key grants): the
 	// NON-DUMPABLE executor signs the canonical request string with its
 	// in-memory ed25519 key; the dumpable helper child carries nonce and
@@ -251,10 +259,50 @@ func (c *Client) Resolve(ctx context.Context, binding, operation, operationID st
 // public half in the grant). Used by the resolve-helper flow: the helper
 // carries the executor's attestation but never holds the signing key.
 func (c *Client) ResolveAttested(ctx context.Context, binding, operation, operationID, attestNonce string, attestSig []byte) (CredentialMaterial, error) {
+	return c.ResolvePinned(ctx, ResolvePin{Binding: binding, Operation: operation, OperationID: operationID, AttestNonce: attestNonce, AttestSig: attestSig})
+}
+
+// ResolvePinFromSource builds the pinned resolve request from a secret
+// source identity (P0-3 service integration): the binding reference is
+// the NAME when present, the stable binding ID otherwise; the pins travel
+// when the source carries provisioned identity. Shared by the in-process
+// and helper-mode service paths so the rebind-protection semantics cannot
+// drift between them.
+func ResolvePinFromSource(bindingName, bindingID, recordID, operation, operationID string) ResolvePin {
+	return ResolvePin{
+		Binding:     bindingName,
+		BindingID:   bindingID,
+		RecordID:    recordID,
+		Operation:   operation,
+		OperationID: operationID,
+	}
+}
+
+// ResolvePin is the full resolve request (P0-3): binding reference (name
+// and/or stable ID), operation, correlation token, stable identity pins,
+// attestation material.
+type ResolvePin struct {
+	Binding     string
+	BindingID   string
+	RecordID    string
+	Operation   string
+	OperationID string
+	AttestNonce string
+	AttestSig   []byte
+}
+
+// ResolvePinned performs one resolve with stable identity pins (P0-3
+// rebind protection): bindingID/recordID bind the resolve to the
+// provisioned identity, so a rebind of the binding NAME cannot silently
+// redirect an approved operation (the provider denies generically on pin
+// mismatch; rotation of the same record keeps the record pin valid).
+// Empty pins keep pre-P0-3 unpinned resolves.
+func (c *Client) ResolvePinned(ctx context.Context, pin ResolvePin) (CredentialMaterial, error) {
+	binding, operation, operationID, attestNonce, attestSig := pin.Binding, pin.Operation, pin.OperationID, pin.AttestNonce, pin.AttestSig
 	if c == nil || c.http == nil {
 		return CredentialMaterial{}, ErrTransportUnavailable
 	}
-	if binding == "" {
+	if binding == "" && pin.BindingID == "" {
 		return CredentialMaterial{}, ErrBindingUnavailable
 	}
 	if !validOperationName(operation) {
@@ -272,8 +320,21 @@ func (c *Client) ResolveAttested(ctx context.Context, binding, operation, operat
 	if len(attestNonce) > 128 {
 		return CredentialMaterial{}, fmt.Errorf("%w: attest_nonce", ErrRequestInvalid)
 	}
-	req := ResolveRequest{Binding: binding, Operation: operation, OperationID: operationID, AttestNonce: attestNonce, AttestSig: attestSig}
+	// Identity-pin bounds mirror the broker's request validation
+	// (RecordID/BindingID use the same grammar as correlation tokens).
+	if pin.BindingID != "" && !validOperationID(pin.BindingID) {
+		return CredentialMaterial{}, fmt.Errorf("%w: binding_id", ErrRequestInvalid)
+	}
+	if pin.RecordID != "" && !validOperationID(pin.RecordID) {
+		return CredentialMaterial{}, fmt.Errorf("%w: record_id", ErrRequestInvalid)
+	}
+	req := ResolveRequest{Binding: binding, BindingID: pin.BindingID, RecordID: pin.RecordID, Operation: operation, OperationID: operationID, AttestNonce: attestNonce, AttestSig: attestSig}
 	if c.legacy {
+		// v1 has no identity pins: a pinned request must never silently
+		// downgrade to an unpinned legacy resolve.
+		if pin.BindingID != "" || pin.RecordID != "" {
+			return CredentialMaterial{}, fmt.Errorf("%w: legacy v1 resolve cannot carry identity pins", ErrRequestInvalid)
+		}
 		return c.resolveV1(ctx, req)
 	}
 	material, err := c.resolveV2(ctx, req)

@@ -60,6 +60,17 @@ type SecretSource struct {
 	Kind    SourceKind `json:"kind"`
 	Binding string     `json:"binding,omitempty"`
 	Ref     string     `json:"ref,omitempty"`
+	// Stable identity pins (P0-3 rebind protection): attached by
+	// resolveSource from the SecretReference's provisioned identity. The
+	// provider denies generically when a pin no longer matches, so a
+	// rebind of the binding NAME cannot silently redirect an approved
+	// operation. Empty pins = pre-P0-3 refs (unpinned resolves).
+	BindingID string `json:"binding_id,omitempty"`
+	RecordID  string `json:"record_id,omitempty"`
+	// UseOnce marks a use-once provisioned reference: the execution path
+	// consumes it exactly-once at dispatch (guarded UPDATE, concurrent
+	// second dispatch fails closed).
+	UseOnce bool `json:"use_once,omitempty"`
 }
 
 // Destination represents a registered trusted recipient.

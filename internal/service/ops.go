@@ -29,7 +29,16 @@ func (s *Service) resolveSource(secretRef string) (types.SecretSource, error) {
 		return types.SecretSource{}, fmt.Errorf("unknown secret ref")
 	}
 	if sr.Binding != "" {
-		return types.SecretSource{Kind: types.SourceAegisKeys, Binding: sr.Binding}, nil
+		src := types.SecretSource{Kind: types.SourceAegisKeys, Binding: sr.Binding}
+		// P0-3 rebind protection: provisioned refs carry their stable
+		// provider identity on EVERY authorized resolve, so a later
+		// rebind of the binding name cannot silently redirect an
+		// approved operation (the provider denies generically on pin
+		// mismatch). Non-provisioned refs keep unpinned resolves.
+		src.BindingID = sr.BindingID
+		src.RecordID = sr.RecordID
+		src.UseOnce = sr.UseOnce
+		return src, nil
 	}
 	if s.cfg.VaultType != "memory-test" && s.cfg.VaultType != "memory" {
 		return types.SecretSource{}, fmt.Errorf("ephemeral intake is development-only (memory-test); production refs require an AegisKeys binding")
