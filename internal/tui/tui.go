@@ -618,12 +618,31 @@ func (s *session) doCredentialSave() error {
 		if executed, _ := use["executed"].(bool); executed {
 			s.setSticky(fmt.Sprintf("saved + used (request %s)", reqID))
 		} else {
-			s.setSticky(fmt.Sprintf("SAVED, authorization pending (request %s) — approve the staged grant, then submit the protected-use request", reqID))
+			s.setSticky(fmt.Sprintf("SAVED, authorization pending (request %s)%s — approve the staged grant, then submit the protected-use request",
+				reqID, stagedGrantSuffix(m)))
 		}
 		return nil
 	}
-	s.setSticky(fmt.Sprintf("saved, authorization pending (request %s) — approve the staged resolver grant before resolves succeed", reqID))
+	s.setSticky(fmt.Sprintf("saved, authorization pending (request %s)%s — approve: aegiskeys access provision approve --request %s",
+		reqID, stagedGrantSuffix(m), reqID))
 	return nil
+}
+
+// stagedGrantSuffix renders the provider's staged-grant metadata for the
+// operator (P1-B): WHICH grant awaits approval, or WHY staging failed.
+// Metadata only — never credential material.
+func stagedGrantSuffix(m map[string]interface{}) string {
+	gid, _ := m["staged_grant_id"].(string)
+	serr, _ := m["staging_error"].(string)
+	switch {
+	case gid != "" && serr != "":
+		return " [grant " + neutralize(gid) + "; staging error: " + neutralize(serr) + "]"
+	case gid != "":
+		return " [staged grant " + neutralize(gid) + "]"
+	case serr != "":
+		return " [staging error: " + neutralize(serr) + "]"
+	}
+	return ""
 }
 
 // confirm reads a y/N answer through the shared input channel, so no

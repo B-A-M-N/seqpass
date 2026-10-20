@@ -122,6 +122,14 @@ type ProvisionReport struct {
 	// provider is actually queried (ProvisionStatusReport) and the
 	// execution gate ALWAYS revalidates authorization at dispatch.
 	CachedStatus bool
+	// StagedGrantID (P1-B) is the provider's identifier for the staged
+	// resolver grant awaiting operator approval — what the operator is
+	// approving, and what to reference in approval/diagnostic flows.
+	StagedGrantID string
+	// StagingError (P1-B) is the provider's staging failure detail, when
+	// the grant could not be staged. Surfaced verbatim: the operator
+	// needs the provider's own diagnosis to act.
+	StagingError string
 	// StagedUntil (transient_once only): when the staged in-memory
 	// payload expires. Saved stays FALSE — nothing durable was created.
 	StagedUntil time.Time
@@ -436,6 +444,15 @@ func (s *Service) provisionStatus(ctx context.Context, requestID string) (aegisk
 // execution until explicit operator reconciliation.
 func (s *Service) advanceProvision(ctx context.Context, caller, mode string, req aegiskeys.ProvisionRequest, intent *UseIntent, ref *types.SecretReference, st aegiskeys.ProvisionResponse, contacted bool) (*ProvisionReport, *types.SecretReference, error) {
 	report := &ProvisionReport{ProviderStatus: st.Status, RefID: ref.ID}
+	// P1-B: the staged-grant workflow information the provider reports —
+	// WHICH grant is awaiting approval, and any staging error — flows to
+	// the operator's surfaces verbatim (metadata only, never secrets).
+	if st.StagedGrantID != "" {
+		report.StagedGrantID = st.StagedGrantID
+	}
+	if st.StagingError != "" {
+		report.StagingError = st.StagingError
+	}
 	switch st.Status {
 	case aegiskeys.ProvisionStatusCredentialCommitted, aegiskeys.ProvisionStatusBindingPending:
 		// Transient commit stage: retrying the same request ID continues
@@ -899,6 +916,10 @@ func (s *Service) ProvisionStatusReport(ctx context.Context, caller, requestID s
 		ProviderStatus: st.Status,
 		RefID:          ref.ID,
 	}
+	// P1-B: the provider's staged-grant workflow information — WHICH
+	// grant awaits approval, any staging failure — flows verbatim.
+	report.StagedGrantID = st.StagedGrantID
+	report.StagingError = st.StagingError
 	report.ReEnrollmentRequired = st.Status == aegiskeys.ProvisionStatusAuthorizationPending
 	if identityDiverged(ref, st) {
 		// Divergent identity: PRESERVE the original pins, record the

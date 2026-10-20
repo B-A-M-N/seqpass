@@ -438,6 +438,17 @@ func credentialSaveCmd(args []string) {
 		if cached, _ := m["cached_status"].(bool); cached {
 			fmt.Println("cached: last observed provider state, not freshly verified — poll again after provider-side changes (revocation/expiry) for the live verdict")
 		}
+		// P1-B: staged-grant workflow information — which grant awaits
+		// approval, any staging failure, and the explicit approval step.
+		if gid, _ := m["staged_grant_id"].(string); gid != "" {
+			fmt.Printf("staged_grant_id: %s\n", gid)
+		}
+		if serr, _ := m["staging_error"].(string); serr != "" {
+			fmt.Printf("staging_error: %s\n", serr)
+		}
+		if m["staged_grant_id"] != nil || m["staging_error"] != nil {
+			fmt.Printf("next step: aegiskeys access provision approve --request %s\n", *requestIDF)
+		}
 		printJSON(data)
 		return
 	}

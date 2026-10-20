@@ -339,6 +339,9 @@ func provisionReportData(report *service.ProvisionReport, ref *types.SecretRefer
 	}
 	if report.ReEnrollmentRequired {
 		out["authorization"] = "pending: approve the staged resolver grant in AegisKeys before resolves succeed"
+		// P1-B: the staged-grant workflow information and the explicit
+		// approval step — metadata only, never secrets.
+		surfaceStagedGrant(out, report, requestID)
 	}
 	if report.IdentityConflict {
 		out["identity_conflict"] = true
@@ -373,4 +376,20 @@ func provisionReportData(report *service.ProvisionReport, ref *types.SecretRefer
 		out["use_outcome"] = use
 	}
 	return out
+}
+
+// surfaceStagedGrant maps the provider's staged-grant workflow
+// information (P1-B) onto the IPC response: WHICH grant awaits approval,
+// any staging failure, and the explicit approval next step. Metadata
+// only — never credential material.
+func surfaceStagedGrant(out map[string]interface{}, report *service.ProvisionReport, requestID string) {
+	if report.StagedGrantID != "" {
+		out["staged_grant_id"] = report.StagedGrantID
+	}
+	if report.StagingError != "" {
+		out["staging_error"] = report.StagingError
+	}
+	if report.StagedGrantID != "" || report.StagingError != "" {
+		out["approve_next_step"] = "aegiskeys access provision approve --request " + requestID
+	}
 }

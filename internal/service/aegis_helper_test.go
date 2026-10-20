@@ -442,6 +442,24 @@ func (m *helperMockBroker) handleV3Status(conn net.Conn, requestID string) {
 			}
 		}
 	}
+	// Staged-grant metadata simulation (P1-B tests): stagedgrant-<requestID>
+	// carries "grantID [error]" — the provider's staged_grant_id and,
+	// when staging FAILED, its staging_error.
+	if raw, rerr := os.ReadFile(filepath.Join(filepath.Dir(m.sockPath), "stagedgrant-"+requestID)); rerr == nil {
+		fields := strings.Fields(string(raw))
+		var body map[string]interface{}
+		if jerr := json.Unmarshal([]byte(resp), &body); jerr == nil {
+			if len(fields) >= 1 {
+				body["staged_grant_id"] = fields[0]
+			}
+			if len(fields) >= 2 {
+				body["staging_error"] = strings.Join(fields[1:], " ")
+			}
+			if rewritten, merr := json.Marshal(body); merr == nil {
+				resp = string(rewritten)
+			}
+		}
+	}
 	writeJSONBody(conn, resp)
 }
 
@@ -632,6 +650,21 @@ func (m *mockBrokerChild) grantPresent(requestID string) {
 	path := filepath.Join(filepath.Dir(m.sockPath), "grantpresent-"+requestID)
 	if err := os.WriteFile(path, []byte("1"), 0600); err != nil {
 		m.t.Fatalf("grantpresent control file: %v", err)
+	}
+}
+
+// stagedGrant models the provider's staged-grant metadata (P1-B):
+// grantID with an optional staging error, carried through the status
+// response verbatim.
+func (m *mockBrokerChild) stagedGrant(requestID, grantID, stagingErr string) {
+	m.t.Helper()
+	payload := grantID
+	if stagingErr != "" {
+		payload += " " + stagingErr
+	}
+	path := filepath.Join(filepath.Dir(m.sockPath), "stagedgrant-"+requestID)
+	if err := os.WriteFile(path, []byte(payload), 0600); err != nil {
+		m.t.Fatalf("stagedgrant control file: %v", err)
 	}
 }
 
