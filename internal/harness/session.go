@@ -5,7 +5,6 @@ import (
 	"time"
 )
 
-
 // HostSessionKind identifies a broker-qualified native-host integration.
 // This is trusted configuration metadata, never a request-supplied
 // identity assertion.
@@ -112,10 +111,10 @@ type RelayStatus struct {
 // bounded grants. It exposes only broker-observed state and the operation
 // locator — never credential bytes or recipient wire data.
 type RelayDeliveryStatus struct {
-	OperationID string    `json:"operation_id"`
-	State       string    `json:"state"`
-	Outcome     string    `json:"outcome,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
+	OperationID string     `json:"operation_id"`
+	State       string     `json:"state"`
+	Outcome     string     `json:"outcome,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
 }
 

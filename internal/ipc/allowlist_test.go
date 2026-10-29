@@ -32,4 +32,13 @@ func TestAgentAllowlistExcludesAdmin(t *testing.T) {
 			t.Fatalf("agent missing %s", m)
 		}
 	}
+	if !AgentAllowlist[MethodHandoffReceipt] {
+		t.Fatal("agent cannot relay a recipient-signed offline receipt")
+	}
+	if !AgentAllowlist[MethodHandoffRetrieve] || RecipientAllowlist[MethodHandoffRetrieve] {
+		t.Fatal("capsule retrieval is not confined to the requesting agent surface")
+	}
+	if RecipientAllowlist[MethodHandoffReceipt] {
+		t.Fatal("recipient-only socket unexpectedly accepts courier receipt submissions")
+	}
 }

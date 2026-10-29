@@ -1,6 +1,8 @@
 package service
 
 import (
+	"bytes"
+	"crypto/ed25519"
 	"fmt"
 	"sync"
 	"time"
@@ -45,8 +47,13 @@ type Config struct {
 	// configuration (systemd unit / installation flags) — never from
 	// agent-visible input. Empty keeps the in-process resolve path (same-
 	// user best-effort mode and test brokers, which do not fail peer
-	// verification).
+	// verification); isolated AegisKeys deployments always configure it.
 	AegisKeysResolveHelper string
+	// HandoffSigningKeyID and HandoffSigningKey identify the independent
+	// Ed25519 issuer used for offline recipient capsules. Never reuse the
+	// AegisKeys helper attestation key for capsule signing.
+	HandoffSigningKeyID string
+	HandoffSigningKey   ed25519.PrivateKey
 	// AegisKeysAttestKey is the executor's in-memory ed25519 key pair for
 	// hardened-parent attestation (P0-1, attest-key grants): the broker
 	// signs each helper-carried resolve with a fresh nonce; the dumpable
@@ -61,6 +68,9 @@ type Config struct {
 	// never upgrades assurance.
 	RequireVerifiedHostIsolation bool
 }
+
+// HandoffSigningKeyID returns the configured public identity label, if any.
+func (s *Service) HandoffSigningKeyID() string { return s.cfg.HandoffSigningKeyID }
 
 // AegisKeysAttestPublic returns the hex public half of the executor's
 // attestation key (for the operator's AegisKeys grant attest_key pin), or
@@ -137,6 +147,25 @@ func (s *Service) opTTL() time.Duration {
 }
 
 func New(config Config) (*Service, error) {
+	if (config.HandoffSigningKeyID == "") != (len(config.HandoffSigningKey) == 0) || (len(config.HandoffSigningKey) != 0 && len(config.HandoffSigningKey) != ed25519.PrivateKeySize) {
+		return nil, fmt.Errorf("invalid offline handoff issuer configuration")
+	}
+	if len(config.HandoffSigningKey) != 0 && config.AegisKeysAttestKey != nil && config.AegisKeysAttestKey.Private != nil {
+		handoffPublic := ed25519.PrivateKey(config.HandoffSigningKey).Public().(ed25519.PublicKey)
+		attestPublic, ok := config.AegisKeysAttestKey.Private.Public().(ed25519.PublicKey)
+		if ok && bytes.Equal(handoffPublic, attestPublic) {
+			return nil, fmt.Errorf("sealed handoff issuer key must differ from the AegisKeys attestation key")
+		}
+	}
+	config.HandoffSigningKey = append(ed25519.PrivateKey(nil), config.HandoffSigningKey...)
+	initialized := false
+	defer func() {
+		if !initialized {
+			for i := range config.HandoffSigningKey {
+				config.HandoffSigningKey[i] = 0
+			}
+		}
+	}()
 	db, err := metadata.NewDB(config.DBPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init db: %w", err)
@@ -148,13 +177,14 @@ func New(config Config) (*Service, error) {
 	switch config.VaultType {
 	case "memory-test", "memory":
 		v = vault.NewMemoryVault()
-	case "aegiskeys":
-		// Authoritative store lives in AegisKeys; broker holds no in-process
-		// vault. Keep a memory spool handle for ephemeral payloads only.
+	case "aegiskeys", "relay-only":
+		// Persistent credentials live in AegisKeys when configured. relay-only
+		// has no persistent credential backend. Both retain only the bounded
+		// in-memory spool needed for one-time handoffs.
 		v = vault.NewMemoryVault()
 	default:
 		_ = db.Close()
-		return nil, fmt.Errorf("unsupported vault type %q: use memory-test or aegiskeys", config.VaultType)
+		return nil, fmt.Errorf("unsupported vault type %q: use aegiskeys, relay-only, or memory-test", config.VaultType)
 	}
 
 	// Bootstrap activation contract (CV-02/CV-07): every externally
@@ -205,6 +235,20 @@ func New(config Config) (*Service, error) {
 			Outcome: fmt.Sprintf("failed=%d uncertain=%d", failed, uncertain),
 		})
 	}
+	if err := db.ReconcileHandoffTickets(time.Now()); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("startup handoff-ticket reconciliation failed: %w", err)
+	}
+	// Retry any capsule ciphertext cleanup whose expiry or settlement happened
+	// before shutdown. Cleanup is best-effort at startup: the durable checkpoint
+	// generation makes an interrupted/busy WAL cleanup retry on the next worker
+	// pass or restart, while receipt metadata remains available for reconciliation.
+	if _, err := db.PruneSealedCapsuleBytes(time.Now()); err != nil {
+		_ = db.WriteAuditLog(&types.AuditLog{
+			OperationID: "", Action: "cleanup_sealed_capsules_failed", Actor: "broker",
+			Outcome: err.Error(),
+		})
+	}
 	// Attest-key rotation detection (P0-1 restart strategy): the private
 	// key never leaves non-dumpable memory, so every restart generates a
 	// fresh pair. Persisting the PUBLIC half (not a secret) lets the
@@ -233,6 +277,7 @@ func New(config Config) (*Service, error) {
 			return nil, fmt.Errorf("attest key state persist failed: %w", err)
 		}
 	}
+	initialized = true
 	return svc, nil
 }
 
@@ -340,6 +385,10 @@ func (s *Service) Close() error {
 	if s.eph != nil {
 		s.eph.DropAll()
 	}
+	for i := range s.cfg.HandoffSigningKey {
+		s.cfg.HandoffSigningKey[i] = 0
+	}
+	s.cfg.HandoffSigningKey = nil
 	if s.db != nil {
 		return s.db.Close()
 	}
@@ -472,7 +521,7 @@ const maxStagedBytes = 64 * 1024
 // AegisKeys under stable bindings.
 func (s *Service) StageEphemeral(refID string, payload []byte) error {
 	if s.cfg.VaultType != "memory-test" && s.cfg.VaultType != "memory" {
-		return fmt.Errorf("ephemeral staging is development-only (memory-test)")
+		return fmt.Errorf("ephemeral secret-reference staging requires memory-test; relay-only accepts one-time relay handoffs only")
 	}
 	if refID == "" {
 		return fmt.Errorf("missing ref")
@@ -496,6 +545,9 @@ func (s *Service) StageEphemeral(refID string, payload []byte) error {
 
 // AddSecretRef is admin-only (trusted operator terminal, never MCP).
 func (s *Service) AddSecretRef(sr *types.SecretReference) error {
+	if s.cfg.VaultType == "relay-only" {
+		return fmt.Errorf("relay-only has no persistent credential references; use the one-time relay workflow")
+	}
 	return s.db.CreateSecretRef(sr)
 }
 

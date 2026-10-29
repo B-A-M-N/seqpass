@@ -122,7 +122,6 @@ func (d *DB) ListPendingRelays(limit int) ([]*types.RelayRecord, error) {
 	return out, rows.Err()
 }
 
-
 // ListPendingRelaysForIntake is the trusted intake inbox scoped to a
 // verified human owner (SP-10). Rows with no intake owner are visible
 // to every trusted intake identity (pre-claim: any human can claim);
@@ -132,7 +131,7 @@ func (d *DB) ListPendingRelaysForIntake(intakePrincipal string, limit int) ([]*t
 		limit = 50
 	}
 	rows, err := d.db.Query(`
-		SELECT ` + relayColumns + ` FROM relay_requests
+		SELECT `+relayColumns+` FROM relay_requests
 		WHERE state = ? AND expires_at > ?
 		  AND (intake_owner = '' OR intake_owner = ?)
 		ORDER BY created_at ASC LIMIT ?

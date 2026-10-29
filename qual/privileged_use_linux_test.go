@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	adaptercontract "github.com/secretbridge/secretbridge/internal/adapter"
 	"github.com/secretbridge/secretbridge/internal/testruntime"
 )
 
@@ -215,6 +217,13 @@ func runPrivilegedSyntheticUse(t *testing.T, h *harness) (ready bool, blocked st
 	}
 	bin := buildBinary(t, root)
 	h.bin = bin
+	helperBytes, err := os.ReadFile(bin)
+	if err != nil {
+		h.recordTier("synthetic-probe-build", tierSystem, "read the built SeqPass executable to pin the trusted resolve helper", "helper SHA-256 matches the exact executable", err.Error(), false)
+		return true, ""
+	}
+	helperSHA256 := sha256Hex(helperBytes)
+	clear(helperBytes)
 	probeBin, err := buildBoundaryProbe(t, root)
 	if err != nil {
 		h.recordTier("synthetic-probe-build", tierSystem, "build a stdlib-only external UID probe", "probe builds without project-private test hooks", err.Error(), false)
@@ -242,6 +251,8 @@ func runPrivilegedSyntheticUse(t *testing.T, h *harness) (ready bool, blocked st
 	h.topology["agent_uid"] = h.uid
 	h.topology["agent_socket_group"] = groupName
 	h.topology["seqpass_db"] = dbPath
+	h.topology["aegiskeys_resolve_helper"] = bin
+	h.topology["aegiskeys_resolve_helper_sha256"] = helperSHA256
 
 	args := []string{
 		"broker", "--vault", "aegiskeys", "--db", dbPath,
@@ -253,6 +264,8 @@ func runPrivilegedSyntheticUse(t *testing.T, h *harness) (ready bool, blocked st
 		"--intake-uid", itoa(serviceUID),
 		"--socket-group", groupName,
 		"--aegiskeys-socket", aegisSocket,
+		"--aegiskeys-resolve-helper", bin,
+		"--aegiskeys-resolve-helper-sha256", helperSHA256,
 	}
 	cmd := exec.Command(bin, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: credentialFor(serviceIdentity)}
@@ -387,6 +400,7 @@ func registerSyntheticPolicy(
 		"secret_refs": []string{refID},
 		"ops":         []string{"http.request"},
 		"dest_ids":    []string{destID},
+		"resources":   []string{"*"},
 		"no_approval": true,
 	}}
 	rulesRaw, err := json.Marshal(rules)
@@ -505,7 +519,7 @@ func runSyntheticAgentScenarios(
 	submitOK := err == nil && textErr == nil && opID != "" && useStatus == "authorized"
 	h.recordTier("use-submit-returns-opaque-id", tierSystem,
 		"submit the authorized credentialed read through the untrusted MCP adapter", "agent receives an opaque op id and authorized status, never secret material",
-		fmt.Sprintf("mcp=%v parse=%v status=%s", err, textErr, useStatus), submitOK)
+		fmt.Sprintf("mcp=%v parse=%v status=%s tool_error=%s", err, textErr, useStatus, safeMCPToolError(useReply, creds...)), submitOK)
 	if !submitOK {
 		cleanups()
 		return fmt.Errorf("authorized use submit failed")
@@ -572,7 +586,16 @@ func runSyntheticAgentScenarios(
 			"inspect the live MCP child's argv and environment", "process metadata omits the synthetic values",
 			fmt.Sprintf("credential_absent=%t", clean), clean)
 	}
-	memoryContains, memoryErr := processMemoryContainsSet(agentCmd.Process.Pid, creds[0], creds[1])
+	var memoryContains bool
+	var memoryErr error
+	if stopErr := agentCmd.Process.Signal(syscall.SIGSTOP); stopErr != nil {
+		memoryErr = fmt.Errorf("pause agent for a stable memory snapshot: %w", stopErr)
+	} else {
+		memoryContains, memoryErr = processMemoryContainsSet(agentCmd.Process.Pid, creds[0], creds[1])
+		if resumeErr := agentCmd.Process.Signal(syscall.SIGCONT); resumeErr != nil {
+			memoryErr = errors.Join(memoryErr, fmt.Errorf("resume agent after memory snapshot: %w", resumeErr))
+		}
+	}
 	if memoryErr != nil {
 		h.recordBlocked("agent-process-memory-observation", tierSystem, "independently scan readable agent process mappings for the synthetic values", memoryErr.Error())
 	} else {
@@ -697,6 +720,29 @@ func runSyntheticAgentScenarios(
 
 	cleanups()
 	return nil
+}
+
+func safeMCPToolError(reply map[string]interface{}, secrets ...string) string {
+	result, _ := reply["result"].(map[string]interface{})
+	if result == nil || result["isError"] != true {
+		return ""
+	}
+	content, _ := result["content"].([]interface{})
+	if len(content) == 0 {
+		return "error result without text"
+	}
+	first, _ := content[0].(map[string]interface{})
+	message, _ := first["text"].(string)
+	for _, secret := range secrets {
+		if secret != "" {
+			message = strings.ReplaceAll(message, secret, "[REDACTED]")
+		}
+	}
+	message = adaptercontract.RedactMessage(message)
+	if message == "" {
+		return "empty error text"
+	}
+	return trimOutput([]byte(message))
 }
 
 // initializeMCP performs the MCP initialize handshake plus notification.

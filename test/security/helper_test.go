@@ -9,8 +9,8 @@ import (
 	"testing"
 
 	"github.com/secretbridge/secretbridge/internal/daemon"
-	"github.com/secretbridge/secretbridge/internal/testruntime"
 	"github.com/secretbridge/secretbridge/internal/ipc"
+	"github.com/secretbridge/secretbridge/internal/testruntime"
 )
 
 const marker = "SECRET-MARKER-adv-9f8e7d6c5b4a"

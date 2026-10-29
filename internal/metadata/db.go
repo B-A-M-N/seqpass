@@ -39,7 +39,7 @@ func NewDB(path string) (*DB, error) {
 	// immediately when another connection in the same process holds SHARED,
 	// again bypassing the busy handler. With an immediate begin the busy
 	// timeout applies and the writer waits its turn.
-	db, err := sql.Open("sqlite3", path+"?mode=rwc&_journal_mode=WAL&_busy_timeout=5000&_txlock=immediate")
+	db, err := sql.Open("sqlite3", path+"?mode=rwc&_journal_mode=WAL&_busy_timeout=5000&_txlock=immediate&_secure_delete=on")
 	if err != nil {
 		return nil, err
 	}
@@ -122,6 +122,12 @@ CREATE TABLE IF NOT EXISTS destinations (
   revision INTEGER NOT NULL DEFAULT 1,
   expected_uid INTEGER,
   expected_gid INTEGER,
+  handoff_mode TEXT NOT NULL DEFAULT 'direct-socket',
+  recipient_key_id TEXT NOT NULL DEFAULT '',
+  recipient_public_key BLOB,
+  issuer_key_id TEXT NOT NULL DEFAULT '',
+  issuer_public_key BLOB,
+  credential_target TEXT NOT NULL DEFAULT '',
   created_at TIMESTAMP,
   updated_at TIMESTAMP
 );
@@ -331,6 +337,10 @@ CREATE TABLE IF NOT EXISTS dispatch_records (
   dest_expected_gid INTEGER,
   dest_config_digest TEXT NOT NULL,
   payload_digest TEXT NOT NULL,
+  payload_bytes INTEGER NOT NULL DEFAULT 0,
+  capsule_bytes BLOB NOT NULL DEFAULT X'',
+		  handoff_mode TEXT NOT NULL DEFAULT 'direct-socket',
+		  handoff_id TEXT NOT NULL DEFAULT '',
   recorded_at TIMESTAMP
 );
 
@@ -397,9 +407,18 @@ CREATE INDEX IF NOT EXISTS pui_ref_idx ON provision_use_intents(ref_id);
 // persisted BEFORE any approval exists; P0-B); version 7 adds
 // secret_refs.request_commitment (the keyed full-request-identity
 // commitment — HMAC under the broker-local secret, never plaintext or an
-// unkeyed hash of the secret value; P0-D). Older databases take the
-// repair path below.
-const schemaVersion = 7
+// unkeyed hash of the secret value; P0-D). Version 8 adds recipient-pull
+// destination modes, one-use tickets and immutable handoff dispatch facts. Version 9
+// adds pinned recipient HPKE key material and the registered app credential target.
+// Version 10 pins the issuer signing key identity in destination authorization.
+// Version 11 binds recipient receipts to the exact sealed handoff ID.
+// Version 12 pins the issuer public key bytes in the approval digest.
+// Version 13 adds a distinct recipient Ed25519 receipt key for offline
+// capsule completion proofs; it is separate from the HPKE decryption key.
+// Version 14 stores bounded recipient-encrypted capsule bytes for exact,
+// expiry-bounded retrieval after an issuer response is lost.
+// Older databases take the repair path below.
+const schemaVersion = 14
 
 func (d *DB) currentVersion() (int, error) {
 	var v int
@@ -495,6 +514,14 @@ func (d *DB) migrate() error {
 		{"destinations", "expected_uid", "expected_uid INTEGER"},
 		{"destinations", "expected_gid", "expected_gid INTEGER"},
 		{"destinations", "source_repo", "source_repo TEXT NOT NULL DEFAULT ''"},
+		{"destinations", "handoff_mode", "handoff_mode TEXT NOT NULL DEFAULT 'direct-socket'"},
+		{"destinations", "recipient_key_id", "recipient_key_id TEXT NOT NULL DEFAULT ''"},
+		{"destinations", "recipient_public_key", "recipient_public_key BLOB"},
+		{"destinations", "receipt_key_id", "receipt_key_id TEXT NOT NULL DEFAULT ''"},
+		{"destinations", "receipt_public_key", "receipt_public_key BLOB"},
+		{"destinations", "issuer_key_id", "issuer_key_id TEXT NOT NULL DEFAULT ''"},
+		{"destinations", "issuer_public_key", "issuer_public_key BLOB"},
+		{"destinations", "credential_target", "credential_target TEXT NOT NULL DEFAULT ''"},
 		// P0-3 (schema v5): trusted-intake provisioning references. Legacy
 		// rows read back as PLAIN references (empty provisioning identity —
 		// never treated as unrestricted or auto-migrated to provisioned
@@ -543,8 +570,40 @@ func (d *DB) migrate() error {
 	  dest_expected_gid INTEGER,
 	  dest_config_digest TEXT NOT NULL,
 	  payload_digest TEXT NOT NULL,
+	  payload_bytes INTEGER NOT NULL DEFAULT 0,
+	  handoff_mode TEXT NOT NULL DEFAULT 'direct-socket',
+		  handoff_id TEXT NOT NULL DEFAULT '',
 	  recorded_at TIMESTAMP
 	)`); err != nil {
+		rollback()
+		return err
+	}
+	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS handoff_tickets (
+	  ticket_id TEXT PRIMARY KEY,
+	  nonce TEXT NOT NULL,
+	  operation_id TEXT NOT NULL UNIQUE,
+	  destination_id TEXT NOT NULL,
+	  recipient_uid INTEGER NOT NULL,
+	  issued_at TIMESTAMP NOT NULL,
+	  expires_at TIMESTAMP NOT NULL,
+	  state TEXT NOT NULL CHECK(state IN ('issued','claimed','applied','rejected','uncertain','expired'))
+	)`); err != nil {
+		rollback()
+		return err
+	}
+	if err := ensureColumn("dispatch_records", "payload_bytes", "payload_bytes INTEGER NOT NULL DEFAULT 0"); err != nil {
+		rollback()
+		return err
+	}
+	if err := ensureColumn("dispatch_records", "capsule_bytes", "capsule_bytes BLOB NOT NULL DEFAULT X''"); err != nil {
+		rollback()
+		return err
+	}
+	if err := ensureColumn("dispatch_records", "handoff_mode", "handoff_mode TEXT NOT NULL DEFAULT 'direct-socket'"); err != nil {
+		rollback()
+		return err
+	}
+	if err := ensureColumn("dispatch_records", "handoff_id", "handoff_id TEXT NOT NULL DEFAULT ''"); err != nil {
 		rollback()
 		return err
 	}
@@ -703,14 +762,15 @@ func (d *DB) verifySchema() error {
 	expected := map[string][]string{
 		"authorization_state":     {"id", "epoch"},
 		"secret_refs":             {"id", "name", "binding", "reconcile_status", "request_commitment"},
-		"destinations":            {"id", "endpoint", "source_repo", "revision", "expected_uid", "expected_gid"},
+		"destinations":            {"id", "endpoint", "source_repo", "revision", "expected_uid", "expected_gid", "handoff_mode", "recipient_key_id", "recipient_public_key", "receipt_key_id", "receipt_public_key", "issuer_key_id", "issuer_public_key", "credential_target"},
 		"policies":                {"id", "rules", "revision"},
 		"transfers":               {"id", "status", "revision", "auth_epoch", "dest_digest", "dest_revision", "op_hash"},
 		"uses":                    {"id", "status", "revision", "auth_epoch", "dest_digest", "dest_revision", "op_hash"},
 		"execution_attempts":      {"id", "op_id", "worker", "outcome"},
 		"op_receipts":             {"op_id", "status", "result_json"},
 		"outcome_observations":    {"observation_id", "operation_id", "state", "recorded_at", "evidence_kind"},
-		"dispatch_records":        {"op_id", "payload_digest", "dest_endpoint"},
+		"dispatch_records":        {"op_id", "payload_digest", "payload_bytes", "capsule_bytes", "handoff_mode", "handoff_id", "dest_endpoint"},
+		"handoff_tickets":         {"ticket_id", "operation_id", "recipient_uid", "expires_at", "state"},
 		"relay_requests":          {"id", "agent_principal", "destination_id", "state", "consumption", "expires_at", "revision"},
 		"host_principal_bindings": {"human_principal", "agent_principal", "host_kind", "expires_at", "revision"},
 		"relay_host_sessions":     {"relay_id", "session_id", "agent_principal", "human_principal", "host_kind"},

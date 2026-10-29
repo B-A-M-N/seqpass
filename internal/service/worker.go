@@ -6,6 +6,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/secretbridge/secretbridge/internal/types"
 )
 
 // WorkerID is the trusted in-broker worker identity recorded on execution
@@ -72,6 +74,9 @@ func (s *Service) ExpireStaleRequests() int {
 	if _, err := s.db.CleanupCompletedDeliveries(now); err != nil {
 		s.audit("", "cleanup_deliveries_failed", "broker", "", err.Error())
 	}
+	if _, err := s.db.PruneSealedCapsuleBytes(now); err != nil {
+		s.audit("", "cleanup_sealed_capsules_failed", "broker", "", err.Error())
+	}
 	if n := s.eph.Sweep(now); n > 0 {
 		s.audit("", "relay_spool_swept", "broker", "", fmt.Sprintf("entries=%d", n))
 	}
@@ -94,6 +99,10 @@ func (s *Service) ExecuteReadyRelays(ctx context.Context) int {
 		deadline time.Time
 	}
 	for _, tr := range transfers {
+		dest, derr := s.db.GetDestination(tr.DestinationID)
+		if derr == nil && dest != nil && (dest.HandoffMode == types.HandoffRecipientPull || dest.HandoffMode == types.HandoffSealedCapsule) {
+			continue
+		}
 		if _, ok := relayIDOf(tr.SecretRef); !ok {
 			continue
 		}
@@ -221,6 +230,10 @@ func (s *Service) runWorkerOnce(ctx context.Context) {
 		pending = append(pending, workerJob{opType: "use", id: ur.ID, deadline: ur.ExpiresAt})
 	}
 	for _, tr := range transfers {
+		dest, err := s.db.GetDestination(tr.DestinationID)
+		if err == nil && dest != nil && (dest.HandoffMode == types.HandoffRecipientPull || dest.HandoffMode == types.HandoffSealedCapsule) {
+			continue
+		}
 		pending = append(pending, workerJob{opType: "transfer", id: tr.ID, deadline: tr.ExpiresAt})
 	}
 	sort.Slice(pending, func(a, b int) bool {

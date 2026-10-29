@@ -63,7 +63,7 @@ func elicitFixture(t *testing.T) (*Server, string) {
 	uid := uint32(os.Geteuid())
 	if err := svc.AddDestination(&types.Destination{
 		ID: "rd1", Name: "r", Type: "recipient-socket",
-  Endpoint: filepath.Join(dir, "recipient.sock"), ExpectedUID: &uid,
+		Endpoint: filepath.Join(dir, "recipient.sock"), ExpectedUID: &uid,
 	}); err != nil {
 		t.Fatal(err)
 	}

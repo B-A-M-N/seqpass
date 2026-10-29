@@ -1294,6 +1294,12 @@ func processMemoryContains(pid int, needle []byte) (bool, error) {
 	carry := make([]byte, 0, len(needle))
 	for _, line := range strings.Split(string(maps), "\n") {
 		fields := strings.Fields(line)
+		// Linux exposes [vvar] as a readable mapping, but proc-mem cannot
+		// read its kernel-backed pages and returns EIO. It contains
+		// timekeeping data, not process-owned credential material.
+		if len(fields) >= 6 && strings.HasPrefix(fields[5], "[vvar") {
+			continue
+		}
 		if len(fields) < 2 || !strings.Contains(fields[1], "r") {
 			continue
 		}
@@ -1314,7 +1320,7 @@ func processMemoryContains(pid int, needle []byte) (bool, error) {
 			}
 			n, readErr := mem.ReadAt(buf[:int(want)], int64(address))
 			if readErr != nil && n == 0 {
-				return false, fmt.Errorf("read agent memory mapping: %w", readErr)
+				return false, fmt.Errorf("read agent memory mapping %s at %#x: %w", strings.Join(fields[1:], " "), address, readErr)
 			}
 			window := append(carry, buf[:n]...)
 			if bytes.Contains(window, needle) {
@@ -1327,7 +1333,7 @@ func processMemoryContains(pid int, needle []byte) (bool, error) {
 			carry = append(carry[:0], window[len(window)-keep:]...)
 			address += uint64(n)
 			if readErr != nil && n < int(want) {
-				return false, fmt.Errorf("read agent memory mapping: %w", readErr)
+				return false, fmt.Errorf("read agent memory mapping %s at %#x: %w", strings.Join(fields[1:], " "), address, readErr)
 			}
 		}
 	}

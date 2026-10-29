@@ -30,10 +30,10 @@ func validObservationState(s string) bool {
 // digest covers the verifier's identity + claim only; the other kinds
 // point at independently retained, redacted evidence.
 const (
-	EvidenceAssertion  = "assertion"
-	EvidenceReceipt    = "receipt"
-	EvidenceRecipient  = "recipient"
-	EvidenceExternal   = "external"
+	EvidenceAssertion = "assertion"
+	EvidenceReceipt   = "receipt"
+	EvidenceRecipient = "recipient"
+	EvidenceExternal  = "external"
 )
 
 func validEvidenceKind(s string) bool {

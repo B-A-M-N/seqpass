@@ -1,9 +1,15 @@
 package types
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
+	"regexp"
 	"time"
 )
+
+// Canonical operation identifiers shared by approvals and credential backends.
+const OperationTransfer = "transfer"
 
 // SecretReference is an identifier for a secret; agents never receive the actual secret.
 // SecretRef IDs map to AegisKeys bindings in production (see SecretSource).
@@ -137,6 +143,45 @@ type SecretSource struct {
 
 // Destination represents a registered trusted recipient.
 // Agents select registered destination IDs, never arbitrary URLs/paths.
+type AppCredentialTarget struct {
+	ID           string `json:"id"`
+	App          string `json:"app"`
+	Provider     string `json:"provider,omitempty"`
+	Account      string `json:"account"`
+	Slot         string `json:"slot"`
+	UpdateMethod string `json:"update_method"`
+	SourceRef    string `json:"source_ref"`
+	// SourceRevision is the operator-approved revision of this registered
+	// source binding. It is not an attestation of the resolved credential's
+	// live generation; consumers must not infer that a rotation changed it.
+	SourceRevision int    `json:"source_revision"`
+	Activation     string `json:"activation,omitempty"`
+}
+
+var gatewayTargetIdentifier = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+
+// Validate checks the closed set of application credential targets supported
+// by recipient-side handoff adapters. Target IDs are stable logical identities
+// and intentionally contain no recipient filesystem paths.
+func (t AppCredentialTarget) Validate() error {
+	if t.Account == "" || t.Slot != "api_key" || t.SourceRef == "" || t.SourceRevision <= 0 {
+		return fmt.Errorf("incomplete application credential target")
+	}
+	switch {
+	case t.App == "opencode" && t.ID == "opencode:"+t.Account+":api_key" &&
+		(t.UpdateMethod == "opencode-auth-json-v1" || t.UpdateMethod == "opencode-auth-import-v2"):
+		return nil
+	case t.App == "codex" && t.ID == "codex:"+t.Account+":api_key" && t.UpdateMethod == "codex-auth-file-v1":
+		return nil
+	case t.App == "fi-gateway" && t.ID == "fi-gateway:"+t.Provider+":"+t.Account+":api_key" &&
+		gatewayTargetIdentifier.MatchString(t.Provider) && gatewayTargetIdentifier.MatchString(t.Account) &&
+		t.UpdateMethod == "fi-gateway-credential-manager-v1":
+		return nil
+	default:
+		return fmt.Errorf("unsupported application credential target")
+	}
+}
+
 type Destination struct {
 	ID               string    `json:"id"`
 	Name             string    `json:"name"`
@@ -159,7 +204,58 @@ type Destination struct {
 	// absolute, operator-registered repository path. The agent cannot
 	// name or alter it — pushed content is a registration fact, like the
 	// remote. Empty for fetch-only destinations.
-	SourceRepo string `json:"source_repo,omitempty"`
+	SourceRepo         string               `json:"source_repo,omitempty"`
+	HandoffMode        HandoffMode          `json:"handoff_mode,omitempty"`
+	RecipientKeyID     string               `json:"recipient_key_id,omitempty"`
+	RecipientPublicKey []byte               `json:"recipient_public_key,omitempty"`
+	ReceiptKeyID       string               `json:"receipt_key_id,omitempty"`
+	ReceiptPublicKey   []byte               `json:"receipt_public_key,omitempty"`
+	IssuerKeyID        string               `json:"issuer_key_id,omitempty"`
+	IssuerPublicKey    []byte               `json:"issuer_public_key,omitempty"`
+	CredentialTarget   *AppCredentialTarget `json:"credential_target,omitempty"`
+}
+
+// HandoffMode selects how a registered destination receives an approved transfer.
+type HandoffMode string
+
+const (
+	HandoffDirectSocket  HandoffMode = "direct-socket"
+	HandoffRecipientPull HandoffMode = "recipient-pull"
+	HandoffSealedCapsule HandoffMode = "sealed-capsule"
+)
+
+// HandoffTicket is a short-lived opaque locator. It carries no credential material.
+type HandoffTicket struct {
+	Version       int       `json:"version"`
+	TicketID      string    `json:"ticket_id"`
+	Nonce         string    `json:"nonce"`
+	OperationID   string    `json:"operation_id"`
+	DestinationID string    `json:"destination_id"`
+	RecipientUID  uint32    `json:"recipient_uid"`
+	IssuedAt      time.Time `json:"issued_at"`
+	ExpiresAt     time.Time `json:"expires_at"`
+	State         string    `json:"state"`
+}
+
+// HandoffDelivery is sensitive plaintext returned only over the authenticated recipient socket.
+type HandoffDelivery struct {
+	OperationID   string              `json:"operation_id"`
+	DestinationID string              `json:"destination_id"`
+	Target        AppCredentialTarget `json:"target"`
+	Payload       []byte              `json:"payload"`
+	PayloadDigest string              `json:"payload_digest"`
+}
+
+// HandoffCapsule is an opaque offline recipient payload. It contains no
+// plaintext credential outside the signed encrypted envelope bytes.
+type HandoffCapsule struct {
+	Version       int             `json:"version"`
+	OperationID   string          `json:"operation_id"`
+	DestinationID string          `json:"destination_id"`
+	HandoffID     string          `json:"handoff_id"`
+	IssuedAt      time.Time       `json:"issued_at"`
+	ExpiresAt     time.Time       `json:"expires_at"`
+	Envelope      json.RawMessage `json:"envelope"`
 }
 
 // Operation lifecycle states.

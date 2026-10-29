@@ -133,6 +133,9 @@ func (s *Service) RelayRequest(agent, destID, dataKind, purpose string, ttl time
 	if consumption == "" {
 		consumption = types.RelaySingleDispatch
 	}
+	if s.cfg.VaultType == "relay-only" && consumption != types.RelaySingleDispatch {
+		return "", errors.New("relay-only supports one-time single-dispatch handoffs only")
+	}
 	if consumption == types.RelayBoundedUses && maxDeliveries == 0 {
 		return "", errors.New("bounded_uses requires max_deliveries >= 1")
 	}

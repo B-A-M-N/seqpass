@@ -27,16 +27,16 @@ func init() {
 
 type pingDriver struct{}
 
-func (pingDriver) Name() string                 { return "test.ping" }
-func (pingDriver) Completion() CompletionMode   { return ResponseValidated }
-func (pingDriver) RequiresDestination() bool    { return false }
+func (pingDriver) Name() string               { return "test.ping" }
+func (pingDriver) Completion() CompletionMode { return ResponseValidated }
+func (pingDriver) RequiresDestination() bool  { return false }
 func (pingDriver) Describe() DriverInfo {
 	return DriverInfo{
 		Description: "Synthetic qualification endpoint: returns a fixed pong (test drivers only)",
 		Completion:  ResponseValidated,
 	}
 }
-func (pingDriver) AllowedParams() []string      { return []string{} }
+func (pingDriver) AllowedParams() []string { return []string{} }
 func (pingDriver) Resource(map[string]string) ResourceDescriptor {
 	return ResourceDescriptor{Kind: "test", Identifier: "ping"}
 }

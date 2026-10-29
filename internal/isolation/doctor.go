@@ -58,6 +58,7 @@ type Config struct {
 	// RecipientEndpoints are pinned recipient socket paths. When set, they
 	// must not be reachable by an agent identity.
 	RecipientEndpoints []string
+	RecipientUIDs      []uint32
 
 	// BrokerPID, when > 0, enables the process-inspection check against
 	// /proc/<pid>.

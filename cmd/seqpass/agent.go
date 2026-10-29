@@ -1,14 +1,19 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"time"
 
 	"github.com/secretbridge/secretbridge/internal/adapter"
+	"github.com/secretbridge/secretbridge/internal/capsule"
 	"github.com/secretbridge/secretbridge/internal/ipc"
+	"github.com/secretbridge/secretbridge/internal/types"
 )
 
 // The generic agent CLI (objective 5/SP-18). It is the non-MCP transport for
@@ -22,7 +27,7 @@ import (
 
 func agentCmd(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "agent subcommands: capabilities|request|status|cancel")
+		fmt.Fprintln(os.Stderr, "agent subcommands: capabilities|request|status|cancel|handoff")
 		fmt.Fprintln(os.Stderr, "  capabilities            discover permitted operations and accepted data kinds")
 		fmt.Fprintln(os.Stderr, "  request --destination ID --data-kind KIND [--purpose TEXT] [--ttl-seconds N]")
 		fmt.Fprintln(os.Stderr, "  status --request-id ID  poll sanitized request state")
@@ -38,6 +43,8 @@ func agentCmd(args []string) {
 		agentStatus(args[1:])
 	case "cancel":
 		agentCancel(args[1:])
+	case "handoff":
+		agentHandoff(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown agent subcommand %q\n", args[0])
 		os.Exit(1)
@@ -198,4 +205,141 @@ func mapOf(v interface{}) map[string]interface{} {
 func strField(m map[string]interface{}, key string) string {
 	s, _ := m[key].(string)
 	return s
+}
+
+func agentHandoff(args []string) {
+	if len(args) == 0 {
+		fatal("agent handoff issue|retrieve|receipt")
+	}
+	switch args[0] {
+	case "issue":
+		agentHandoffIssue(args[1:])
+	case "retrieve":
+		agentHandoffRetrieve(args[1:])
+	case "receipt":
+		agentHandoffReceipt(args[1:])
+	default:
+		fatal("agent handoff issue|retrieve|receipt")
+	}
+}
+
+func agentHandoffIssue(args []string) {
+	id, output, err := parseAgentHandoffIssueArgs(args)
+	must(err)
+	cli := dialAgent()
+	defer cli.Close()
+	var outputFile *os.File
+	if output != "" {
+		outputFile, err = os.OpenFile(output, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		must(err)
+	}
+	data, err := cli.Call(ipc.MethodHandoffIssue, map[string]interface{}{"op_id": id})
+	if err != nil && outputFile != nil {
+		_ = outputFile.Close()
+		_ = os.Remove(output)
+	}
+	must(err)
+	if output != "" {
+		raw, err := json.Marshal(data)
+		must(err)
+		var sealed types.HandoffCapsule
+		if err := json.Unmarshal(raw, &sealed); err != nil || len(sealed.Envelope) == 0 {
+			_ = outputFile.Close()
+			_ = os.Remove(output)
+			fmt.Fprintln(os.Stderr, "destination issued a recipient-pull ticket; returning its JSON locator")
+			printJSON(data)
+			return
+		}
+		if n, err := outputFile.Write(sealed.Envelope); err != nil || n != len(sealed.Envelope) {
+			_ = outputFile.Close()
+			_ = os.Remove(output)
+			fatal("could not write sealed capsule")
+		}
+		if err := outputFile.Sync(); err != nil {
+			_ = outputFile.Close()
+			_ = os.Remove(output)
+			fatal("could not sync sealed capsule")
+		}
+		must(outputFile.Close())
+		fmt.Printf("sealed handoff capsule written: %s (handoff %s, expires %s)\n", output, sealed.HandoffID, sealed.ExpiresAt.UTC().Format(time.RFC3339))
+		return
+	}
+	printJSON(data)
+}
+
+func agentHandoffRetrieve(args []string) {
+	fs := flag.NewFlagSet("agent handoff retrieve", flag.ExitOnError)
+	id := fs.String("op-id", "", "authorized sealed-capsule operation")
+	output := fs.String("output", "", "write the previously issued ciphertext to a new file")
+	_ = fs.Parse(args)
+	if *id == "" || *output == "" || fs.NArg() != 0 {
+		fatal("agent handoff retrieve --op-id ID --output FILE")
+	}
+	cli := dialAgent()
+	data, err := cli.Call(ipc.MethodHandoffRetrieve, map[string]interface{}{"op_id": *id})
+	_ = cli.Close()
+	must(err)
+	raw, err := json.Marshal(data)
+	must(err)
+	var sealed types.HandoffCapsule
+	if err := json.Unmarshal(raw, &sealed); err != nil || len(sealed.Envelope) == 0 {
+		fatal("sealed handoff retrieval returned invalid data")
+	}
+	f, err := os.OpenFile(*output, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	must(err)
+	if n, err := f.Write(sealed.Envelope); err != nil || n != len(sealed.Envelope) {
+		_ = f.Close()
+		_ = os.Remove(*output)
+		fatal("could not write sealed capsule")
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(*output)
+		fatal("could not sync sealed capsule")
+	}
+	must(f.Close())
+	fmt.Printf("original sealed handoff capsule retrieved: %s (expires %s)\n", *output, sealed.ExpiresAt.UTC().Format(time.RFC3339))
+}
+
+func parseAgentHandoffIssueArgs(args []string) (string, string, error) {
+	fs := flag.NewFlagSet("agent handoff issue", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	id := fs.String("op-id", "", "authorized transfer operation")
+	output := fs.String("output", "", "write sealed capsule envelope bytes to a new file (recipient-pull tickets remain JSON)")
+	if err := fs.Parse(args); err != nil {
+		return "", "", err
+	}
+	if *id == "" {
+		return "", "", fmt.Errorf("agent handoff issue --op-id ID")
+	}
+	return *id, *output, nil
+}
+
+func agentHandoffReceipt(args []string) {
+	fs := flag.NewFlagSet("agent handoff receipt", flag.ExitOnError)
+	path := fs.String("file", "", "recipient-signed receipt file (contains no credential)")
+	_ = fs.Parse(args)
+	if *path == "" {
+		fatal("agent handoff receipt --file RECEIPT")
+	}
+	f, err := os.Open(*path)
+	must(err)
+	receipt, err := io.ReadAll(io.LimitReader(f, 16*1024+1))
+	closeErr := f.Close()
+	must(err)
+	must(closeErr)
+	defer zeroBytes(receipt)
+	if len(receipt) == 0 || len(receipt) > 16*1024 {
+		fatal("recipient receipt is empty or too large")
+	}
+	if _, err := capsule.ParseReceipt(receipt); err != nil {
+		fatal("recipient receipt is malformed")
+	}
+	cli := dialAgent()
+	defer cli.Close()
+	_, err = cli.Call(ipc.MethodHandoffReceipt, map[string]interface{}{
+		"receipt_b64": base64.StdEncoding.EncodeToString(receipt),
+	})
+	must(err)
+	fmt.Println("recipient handoff receipt recorded")
 }

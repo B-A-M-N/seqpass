@@ -7,6 +7,17 @@ import (
 	"testing"
 )
 
+func TestSystemDefaultsSeparateAgentAndTrustedSocketDirs(t *testing.T) {
+	d := systemDefaults()
+	agentDir := filepath.Dir(d.SocketPath)
+	if agentDir == filepath.Dir(d.AdminSocket) || agentDir == filepath.Dir(d.IntakeSocket) {
+		t.Fatalf("agent socket directory %q must be separate from trusted sockets (%q, %q)", agentDir, d.AdminSocket, d.IntakeSocket)
+	}
+	if filepath.Dir(d.AdminSocket) != filepath.Dir(d.IntakeSocket) {
+		t.Fatalf("admin and intake should share the trusted socket directory: %q, %q", d.AdminSocket, d.IntakeSocket)
+	}
+}
+
 func TestParseUIDsFailsClosed(t *testing.T) {
 	for _, bad := range []string{"abc", "1001,,1002", "1001,abc", ",1001", "1001,1001", "-1", "99999999999999999999"} {
 		if _, err := ParseUIDs(bad); err == nil {
@@ -36,6 +47,8 @@ func TestValidateRefusesUnsafeCombinations(t *testing.T) {
 	prod.IntakeUIDs = []uint32{1000}
 	prod.AdminUIDs = []uint32{1000}
 	prod.SocketGroup = "seqpass-agents"
+	prod.AegisKeysResolveHelper = "/usr/local/bin/seqpass"
+	prod.AegisKeysResolveHelperSHA256 = strings.Repeat("a", 64)
 	if err := prod.Validate(); err != nil {
 		t.Fatalf("production default rejected: %v", err)
 	}
@@ -54,6 +67,28 @@ func TestValidateRefusesUnsafeCombinations(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "agent-uid") {
 		t.Fatalf("refusal does not name the missing input: %v", err)
+	}
+
+	relayOnly := Defaults()
+	relayOnly.VaultType = VaultRelayOnly
+	relayOnly.AgentUIDs = []uint32{2001}
+	relayOnly.IntakeUIDs = []uint32{1000}
+	relayOnly.AdminUIDs = []uint32{1000}
+	relayOnly.SocketGroup = "seqpass-agents"
+	if err := relayOnly.Validate(); err != nil {
+		t.Fatalf("isolated relay-only production mode rejected: %v", err)
+	}
+	if !relayOnly.IsProductionVault() || relayOnly.EffectiveAssurance() != AssuranceIsolated {
+		t.Fatal("relay-only did not retain production isolated assurance")
+	}
+	relayOnly.AssuranceMode = AssuranceBestEffort
+	if err := relayOnly.Validate(); err == nil {
+		t.Fatal("relay-only accepted a best-effort topology")
+	}
+	relayOnly.AssuranceMode = AssuranceIsolated
+	relayOnly.Dev = true
+	if err := relayOnly.Validate(); err == nil {
+		t.Fatal("relay-only accepted the memory-test --dev acknowledgement")
 	}
 
 	dev := Defaults()
@@ -98,6 +133,8 @@ func TestValidateIsolatedRequiresIdentities(t *testing.T) {
 	d.AgentUIDs = []uint32{2001}
 	d.IntakeUIDs = []uint32{1000}
 	d.SocketGroup = "seqpass-agents"
+	d.AegisKeysResolveHelper = "/usr/local/bin/seqpass"
+	d.AegisKeysResolveHelperSHA256 = strings.Repeat("a", 64)
 	if err := d.Validate(); err != nil {
 		t.Fatalf("complete isolated topology rejected: %v", err)
 	}

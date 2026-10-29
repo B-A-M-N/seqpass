@@ -23,6 +23,9 @@ import (
 func (s *Service) resolveCredentialMaterial(ctx context.Context, src types.SecretSource, operation, opID string) (secureops.Credential, error) {
 	switch src.Kind {
 	case types.SourceAegisKeys:
+		if s.cfg.VaultType == "relay-only" {
+			return secureops.Credential{}, fmt.Errorf("relay-only has no persistent credential backend")
+		}
 		socket := s.cfg.AegisKeysSocket
 		if socket == "" {
 			socket = aegiskeys.SocketPath(s.cfg.AegisKeysDir)
@@ -366,6 +369,10 @@ func failTransferPreClaim(s *Service, tr *types.TransferRequest, outcome, auditA
 
 // admitTransfer is the single execution gate for blind transfers.
 func (s *Service) admitTransfer(tr *types.TransferRequest, worker string) (*types.Destination, string, error) {
+	return s.admitTransferMode(tr, worker, false)
+}
+
+func (s *Service) admitTransferMode(tr *types.TransferRequest, worker string, recipientPull bool) (*types.Destination, string, error) {
 	if time.Now().After(tr.ExpiresAt) {
 		_ = s.db.MarkTransferPreClaim(tr.ID, types.StatusExpired)
 		return nil, "", fmt.Errorf("operation expired")
@@ -386,6 +393,22 @@ func (s *Service) admitTransfer(tr *types.TransferRequest, worker string) (*type
 	dest, err := s.db.GetDestination(tr.DestinationID)
 	if err != nil || dest == nil {
 		return nil, "", failTransferPreClaim(s, tr, "destination revoked", "")
+	}
+	if dest.HandoffMode == types.HandoffRecipientPull {
+		if !recipientPull {
+			return nil, "", failTransferPreClaim(s, tr, "recipient-pull transfer requires a claimed ticket", "")
+		}
+		if dest.CredentialTarget == nil || dest.CredentialTarget.SourceRef != tr.SecretRef || dest.CredentialTarget.SourceRevision <= 0 {
+			return nil, "", failTransferPreClaim(s, tr, "recipient target source binding changed", "")
+		}
+	}
+	if dest.HandoffMode == types.HandoffSealedCapsule {
+		if worker != "capsule" {
+			return nil, "", failTransferPreClaim(s, tr, "sealed-capsule transfer requires recipient capsule issuance", "")
+		}
+		if dest.CredentialTarget == nil || dest.CredentialTarget.SourceRef != tr.SecretRef || dest.CredentialTarget.SourceRevision <= 0 {
+			return nil, "", failTransferPreClaim(s, tr, "sealed target source binding changed", "")
+		}
 	}
 	if len(dest.AllowedOps) > 0 && !containsOp(dest.AllowedOps, "transfer") {
 		return nil, "", failTransferPreClaim(s, tr, "operation not permitted for destination", "")
@@ -485,7 +508,7 @@ func (s *Service) ExecuteTransfer(ctx context.Context, transferID, worker string
 		}
 		return nil, fmt.Errorf("%s", outcome)
 	}
-	cred, err := s.resolveCredentialMaterial(ctx, tr.Source, "transfer", tr.ID)
+	cred, err := s.resolveCredentialMaterial(ctx, tr.Source, types.OperationTransfer, tr.ID)
 	if err != nil {
 		_ = s.db.FinalizeOp("transfer", tr.ID, attemptID, types.StatusFailed, "", nil)
 		s.audit(tr.ID, "secret_transfer_failed", tr.RequestedBy, tr.DestinationID, "resolve-failed")
@@ -526,6 +549,7 @@ func (s *Service) ExecuteTransfer(ctx context.Context, transferID, worker string
 		DestExpectedUID: dest.ExpectedUID, DestExpectedGID: dest.ExpectedGID,
 		DestConfigDigest: tr.DestDigest,
 		PayloadDigest:    transfer.DigestPayload(payload),
+		PayloadBytes:     len(payload),
 	}); err != nil {
 		return fail(types.StatusFailed, "dispatch-record-failed", "secret_transfer_failed", err)
 	}

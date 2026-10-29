@@ -174,6 +174,9 @@ func (s *Service) provisionedSocket() string {
 // through the existing use-request machinery (SubmitUse/ApproveUse/
 // ExecuteUse) — no second scheduler, no implicit authorization.
 func (s *Service) ProvisionCredential(ctx context.Context, caller, mode string, req aegiskeys.ProvisionRequest, intent *UseIntent) (*ProvisionReport, *types.SecretReference, error) {
+	if s.cfg.VaultType == "relay-only" {
+		return nil, nil, errors.New("relay-only has no credential provisioning backend")
+	}
 	if !validIntakePersistence(mode) {
 		return nil, nil, fmt.Errorf("unknown persistence mode %q: use use_once, save_only, save_and_use or transient_once", mode)
 	}
@@ -899,6 +902,9 @@ func providerStatusOf(ref *types.SecretReference) string {
 // expected-state atomic transitions. A first-assignment (empty identity)
 // path is the only writer of the identity columns here.
 func (s *Service) ProvisionStatusReport(ctx context.Context, caller, requestID string) (*ProvisionReport, *types.SecretReference, error) {
+	if s.cfg.VaultType == "relay-only" {
+		return nil, nil, errors.New("relay-only has no credential provisioning backend")
+	}
 	ref, err := s.db.GetSecretRefByProvisionRequest(requestID)
 	if err != nil {
 		return nil, nil, err

@@ -17,9 +17,13 @@ import (
 // relayService builds a service on a known DB path so tests can scan
 // the raw SQLite file for leaked plaintext (QR-09/QR-10).
 func relayService(t *testing.T) (*Service, string) {
+	return relayServiceWithVault(t, "memory-test")
+}
+
+func relayServiceWithVault(t *testing.T, vaultType string) (*Service, string) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "relay.db")
-	svc, err := New(Config{DBPath: dbPath, VaultType: "memory-test"})
+	svc, err := New(Config{DBPath: dbPath, VaultType: vaultType})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,6 +124,52 @@ func TestRelayFullCycleDelivered(t *testing.T) {
 	rec, _ := svc.DB().GetReceipt(opID)
 	if rec != nil && strings.Contains(rec.Result, relaySecret) {
 		t.Fatal("plaintext in durable receipt")
+	}
+}
+
+// relay-only is a production standalone mode: a trusted intake can fulfill
+// a one-time handoff and the recipient receives it without AegisKeys or any
+// persistent credential store being configured.
+func TestRelayOnlyStandaloneHandoff(t *testing.T) {
+	svc, dbPath := relayServiceWithVault(t, "relay-only")
+	_, recipient := relayDest(t, svc, "relay-only-recipient", false)
+	reqID, err := svc.RelayRequest("uid:1000", "relay-only-recipient", "one_time_code", "standalone test", 5*time.Minute, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opID, err := svc.RelayFulfill("operator", reqID, relayRev(svc, reqID), []byte(relaySecret))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.runWorkerOnce(context.Background())
+	tr, err := svc.DB().GetTransfer(opID)
+	if err != nil || tr.Status != types.StatusCompleted {
+		t.Fatalf("standalone relay transfer = %#v, %v", tr, err)
+	}
+	if got := relayPayload(t, recipient, opID); string(got) != relaySecret {
+		t.Fatal("standalone recipient did not receive the fulfilled payload")
+	}
+	if err := svc.AddSecretRef(&types.SecretReference{ID: "persistent", Name: "persistent"}); err == nil || !strings.Contains(err.Error(), "no persistent credential references") {
+		t.Fatalf("relay-only accepted a persistent credential ref: %v", err)
+	}
+	if _, err := svc.resolveCredentialMaterial(context.Background(), types.SecretSource{Kind: types.SourceAegisKeys, Binding: "seqpass/forbidden"}, "http.request", "op-forbidden"); err == nil || !strings.Contains(err.Error(), "no persistent credential backend") {
+		t.Fatalf("relay-only resolved an AegisKeys credential: %v", err)
+	}
+	if err := svc.StageEphemeral("persistent", []byte("not-a-relay")); err == nil {
+		t.Fatal("relay-only enabled generic staged-secret use")
+	}
+	if _, err := svc.SubmitUse("uid:1000", &types.UseRequest{SecretRef: RelayRefPrefix + reqID, Operation: "http.request"}); err == nil {
+		t.Fatal("relay-only accepted a protected credential operation")
+	}
+	if _, err := svc.RelayRequest("uid:1000", "relay-only-recipient", "api_key", "repeatable", time.Minute, types.RelayReusable, 0); err == nil {
+		t.Fatal("relay-only accepted a reusable handoff")
+	}
+	dbBytes, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(dbBytes), relaySecret) {
+		t.Fatal("relay-only persisted plaintext in SQLite")
 	}
 }
 

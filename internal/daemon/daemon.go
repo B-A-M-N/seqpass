@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/secretbridge/secretbridge/internal/aegiskeys"
+	"github.com/secretbridge/secretbridge/internal/capsule"
 	"github.com/secretbridge/secretbridge/internal/config"
 	"github.com/secretbridge/secretbridge/internal/harness"
 	"github.com/secretbridge/secretbridge/internal/intake"
@@ -72,9 +74,12 @@ type Config struct {
 	// IntakeSocket serves the trusted human-side intake domain
 	// (QR-02/SP-TUI-04) on its own owner-only socket. Empty defaults
 	// to <agent-socket>.intake.
-	IntakeSocket string
-	AdminUIDs    []uint32
-	AgentUIDs    []uint32
+	IntakeSocket    string
+	RecipientSocket string
+	RecipientUIDs   []uint32
+	RecipientGroup  string
+	AdminUIDs       []uint32
+	AgentUIDs       []uint32
 	// IntakeUIDs names the human-side identities allowed to review
 	// requests and release values (QR-02). Empty defaults to the
 	// admin set. Agent UIDs are never sufficient unless explicitly
@@ -91,9 +96,11 @@ type Config struct {
 	AegisKeysSocket string
 	AegisKeysDir    string
 	// AegisKeysResolveHelper names the trusted credential-resolution
-	// helper executable (P0-1). Operator configuration only; empty keeps
-	// the in-process resolve path.
+	// helper executable (P0-1). Isolated AegisKeys deployments require it.
 	AegisKeysResolveHelper string
+	// AegisKeysResolveHelperSHA256 pins that helper's exact executable
+	// identity and is mandatory whenever the helper is required.
+	AegisKeysResolveHelperSHA256 string
 	// AegisKeysAttestKey, when set, is the executor's in-memory ed25519
 	// key pair used to sign each helper-carried resolve (hardened-parent
 	// attestation for AegisKeys attest-key grants). The daemon generates
@@ -111,6 +118,11 @@ type Config struct {
 	// enters memory. Empty keeps the fresh-key-per-start mode (rotation
 	// detection applies).
 	AegisKeysAttestSeedPath string
+	// HandoffSigningKeyID and HandoffSigningSeedPath provision the independent
+	// offline-capsule issuer identity. Keep this key separate from the AegisKeys
+	// helper attestation identity and provision its public half to recipients.
+	HandoffSigningKeyID    string
+	HandoffSigningSeedPath string
 	// AutoExecute runs the trusted in-broker worker that executes
 	// authorized operations without manual `admin execute` (C13).
 	// Approval is still required: only authorized ops are consumed, and
@@ -165,7 +177,7 @@ type Daemon struct {
 
 // isProductionVault reports whether the vault type is a production store.
 func isProductionVault(vaultType string) bool {
-	return vaultType == "aegiskeys"
+	return vaultType == config.VaultAegisKeys || vaultType == config.VaultRelayOnly
 }
 
 // lookupGroupGID resolves a group name to its numeric GID. Fail closed:
@@ -188,7 +200,7 @@ func New(cfg Config) (*Daemon, error) {
 		return nil, fmt.Errorf("db path and socket path are required")
 	}
 	if cfg.VaultType == "" {
-		return nil, fmt.Errorf("explicit vault type required: aegiskeys (production) or memory-test (dev only)")
+		return nil, fmt.Errorf("explicit vault type required: aegiskeys or relay-only (production), or memory-test (dev only)")
 	}
 	if cfg.AssuranceMode == "" {
 		// Objective 4.1: a production (AegisKeys) installation defaults to
@@ -211,6 +223,16 @@ func New(cfg Config) (*Daemon, error) {
 	if isProductionVault(cfg.VaultType) && cfg.AssuranceMode != AssuranceIsolated {
 		return nil, fmt.Errorf("production vault %q requires %s assurance: best-effort is development-only and does not establish a boundary against an agent with local shell access", cfg.VaultType, AssuranceIsolated)
 	}
+	if cfg.VaultType == config.VaultAegisKeys && cfg.AssuranceMode == AssuranceIsolated {
+		if cfg.AegisKeysResolveHelper == "" {
+			return nil, fmt.Errorf("isolated AegisKeys requires --aegiskeys-resolve-helper and its SHA-256 pin; configure the trusted dumpable helper so AegisKeys can authenticate the resolving executable")
+		}
+		resolved, err := validateResolveHelper(cfg.AegisKeysResolveHelper, cfg.AegisKeysResolveHelperSHA256, uint32(os.Geteuid()))
+		if err != nil {
+			return nil, fmt.Errorf("invalid AegisKeys resolve helper: %w", err)
+		}
+		cfg.AegisKeysResolveHelper = resolved
+	}
 	if cfg.AssuranceMode == AssuranceIsolated {
 		if runtime.GOOS != "linux" {
 			return nil, fmt.Errorf("isolated assurance requires Linux peer credentials")
@@ -224,6 +246,9 @@ func New(cfg Config) (*Daemon, error) {
 	}
 	if cfg.IntakeSocket == "" {
 		cfg.IntakeSocket = cfg.SocketPath + ".intake"
+	}
+	if cfg.RecipientSocket != "" && len(cfg.RecipientUIDs) == 0 {
+		cfg.RecipientUIDs = []uint32{uint32(os.Geteuid())}
 	}
 	if len(cfg.AdminUIDs) == 0 {
 		cfg.AdminUIDs = []uint32{uint32(os.Geteuid())}
@@ -247,6 +272,32 @@ func New(cfg Config) (*Daemon, error) {
 		if err := validateAgentGroupMembership(cfg.AgentUIDs, gid); err != nil {
 			return nil, err
 		}
+		if cfg.RecipientSocket != "" {
+			if len(cfg.RecipientUIDs) == 0 || cfg.RecipientGroup == "" {
+				return nil, fmt.Errorf("isolated recipient handoff requires explicit recipient UIDs and group")
+			}
+			if cfg.RecipientGroup == cfg.SocketGroup || (cfg.IntakeGroup != "" && cfg.RecipientGroup == cfg.IntakeGroup) {
+				return nil, fmt.Errorf("recipient group must differ from agent and intake groups")
+			}
+			for _, uid := range cfg.RecipientUIDs {
+				if containsUID(cfg.AgentUIDs, uid) || containsUID(cfg.IntakeUIDs, uid) || containsUID(cfg.AdminUIDs, uid) {
+					return nil, fmt.Errorf("recipient UID %d must be separate from agent, intake, and admin identities", uid)
+				}
+			}
+			recipientGID, e := lookupGroupGID(cfg.RecipientGroup)
+			if e != nil {
+				return nil, e
+			}
+			if e = validateUIDGroupMembership(cfg.RecipientUIDs, recipientGID, true, "recipient"); e != nil {
+				return nil, e
+			}
+			if e = validateUIDGroupMembership(cfg.AgentUIDs, recipientGID, false, "agent"); e != nil {
+				return nil, e
+			}
+			if e = validateUIDGroupMembership(cfg.IntakeUIDs, recipientGID, false, "intake"); e != nil {
+				return nil, e
+			}
+		}
 		if cfg.IntakeGroup != "" {
 			if cfg.IntakeGroup == cfg.SocketGroup {
 				return nil, fmt.Errorf("isolated assurance refuses intake and agent group overlap")
@@ -262,7 +313,7 @@ func New(cfg Config) (*Daemon, error) {
 				return nil, err
 			}
 		}
-		if sameSocketDir(cfg.SocketPath, cfg.AdminSocket) || sameSocketDir(cfg.SocketPath, cfg.IntakeSocket) {
+		if sameSocketDir(cfg.SocketPath, cfg.AdminSocket) || sameSocketDir(cfg.SocketPath, cfg.IntakeSocket) || (cfg.RecipientSocket != "" && (sameSocketDir(cfg.SocketPath, cfg.RecipientSocket) || sameSocketDir(cfg.AdminSocket, cfg.RecipientSocket) || sameSocketDir(cfg.IntakeSocket, cfg.RecipientSocket))) {
 			return nil, fmt.Errorf("isolated assurance requires a separate agent socket directory from admin and intake")
 		}
 	}
@@ -304,15 +355,29 @@ func New(cfg Config) (*Daemon, error) {
 			}
 		}
 	}
+	var handoffSigningKey ed25519.PrivateKey
+	if cfg.HandoffSigningKeyID != "" || cfg.HandoffSigningSeedPath != "" {
+		if cfg.HandoffSigningKeyID == "" || cfg.HandoffSigningSeedPath == "" || cfg.HandoffSigningSeedPath == cfg.AegisKeysAttestSeedPath {
+			lease.Release()
+			return nil, fmt.Errorf("handoff issuer requires a distinct key ID and seed path")
+		}
+		handoffSigningKey, err = capsule.LoadIssuerPrivate(cfg.HandoffSigningSeedPath)
+		if err != nil {
+			lease.Release()
+			return nil, fmt.Errorf("load handoff issuer key: %w", err)
+		}
+	}
 	svc, err := service.New(service.Config{
 		DBPath:          dbPath,
 		VaultType:       cfg.VaultType,
 		AegisKeysSocket: cfg.AegisKeysSocket,
 		AegisKeysDir:    cfg.AegisKeysDir,
 		// P0-1: operator-configured trusted resolve helper (isolated
-		// deployments); empty keeps the in-process resolve path.
+		// deployments); isolated AegisKeys startup rejects an empty helper.
 		AegisKeysResolveHelper: cfg.AegisKeysResolveHelper,
 		AegisKeysAttestKey:     attestKey,
+		HandoffSigningKeyID:    cfg.HandoffSigningKeyID,
+		HandoffSigningKey:      handoffSigningKey,
 		DefaultOpTTL:           cfg.DefaultOpTTL,
 		MaxConcurrentOps:       cfg.MaxConcurrentOps,
 		// Objective 4.3: an isolated deployment withholds inline native
@@ -321,6 +386,9 @@ func New(cfg Config) (*Daemon, error) {
 		// isolation claim to begin with.
 		RequireVerifiedHostIsolation: cfg.AssuranceMode == AssuranceIsolated,
 	})
+	for i := range handoffSigningKey {
+		handoffSigningKey[i] = 0
+	}
 	if err != nil {
 		lease.Release()
 		return nil, err
@@ -346,8 +414,18 @@ func New(cfg Config) (*Daemon, error) {
 		intakeUIDs[u] = true
 	}
 	srv := ipc.NewServer(svc, cfg.SocketPath, cfg.AdminSocket, nil,
-		&ipc.UIDAuthorizer{AdminUIDs: allow, AgentUIDs: agents, IntakeUIDs: intakeUIDs})
+		&ipc.UIDAuthorizer{AdminUIDs: allow, AgentUIDs: agents, IntakeUIDs: intakeUIDs, RecipientUIDs: uidSet(cfg.RecipientUIDs)})
 	srv.IntakeSocket = cfg.IntakeSocket
+	srv.RecipientSocket = cfg.RecipientSocket
+	if cfg.RecipientGroup != "" {
+		gid, e := lookupGroupGID(cfg.RecipientGroup)
+		if e != nil {
+			_ = svc.Close()
+			lease.Release()
+			return nil, e
+		}
+		srv.RecipientGID = &gid
+	}
 	srv.HostSocket = cfg.HostSocket
 	if cfg.HostSocket != "" {
 		// SP-01: validate the host socket path before starting the IPC server
@@ -602,6 +680,9 @@ func (d *Daemon) AssuranceMode() string { return d.cfg.AssuranceMode }
 // change under a verified boundary.
 func (d *Daemon) protectedPaths() []string {
 	paths := []string{d.cfg.AdminSocket, d.cfg.IntakeSocket}
+	if d.cfg.RecipientSocket != "" {
+		paths = append(paths, d.cfg.RecipientSocket)
+	}
 	if d.cfg.HostSocket != "" {
 		paths = append(paths, d.cfg.HostSocket)
 	}
@@ -632,6 +713,8 @@ func isolationConfigFor(cfg Config) isolation.Config {
 		SocketPath:      cfg.SocketPath,
 		AdminSocket:     cfg.AdminSocket,
 		IntakeSocket:    cfg.IntakeSocket,
+		RecipientSocket: cfg.RecipientSocket,
+		RecipientUIDs:   cfg.RecipientUIDs,
 		HostSocket:      cfg.HostSocket,
 		AssuranceMode:   cfg.AssuranceMode,
 		AdminUIDs:       cfg.AdminUIDs,
@@ -849,4 +932,21 @@ func (d *Daemon) Shutdown() error {
 		d.lease.Release()
 	}
 	return nil
+}
+
+func containsUID(uids []uint32, id uint32) bool {
+	for _, u := range uids {
+		if u == id {
+			return true
+		}
+	}
+	return false
+}
+
+func uidSet(uids []uint32) map[uint32]bool {
+	m := map[uint32]bool{}
+	for _, u := range uids {
+		m[u] = true
+	}
+	return m
 }

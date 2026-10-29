@@ -204,11 +204,35 @@ independent re-verification, and the supported revision/topology envelope.
 Record an unavailable independent review as unavailable instead of inferring
 it from a green local test suite.
 
+## Dirty-worktree source identity
+
+For qualifications run before a commit, create a source inventory with
+`python3 qual/source_snapshot.py --output qual/evidence/<unique-name>.json`.
+The mode-0600 manifest records the Git HEAD separately from a deterministic
+SHA-256 over sorted file records, including untracked and ignored files. Each
+record binds the relative path, file kind, permission bits, size, and content
+digest (or symlink target). The inventory excludes `.git/`, `.tmp/`,
+`.opencode/`, and `qual/evidence/` so it does not hash Git internals, transient
+test state, local editor state, or its own retained records. Re-running the
+command against the unchanged tree must produce the same digest.
+
+This is an identity manifest, not an archive, signature, or independent source
+review. Retain it beside the qualification artifact and preserve the matching
+worktree or source archive separately. A Git revision alone does not identify
+uncommitted changes. Record which tests ran against that exact inventory and
+keep privileged scenarios that were not run marked `not_exercised`.
+
 ## Current evidence
 
-The executable boundary and protected-relay harness is implemented, and the
-synthetic AegisKeys credential tier is implemented and unit-validated at the
-fixture level (`TestMockUpstreamContract`, including negative controls), but no
-dedicated-UID live run has been performed in the current workspace. The full
-cross-broker scenarios against a real AegisKeys deployment remain unverified
-until a protected run record passes every remaining scenario above.
+The synthetic credential tier has passed a dedicated-UID run in a disposable,
+network-disabled Alpine container. The exact passing manifest and an
+append-only correction record are retained under `qual/evidence/`; this
+qualifies the recorded synthetic topology only. Earlier failed and blocked
+attempts remain retained and are linked from that correction record. The run
+does not qualify a live AegisKeys deployment or the ten scenarios marked
+`not_exercised` in the passing manifest. Those require a protected run with a
+real AegisKeys deployment and the remaining scenario-specific fixtures.
+
+The agent-carried capsule boundary has a separate current three-UID run:
+`qual/evidence/qual-TestQualPrivilegedCapsuleBoundary-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793259359269490250.json` records 15 passed and 0 failed; eight host/UI scenarios are explicitly `not_exercised`. Its correction record links the two stale-harness failures and the source snapshot digest:
+`qual/evidence/correction-capsule-recipient-receipt-qualification-20261029.json`.

@@ -52,13 +52,14 @@ type ProvisionResolverGrant struct {
 // ProvisionResponse mirrors broker.ProvisionResponse: metadata only, never
 // credential material.
 type ProvisionResponse struct {
-	RequestID     string `json:"request_id"`
-	RecordID      string `json:"record_id,omitempty"`
-	BindingID     string `json:"binding_id,omitempty"`
-	BindingName   string `json:"binding,omitempty"`
-	Status        string `json:"status"`
-	StagedGrantID string `json:"staged_grant_id,omitempty"`
-	StagingError  string `json:"staging_error,omitempty"`
+	RequestID          string `json:"request_id"`
+	RecordID           string `json:"record_id,omitempty"`
+	BindingID          string `json:"binding_id,omitempty"`
+	BindingName        string `json:"binding,omitempty"`
+	Status             string `json:"status"`
+	StagedGrantID      string `json:"staged_grant_id,omitempty"`
+	StagingDisposition string `json:"staging_disposition,omitempty"`
+	StagingError       string `json:"staging_error,omitempty"`
 }
 
 // Provision status sentinels (broker.ProvisioningRequestStatus values the

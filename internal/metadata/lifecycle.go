@@ -180,11 +180,26 @@ func (d *DB) ReconcileExecuting() (failed, uncertain int, err error) {
 	} else {
 		f1, u1 = n[0], n[1]
 	}
+	// A recipient-pull dispatch record is committed before delivery bytes
+	// are returned. A claimed ticket whose transfer reached dispatching but
+	// has no record therefore provably did not release credential material.
+	// Close it as a pre-dispatch failure so handoff reconciliation may safely
+	// restore the original, unexpired authorization.
+	preDispatchHandoff, err := tx.Exec(`UPDATE transfers SET status='failed',completed_at=?,revision=revision+1
+		WHERE status='dispatching'
+		AND EXISTS(SELECT 1 FROM handoff_tickets h WHERE h.operation_id=transfers.id AND h.state='claimed')
+		AND NOT EXISTS(SELECT 1 FROM dispatch_records d WHERE d.op_id=transfers.id)`, now)
+	if err != nil {
+		rollback()
+		return 0, 0, err
+	}
+	f2, _ = preDispatchHandoff.RowsAffected()
 	if n, err := d.reconcileTable(tx, "transfers", now); err != nil {
 		rollback()
 		return 0, 0, err
 	} else {
-		f2, u2 = n[0], n[1]
+		f2 += n[0]
+		u2 = n[1]
 	}
 	if _, err := tx.Exec(`
 		UPDATE execution_attempts SET outcome = 'orphaned', finished_at = ?

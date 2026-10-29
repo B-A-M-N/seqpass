@@ -948,6 +948,28 @@ func TestResolveViaHelperAuthorized(t *testing.T) {
 // rules the real AegisKeys broker enforces; cross-UID denial with real
 // UIDs is the privileged qualification tier (root-gated, documented in
 // qual/PRIVILEGED.md).
+func TestResolveViaHelperOperationScopesAreDisjoint(t *testing.T) {
+	helperTestingCommand(t)
+	t.Run("transfer_only", func(t *testing.T) {
+		m := startMockBrokerChild(t, os.Geteuid(), selfExe(t), []string{types.OperationTransfer})
+		if _, err := aegiskeys.ResolveViaHelper(context.Background(), selfExe(t), m.sockPath, "seqpass/example", types.OperationTransfer, "op-transfer", nil); err != nil {
+			t.Fatalf("transfer resolve: %v", err)
+		}
+		if _, err := aegiskeys.ResolveViaHelper(context.Background(), selfExe(t), m.sockPath, "seqpass/example", "http.request", "op-http", nil); !errors.Is(err, aegiskeys.ErrAccessDenied) {
+			t.Fatalf("http.request on transfer-only binding = %v, want access_denied", err)
+		}
+	})
+	t.Run("http_only", func(t *testing.T) {
+		m := startMockBrokerChild(t, os.Geteuid(), selfExe(t), []string{"http.request"})
+		if _, err := aegiskeys.ResolveViaHelper(context.Background(), selfExe(t), m.sockPath, "seqpass/example", "http.request", "op-http", nil); err != nil {
+			t.Fatalf("http.request resolve: %v", err)
+		}
+		if _, err := aegiskeys.ResolveViaHelper(context.Background(), selfExe(t), m.sockPath, "seqpass/example", types.OperationTransfer, "op-transfer", nil); !errors.Is(err, aegiskeys.ErrAccessDenied) {
+			t.Fatalf("transfer on http-only binding = %v, want access_denied", err)
+		}
+	})
+}
+
 func TestResolveViaHelperDenials(t *testing.T) {
 	helperTestingCommand(t)
 	t.Run("wrong_pinned_executable", func(t *testing.T) {
@@ -1496,7 +1518,32 @@ func TestResolveViaHelperReapsChildrenOnFailure(t *testing.T) {
 		t.Fatalf("stalled helper exchange took %v: hang", elapsed)
 	}
 
-	// 4. Signing fails after the child is already running: the child is
+	// 4. A caller without its own deadline can still cancel the exchange.
+	// The helper's internal 12-second bound must derive from this context,
+	// so cancellation kills and reaps the process instead of waiting for it.
+	helperTestingCommandMode(t, "stall")
+	ctx, cancel = context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, callErr := aegiskeys.ResolveViaHelper(ctx, selfExe(t), deadSocketPath(t), "seqpass/example", "http.request", "op-cancel", nil)
+		done <- callErr
+	}()
+	time.Sleep(100 * time.Millisecond)
+	started = time.Now()
+	cancel()
+	select {
+	case err = <-done:
+		if !errors.Is(err, aegiskeys.ErrTransportUnavailable) {
+			t.Fatalf("cancelled helper = %v, want transport_unavailable", err)
+		}
+		if elapsed := time.Since(started); elapsed > 2*time.Second {
+			t.Fatalf("cancelled helper took %v to stop", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled helper exchange did not stop promptly")
+	}
+
+	// 5. Signing fails after the child is already running: the child is
 	// killed and reaped, and the ORIGINAL signing error is returned.
 	helperTestingCommandMode(t, "envcheck", envcheckChildArg, filepath.Join(t.TempDir(), "unused2.json"))
 	_, err = aegiskeys.ResolveViaHelper(context.Background(), selfExe(t), deadSocketPath(t), "seqpass/example", "http.request", "op-z", failingSigner{})

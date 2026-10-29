@@ -147,7 +147,7 @@ func (h *harness) recordNotExercised(name, tier, expected, reason string) {
 func buildBinary(t *testing.T, dir string) string {
 	t.Helper()
 	bin := filepath.Join(dir, "seqpass")
-	cmd := exec.Command("go", "build", "-o", bin, "./cmd/seqpass")
+	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", bin, "./cmd/seqpass")
 	cmd.Dir = ".."
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build broker: %v\n%s", err, out)

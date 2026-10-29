@@ -16,6 +16,11 @@ keeps credential material outside those process identities. Same-user
   ephemeral payloads are a `memory-test --dev` fixture only and are rejected
   under `--vault aegiskeys`. Resolution follows rotation (latest authorized
   value of the approved binding); pinned-version semantics are not claimed.
+- **Mode C (sealed handoff):** after approval, SeqPass creates a short-lived
+  HPKE capsule for a pinned recipient key and signs it with a separate issuer
+  key. The agent can carry the ciphertext but cannot read or retarget it. The
+  recipient installs through its application adapter and returns a
+  UID-authenticated receipt; issuance alone remains uncertain.
 
 ## Architecture
 
@@ -43,6 +48,10 @@ harness (Codex / Claude / Hermes)
 | **Native protected-input isolation** | **Not yet production-qualified** | Requires live multi-UID topology + AegisKeys qualification |
 | **AegisKeys production resolution** | **Not yet production-qualified** | Requires live dedicated-UID grant + rotation tests |
 | Recipient durability contract | Implemented, tested | `internal/transfer/recipient_test.go` + `recipient_server_test.go` |
+| Mode A recipient-pull ticket | Implemented, tested | `internal/service/handoff_test.go` + recipient-only IPC tests |
+| Mode C signed HPKE capsule issue/import/receipt | Implemented, unit-tested | `internal/capsule/`, `internal/service/capsule_issue_test.go`, `cmd/seqpass/recipient_capsule.go` |
+| OpenCode recipient adapter (v1 auth.json + v2 credential store) | Implemented; v2.1.4 app-qualified with synthetic local provider | `internal/apptarget/opencode*.go`; `SEQPASS_QUAL_OPENCODE=1 go test ./qual -run '^TestQualOpenCodeHandoff$' -count=1` |
+| Codex recipient adapter (API key in recipient-pinned CODEX_HOME) | Implemented; codex-cli 0.165.0 app-qualified with synthetic local Responses API, including rotation | `internal/apptarget/codex.go`; `SEQPASS_QUAL_CODEX=1 go test ./qual -run '^TestQualCodexHandoff$' -count=1` |
 | Real credential consumer (`SecretConsumer`) | Implemented, tested | `internal/transfer/consumer.go` + `internal/service/real_consumer_test.go` (delivery → commit → verified `applied`) |
 | Credentialed operations (`http.request`, `process.run`, `git.fetch`, `git.push` pinned profiles) | Implemented, tested | `internal/secureops/` — pinned executables/origins/remotes/sources, credential never in argv/env/URL/DTO (fd-injected; mutation-tested negative controls). `git.push` pushes a branch of the operator-pinned source repository to the operator-pinned remote; no `--force`, the agent supplies only the branch |
 | Generic agent adapter (MCP + CLI) | Implemented, tested | `internal/adapter/` + `cmd/seqpass/agent.go` |
@@ -266,6 +275,122 @@ The same contract is available without MCP as
 `seqpass agent capabilities|request|status|cancel`, for harnesses that speak
 CLI instead of MCP.
 
+## Agent-carried sealed application handoff
+
+The recipient generates its HPKE key under its own service identity. The
+issuer Ed25519 key stays under the SeqPass broker identity; copy only the
+issuer public key to the recipient through a separately trusted enrollment
+channel. This signing key is separate from AegisKeys helper attestation.
+
+```bash
+# Recipient identity (private key is mode 0400; keep the directory private).
+seqpass recipient keys generate --private-key /var/lib/seqpass-recipient/hpke.json \
+  --public-key /var/lib/seqpass-recipient/hpke.pub \
+  --receipt-private-key /var/lib/seqpass-recipient/receipt.seed \
+  --receipt-public-key /var/lib/seqpass-recipient/receipt.pub
+
+# Issuer identity on the broker host; provision issuer.pub out of band.
+seqpass admin handoff-issuer-keygen --private-seed /var/lib/seqpass/issuer.seed \
+  --public-key /var/lib/seqpass/issuer.pub
+
+# The recipient-only broker socket needs a dedicated group for the gateway
+# service UID. Do not add agent UIDs to this group.
+groupadd --system seqpass-recipients
+usermod -aG seqpass-recipients <gateway-service-user>
+
+# Start the broker with the pinned signing identity.
+seqpass broker --vault aegiskeys --handoff-signing-key-id seqpass-issuer-r1 \
+  --handoff-signing-seed /var/lib/seqpass/issuer.seed \
+  --recipient-socket /run/seqpass/recipient/broker.sock --recipient-uid 3002 \
+  --recipient-group seqpass-recipients
+
+# Register a logical application target. No application config path is supplied.
+seqpass admin add-dest --name opencode-primary --type sealed-capsule \
+  --handoff-mode sealed-capsule --expect-uid 3002 \
+  --recipient-key-id opencode-r1 --recipient-public-key /etc/seqpass-recipient/hpke.pub \
+  --receipt-key-id opencode-receipt-r1 --receipt-public-key /etc/seqpass-recipient/receipt.pub \
+  --issuer-key-id seqpass-issuer-r1 --issuer-public-key /var/lib/seqpass/issuer.pub \
+  --app opencode --account openrouter --slot api_key \
+  --update-method opencode-auth-import-v2 --source-ref openrouter/main --source-revision 4
+
+# Install recipient-local trust once, as the recipient service identity. This
+# create-only registration pins the issuer, HPKE key, logical target, broker
+# receipt socket, and application adapter under the recipient's protected home.
+seqpass recipient capsule register \
+  --destination-id opencode-primary --destination-revision 1 \
+  --recipient-key-id opencode-r1 \
+  --recipient-private-key /var/lib/seqpass-recipient/hpke.json \
+  --receipt-key-id opencode-receipt-r1 \
+  --receipt-private-key /var/lib/seqpass-recipient/receipt.seed \
+  --issuer-key-id seqpass-issuer-r1 \
+  --issuer-public-key /etc/seqpass-recipient/issuer.pub \
+  --target-id opencode:openrouter:api_key --app opencode \
+  --account openrouter --slot api_key --update-method opencode-auth-import-v2 \
+  --source-ref openrouter/main --source-revision 4 \
+  --opencode-command /home/seqpass-recipient/.opencode/bin/opencode
+
+# After operator approval, the agent writes only the opaque envelope.
+seqpass agent handoff issue --op-id <approved-op> --output ./handoff.capsule
+
+# Carry the exact opaque bytes to the trusted recipient. The receiver reads
+# only stdin and loads all trust/target pins from its create-only local
+# registration; the courier cannot replace them with command-line flags.
+cat ./handoff.capsule | seqpass recipient capsule import \
+  --receipt-output /var/lib/seqpass-recipient/handoff-receipt.json
+
+# Carry the signed, secret-free receipt back to the issuer. The agent cannot
+# change its destination, handoff, capsule digest or result without invalidating
+# the recipient's Ed25519 signature.
+seqpass agent handoff receipt --file /path/to/handoff-receipt.json
+```
+
+Capsules expire within five minutes by default (30 seconds minimum, 15 minutes
+maximum). The recipient journal claims a handoff before installation, and
+retries after a crash reconcile by readback instead of repeating the write.
+The recipient signs a receipt bound to its registered receipt key, destination
+revision, handoff ID, operation ID, encrypted capsule digest and result. The
+issuer marks completion only after verifying that signature; a missing receipt
+leaves the operation uncertain. For key replacement, follow the versioned,
+create-only procedure in [docs/handoff-key-rotation.md](docs/handoff-key-rotation.md).
+Online recipients may also configure
+`--broker-socket` to submit the UID-authenticated receipt directly. Offline
+recipients omit it and courier the signed receipt back with
+`seqpass agent handoff receipt`. Receipt signing uses its own Ed25519 key,
+separate from the HPKE decryption key, the capsule issuer key, and the AegisKeys
+helper-attestation key. Destination registration rejects reused key IDs or key
+material across the recipient, receipt, and issuer roles. Updating keys on an
+existing destination changes its revision and invalidates old approval and
+receipt pins. The versioned rotation procedure preserves the old destination
+record until its outstanding operations are reconciled. OpenCode, Codex, and the
+FI Gateway credential manager have recipient adapters for `api_key` slots.
+The gateway adapter sends the key over its peer-UID-authenticated local Unix
+socket into the gateway's live managed credential store; the gateway updates
+the exact provider/account pair and reports only metadata. The OpenCode v1 adapter maintains the legacy
+`auth.json`; v2 uses OpenCode's supported credential import/export commands
+and requires an explicit recipient-local executable path. Codex uses its
+supported `login --with-api-key` command and a recipient-pinned `CODEX_HOME`;
+enrollment requires an explicit recipient-local Codex executable path. Run
+their opt-in real-app qualifications with synthetic keys and local mock
+providers via `SEQPASS_QUAL_OPENCODE=1 go test ./qual -run '^TestQualOpenCodeHandoff$' -count=1`
+and `SEQPASS_QUAL_CODEX=1 go test ./qual -run '^TestQualCodexHandoff$' -count=1`.
+Register a gateway target with `--app fi-gateway --app-provider openrouter
+--account staging --slot api_key --update-method
+fi-gateway-credential-manager-v1`, and pin its local socket in recipient trust
+with `--fi-gateway-socket /run/fi-gateway/credentials.sock`.
+When the gateway service uses a separate Unix UID and its socket permissions
+allow the recipient to connect, pin it with
+`--fi-gateway-peer-uid <gateway-service-uid>` during recipient registration
+(or on `recipient handoff`). Without this option SeqPass requires the peer UID
+to match the recipient process UID. The socket inode must still be
+recipient-owned and owner-only under SeqPass's path checks; the UID pin does
+not relax filesystem permissions. A UID pin authenticates the service account
+boundary, not a particular executable or an uncompromised process.
+Offline capsules cannot be revoked
+after issuance; credentials revoked afterward may remain usable in an issued
+capsule until it expires. Expiry does not erase a copied ciphertext. Separate
+agent, issuer and recipient identities are required; same-UID deployments do
+not isolate the recipient private key from the agent.
+
 ## Security model
 
 - Default-deny policy; DB errors deny; unknown ops/destinations deny.
@@ -299,7 +424,12 @@ CLI instead of MCP.
   resolves therefore fail at the peer-identity layer by design. The fix
   keeps the broker's posture and moves each resolve into a short-lived
   helper process (`seqpass resolve-helper`, configured via
-  `--aegiskeys-resolve-helper`): spawned only by the broker's approved
+  `--aegiskeys-resolve-helper` and its required
+  `--aegiskeys-resolve-helper-sha256` pin in isolated AegisKeys mode):
+  startup rejects a missing, replaced, non-executable, or untrusted-path
+  helper before the broker accepts work. The canonical path and digest are
+  also checked by AegisKeys against its executable grant at resolve time.
+  The helper is spawned only by the broker's approved
   execution path, one request over a private CLOEXEC socketpair
   inherited as fd 3, credential material returns only on that
   descriptor (stdout/stderr are /dev/null), `RLIMIT_CORE=0` blocks core
@@ -316,11 +446,12 @@ CLI instead of MCP.
   grant accepts (the private key lives in non-dumpable memory, the
   one same-UID-unreadable store). A grant pinning an attest key never
   matches an unattested or invalidly signed request. Residual: a
-  same-UID process could ptrace the millisecond-lived helper, but
-  what it would observe (nonce+signature over already-approved
-  binding/op) forges nothing — replay of a captured request is denied
-  by fresh-nonce attestation, and the credential itself is not
-  observable on the peer-verified socket.
+  same-UID process could ptrace the millisecond-lived helper. AegisKeys
+  binds signatures to the binding, operation, operation ID, and nonce but
+  does not keep a nonce replay cache: a captured signed request could be
+  replayed as that same request while its grant remains valid. The helper
+  socketpair is private to the executor and helper; attestation authenticates
+  the executor and does not itself provide one-time request semantics.
 
 ## Recipient wire protocol (v1)
 
@@ -360,8 +491,12 @@ seqpass recipient --socket /run/seqpass/recipient/cred.sock \
   --trust-broker-uid $(id -u seqpass) --socket-mode 0600
 ```
 
-`--consumer file` commits the credential to `--consumer-dir` and verifies the
-intended effect by reading it back before reporting `applied`.
+`--consumer file` writes the credential as plaintext into `--consumer-dir`,
+then reads it back before reporting that the file commit succeeded. This is a
+recipient-side trusted-storage integration, not encrypted-at-rest storage and
+not equivalent to the AegisKeys vault. The directory must be private and owned
+by the recipient; the file consumer rejects symlinks, replacement directories,
+and existing operation files with different contents.
 `--consumer reference` is the metadata-only fixture: it journals durable
 acceptance but applies nothing, and is for wire tests and development only.
 There is no default consumer, and no mode prints the secret to stdout.
@@ -525,3 +660,19 @@ valid ancestor for a socket fixture). Those run everywhere.
 `input_kind` mirrors the requested data kind (for example `api_key` or
 `password`). The harness should display a pending-input notice; the actual
 value is never collected by the MCP form, the chat surface, or the agent.
+
+## Standalone relay-only deployment
+
+SeqPass can run as a production multi-UID relay service without AegisKeys:
+select `--vault relay-only` and keep `--assurance isolated` (the default for
+this production mode). It retains the separate agent, trusted-intake, and
+administrator identities and sockets. Agents can request a handoff to a
+registered recipient; an authorized human supplies the payload, and the
+broker keeps it only in memory for a single dispatch. Agent-facing status and
+receipts contain outcome metadata, never the payload.
+
+`relay-only` has no persistent credential store. It refuses credential
+references, AegisKeys resolution, credential provisioning, generic staged
+secret use, and protected credential operations. Use `--vault aegiskeys` for
+persistent API-key storage and scoped protected operations. `memory-test
+--dev` remains a development fixture and is not a production alternative.

@@ -8,8 +8,8 @@ import (
 
 	secretbridge "github.com/secretbridge/secretbridge"
 	"github.com/secretbridge/secretbridge/internal/daemon"
-	"github.com/secretbridge/secretbridge/internal/testruntime"
 	"github.com/secretbridge/secretbridge/internal/ipc"
+	"github.com/secretbridge/secretbridge/internal/testruntime"
 )
 
 // Fail-closed over real Unix sockets: with no policy, the harness client is

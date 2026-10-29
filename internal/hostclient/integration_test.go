@@ -34,7 +34,7 @@ func TestTrustedClientFullCycle(t *testing.T) {
 	uid := uint32(0)
 	if err := svc.AddDestination(&types.Destination{
 		ID: "registered-service", Name: "Test Recipient", Type: "recipient-socket",
-  Endpoint: filepath.Join(dir, "recipient.sock"), ExpectedUID: &uid,
+		Endpoint: filepath.Join(dir, "recipient.sock"), ExpectedUID: &uid,
 	}); err != nil {
 		t.Fatal(err)
 	}

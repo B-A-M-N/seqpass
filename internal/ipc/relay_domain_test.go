@@ -419,7 +419,6 @@ func TestConcurrentHostSessionsStayIsolated(t *testing.T) {
 	}
 	defer hostB.Close()
 
-
 	uidCounter := 0
 	register := func() (string, string) {
 		t.Helper()
@@ -704,5 +703,56 @@ func TestTwoAgentHostSessionIsolation(t *testing.T) {
 		"session_id": sessB, "session_token": tokB, "request_id": reqIDA,
 	}); err == nil {
 		t.Fatal("host B cancelled another session's relay")
+	}
+}
+
+func TestRecipientSocketRoleIsolated(t *testing.T) {
+	svc := relayTestService(t)
+	dir, err := testruntime.Dir(t)
+	if err != nil {
+		testruntime.Skip(t, err)
+		return
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	agent := filepath.Join(dir, "agent.sock")
+	recipient := filepath.Join(dir, "recipient.sock")
+	uid := uint32(os.Geteuid())
+	srv := NewServer(svc, agent, "", nil, &UIDAuthorizer{
+		AdminUIDs:     map[uint32]bool{uid: true},
+		AgentUIDs:     map[uint32]bool{uid: true},
+		IntakeUIDs:    map[uint32]bool{uid: true},
+		RecipientUIDs: map[uint32]bool{uid: true},
+	})
+	srv.RecipientSocket = recipient
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	rc, err := Dial(recipient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	if _, err := rc.Call(MethodHandoffRedeem, map[string]interface{}{"ticket_id": "missing"}); err == nil || strings.Contains(err.Error(), "access denied") {
+		t.Fatalf("recipient method was not dispatched through the recipient role: %v", err)
+	}
+	if _, err := rc.Call(MethodApproveTransfer, map[string]interface{}{"op_id": "x"}); err == nil || !strings.Contains(err.Error(), "access denied") {
+		t.Fatalf("recipient socket exposed admin method: %v", err)
+	}
+	if _, err := rc.Call(MethodHandoffReceipt, map[string]interface{}{"receipt_b64": "bad"}); err == nil || !strings.Contains(err.Error(), "access denied") {
+		t.Fatalf("recipient socket exposed courier receipt relay: %v", err)
+	}
+	ac, err := Dial(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ac.Close()
+	if _, err := ac.Call(MethodHandoffRedeem, map[string]interface{}{"ticket_id": "missing"}); err == nil || !strings.Contains(err.Error(), "access denied") {
+		t.Fatalf("agent socket exposed recipient method: %v", err)
+	}
+	if _, err := ac.Call(MethodHandoffReceipt, map[string]interface{}{"receipt_b64": "bad"}); err == nil || strings.Contains(err.Error(), "access denied") {
+		t.Fatalf("agent socket did not dispatch the secret-free receipt relay method: %v", err)
 	}
 }

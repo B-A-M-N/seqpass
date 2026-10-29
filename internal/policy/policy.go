@@ -46,17 +46,17 @@ func NewEngine(db *metadata.DB) *Engine {
 }
 
 // Evaluate applies default-deny authorization against the current epoch.
-// - No matching enabled allow rule => denial.
-// - Destination-scoped rules never match an empty destination unless the
-//   operation is explicitly destinationless.
-// - DB errors => denial (never fail open).
-// - Approval-mode contract (P2-9, conservative combination): the operation
-//   is allowed when ANY enabled rule matches, but it preauthorizes only
-//   when EVERY matching rule opts into NoApproval. Any applicable rule
-//   that does not opt in forces human approval. Rule order and priority
-//   never decide the approval mode, so a broad preauthorization grant
-//   cannot silently bypass a narrower mandatory-review rule, and the same
-//   policy configuration always produces the same approval behavior.
+//   - No matching enabled allow rule => denial.
+//   - Destination-scoped rules never match an empty destination unless the
+//     operation is explicitly destinationless.
+//   - DB errors => denial (never fail open).
+//   - Approval-mode contract (P2-9, conservative combination): the operation
+//     is allowed when ANY enabled rule matches, but it preauthorizes only
+//     when EVERY matching rule opts into NoApproval. Any applicable rule
+//     that does not opt in forces human approval. Rule order and priority
+//     never decide the approval mode, so a broad preauthorization grant
+//     cannot silently bypass a narrower mandatory-review rule, and the same
+//     policy configuration always produces the same approval behavior.
 func (e *Engine) Evaluate(req Request) (Decision, error) {
 	epoch, err := e.db.CurrentEpoch()
 	if err != nil {

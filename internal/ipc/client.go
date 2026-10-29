@@ -45,8 +45,9 @@ func (c *Client) Close() error {
 	return c.conn.Close()
 }
 
-// Call performs one IPC round-trip. No secret material may appear in params;
-// the broker never returns plaintext. Bounded by defaultCallTimeout.
+// Call performs one IPC round-trip. No secret material may appear in params.
+// Plaintext is returned only by handoff.redeem on the authenticated recipient
+// socket; callers must keep that response inside the recipient process.
 func (c *Client) Call(method string, params map[string]interface{}) (interface{}, error) {
 	return c.CallCtx(context.Background(), method, params)
 }

@@ -21,6 +21,9 @@ func (s *Service) resolveSource(secretRef string) (types.SecretSource, error) {
 	if _, ok := relayIDOf(secretRef); ok {
 		return types.SecretSource{Kind: types.SourceEphemeral, Ref: secretRef}, nil
 	}
+	if s.cfg.VaultType == "relay-only" {
+		return types.SecretSource{}, fmt.Errorf("relay-only accepts relay IDs only; persistent credential references require AegisKeys")
+	}
 	sr, err := s.db.GetSecretRef(secretRef)
 	if err != nil {
 		return types.SecretSource{}, err
@@ -50,6 +53,9 @@ func (s *Service) resolveSource(secretRef string) (types.SecretSource, error) {
 		return types.SecretSource{Kind: types.SourceEphemeral, Ref: TransientRefPrefix + sr.ID, UseOnce: true}, nil
 	}
 	if sr.Binding != "" {
+		if s.cfg.VaultType == "relay-only" {
+			return types.SecretSource{}, fmt.Errorf("relay-only has no persistent credential backend; AegisKeys bindings are unavailable")
+		}
 		src := types.SecretSource{Kind: types.SourceAegisKeys, Binding: sr.Binding}
 		// P0-3 rebind protection: provisioned refs carry their stable
 		// provider identity on EVERY authorized resolve, so a later
@@ -62,7 +68,7 @@ func (s *Service) resolveSource(secretRef string) (types.SecretSource, error) {
 		return src, nil
 	}
 	if s.cfg.VaultType != "memory-test" && s.cfg.VaultType != "memory" {
-		return types.SecretSource{}, fmt.Errorf("ephemeral intake is development-only (memory-test); production refs require an AegisKeys binding")
+		return types.SecretSource{}, fmt.Errorf("persistent credential references require AegisKeys; relay-only supports one-time relays only")
 	}
 	return types.SecretSource{Kind: types.SourceEphemeral, Ref: secretRef}, nil
 }
@@ -93,6 +99,9 @@ func validateDriverParams(op string, params map[string]string) (secureops.Operat
 // SubmitUse validates + authorizes, then creates requested/pending_approval.
 // Principal must be broker-authenticated. Never auto-marks authorized.
 func (s *Service) SubmitUse(principal string, req *types.UseRequest) (string, error) {
+	if s.cfg.VaultType == "relay-only" {
+		return "", errors.New("relay-only supports protected handoffs only; credentialed operations require the AegisKeys backend")
+	}
 	if principal == "" {
 		return "", errors.New("missing principal")
 	}
@@ -207,6 +216,13 @@ func (s *Service) SubmitTransfer(principal string, req *types.TransferRequest) (
 		return "", errors.New("unknown destination")
 	}
 
+	if dest.HandoffMode == types.HandoffRecipientPull || dest.HandoffMode == types.HandoffSealedCapsule {
+		target := dest.CredentialTarget
+		if target == nil || target.SourceRef != req.SecretRef || target.SourceRevision <= 0 {
+			s.audit("", "secret_transfer_denied", principal, req.DestinationID, "recipient-target-source-mismatch")
+			return "", errors.New("recipient target is not registered for this credential source")
+		}
+	}
 	src, err := s.resolveSource(req.SecretRef)
 	if err != nil {
 		return "", err
@@ -218,6 +234,9 @@ func (s *Service) SubmitTransfer(principal string, req *types.TransferRequest) (
 	// policy rule required. The grant scopes agent, recipient,
 	// deadline and budget; admission revalidates all of it per op.
 	if relayID, ok := relayIDOf(req.SecretRef); ok {
+		if dest.HandoffMode == types.HandoffRecipientPull || dest.HandoffMode == types.HandoffSealedCapsule {
+			return "", errors.New("relay credentials do not support recipient handoffs")
+		}
 		return s.submitRelayTransfer(principal, req, relayID, dest)
 	}
 

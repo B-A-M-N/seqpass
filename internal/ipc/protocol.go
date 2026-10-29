@@ -34,8 +34,13 @@ const (
 	MethodExecuteTransfer = "admin.execute_transfer"
 	MethodOpShow          = "admin.op_show"        // reviewed-envelope display for approval (SC-02)
 	MethodVerifyOutcome   = "admin.verify_outcome" // independent postcondition check (SC-14)
-	MethodRecipientStatus = "recipient.status"     // recipient acceptance/application readback (CV-10)
-	MethodAttestPublic    = "admin.attest_public"  // P0-1: executor attest public key (admin only)
+	MethodRecipientStatus = "recipient.status"
+	MethodHandoffIssue    = "handoff.issue"
+	MethodHandoffRetrieve = "handoff.retrieve"
+	MethodHandoffRedeem   = "handoff.redeem"
+	MethodHandoffComplete = "handoff.complete"    // recipient acceptance/application readback (CV-10)
+	MethodHandoffReceipt  = "handoff.receipt"     // relay recipient-signed offline capsule receipt
+	MethodAttestPublic    = "admin.attest_public" // P0-1: executor attest public key (admin only)
 	// P0-3: trusted-intake credential persistence. Values cross ONLY the
 	// intake/admin sockets (trusted plaintext domains); the agent
 	// allowlist never admits these.
@@ -77,6 +82,7 @@ const (
 	RoleIntake
 	RoleAdmin
 	RoleHost
+	RoleRecipient
 )
 
 // AgentAllowlist is the untrusted harness-facing surface. No plaintext intake
@@ -104,9 +110,19 @@ var AgentAllowlist = map[string]bool{
 	MethodStatus:          true,
 	MethodOpsMine:         true,
 	MethodRecipientStatus: true,
+	MethodHandoffIssue:    true,
+	MethodHandoffRetrieve: true,
+	MethodHandoffReceipt:  true,
 	MethodRelayRequest:    true,
 	MethodRelayStatus:     true,
 	MethodRelayCancel:     true,
+	MethodHealth:          true,
+}
+
+// RecipientAllowlist is the narrowly scoped application handoff channel.
+var RecipientAllowlist = map[string]bool{
+	MethodHandoffRedeem:   true,
+	MethodHandoffComplete: true,
 	MethodHealth:          true,
 }
 
@@ -170,6 +186,8 @@ var AdminAllowlist = map[string]bool{
 	MethodOpShow:            true,
 	MethodVerifyOutcome:     true,
 	MethodRecipientStatus:   true,
+	MethodHandoffIssue:      true,
+	MethodHandoffRetrieve:   true,
 	MethodHealth:            true,
 	// P0-1: the operator retrieves the broker's attest public key to pin
 	// it in the AegisKeys grant (attest_key). Admin-only by construction:

@@ -28,8 +28,8 @@ func writeConfigFile(t *testing.T, dir, content string) string {
 func TestLoadSystemScopedConfigOverlaysFile(t *testing.T) {
 	dir := t.TempDir()
 	path := writeConfigFile(t, dir, `{
-		"socket_path": "/run/seqpass/broker.sock",
-		"intake_socket": "/run/seqpass/broker.sock.intake",
+		"socket_path": "/run/seqpass-agent/broker.sock",
+		"intake_socket": "/run/seqpass/intake.sock",
 		"vault": "aegiskeys",
 		"agent_uids": [2001, 2002],
 		"socket_group": "seqpass-agents",
@@ -39,14 +39,14 @@ func TestLoadSystemScopedConfigOverlaysFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.SocketPath != "/run/seqpass/broker.sock" {
+	if d.SocketPath != "/run/seqpass-agent/broker.sock" {
 		t.Fatalf("socket = %q", d.SocketPath)
 	}
-	if d.IntakeSocket != "/run/seqpass/broker.sock.intake" {
+	if d.IntakeSocket != "/run/seqpass/intake.sock" {
 		t.Fatalf("intake = %q", d.IntakeSocket)
 	}
-	// The untouched system default must survive: /run/seqpass/broker.sock.admin.
-	if d.AdminSocket != "/run/seqpass/broker.sock.admin" {
+	// The untouched system default must survive in the trusted socket directory.
+	if d.AdminSocket != "/run/seqpass/admin.sock" {
 		t.Fatalf("admin = %q", d.AdminSocket)
 	}
 	if d.DBPath != filepath.Join(SystemStateDir, "metadata.db") {
@@ -173,5 +173,26 @@ func TestRenderConfigRoundTripWithoutSecrets(t *testing.T) {
 		got.VaultType != d.VaultType || got.SocketGroup != d.SocketGroup ||
 		len(got.AgentUIDs) != 1 || got.AgentUIDs[0] != 2001 {
 		t.Fatalf("round trip lost configuration: %+v vs %+v", got, d)
+	}
+}
+
+func TestRecipientSettingsRoundTrip(t *testing.T) {
+	d := Deployment{
+		DBPath: "/var/lib/seqpass/metadata.db", SocketPath: "/run/seqpass/broker.sock",
+		AdminSocket: "/run/seqpass/admin.sock", IntakeSocket: "/run/seqpass/intake.sock",
+		RecipientSocket: "/run/seqpass/recipient.sock", RecipientUIDs: []uint32{2101, 2102},
+		RecipientGroup: "seqpass-recipients",
+	}
+	raw, err := RenderConfig(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := writeConfigFile(t, t.TempDir(), string(raw))
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RecipientSocket != d.RecipientSocket || got.RecipientGroup != d.RecipientGroup || len(got.RecipientUIDs) != 2 || got.RecipientUIDs[1] != 2102 {
+		t.Fatalf("recipient settings did not round trip: %+v", got)
 	}
 }

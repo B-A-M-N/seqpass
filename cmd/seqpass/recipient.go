@@ -24,6 +24,18 @@ import (
 // There is no mode that echoes the secret to stdout.
 
 func recipientCmd(args []string) {
+	if len(args) > 0 && args[0] == "capsule" {
+		recipientCapsuleCmd(args[1:])
+		return
+	}
+	if len(args) > 0 && args[0] == "keys" {
+		recipientKeysCmd(args[1:])
+		return
+	}
+	if len(args) > 0 && args[0] == "handoff" {
+		recipientHandoffCmd(args[1:])
+		return
+	}
 	fs := flag.NewFlagSet("recipient", flag.ExitOnError)
 	sock := fs.String("socket", "", "recipient Unix socket path (required)")
 	journalDir := fs.String("journal", "", "durable plaintext-free operation journal directory (required)")

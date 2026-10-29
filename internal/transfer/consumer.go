@@ -22,6 +22,8 @@ import (
 	"regexp"
 	"sync"
 	"time"
+
+	"github.com/secretbridge/secretbridge/internal/types"
 )
 
 // DeliveryState is the closed, typed vocabulary a consumer reports for one
@@ -66,6 +68,7 @@ type Delivery struct {
 	OperationID string
 	DataKind    string
 	Payload     []byte
+	Target      *types.AppCredentialTarget
 }
 
 // Acceptance is the consumer's answer for one Accept call. State is the
@@ -108,9 +111,16 @@ type Committed struct {
 // perform one permitted credentialed action. It contains no broker state.
 type CredentialCommitter interface {
 	// Commit commits the delivery. It must be idempotent for a repeated
-	// (OperationID, digest) pair. A nil error with applied == false means
-	// the secret was durably stored but application was not verified.
+	// (OperationID, digest, target) tuple. A nil error with applied == false
+	// means the secret was durably stored but application was not verified.
 	Commit(ctx context.Context, delivery Delivery) (Committed, error)
+}
+
+// CredentialReconciler inspects a previously received delivery after a
+// crash. It must never repeat the original write; it may report Applied only
+// after readback verifies the exact operation's credential effect.
+type CredentialReconciler interface {
+	Reconcile(ctx context.Context, delivery Delivery) (Committed, error)
 }
 
 var (
@@ -180,12 +190,19 @@ type DigestReporter interface {
 // operation. It never contains the secret or a low-entropy derivative of
 // it: Digest is the sha256 the broker already puts on the trusted wire.
 type JournalEntry struct {
-	OperationID string        `json:"operation_id"`
-	DataKind    string        `json:"data_kind,omitempty"`
-	Digest      string        `json:"digest"`
-	State       DeliveryState `json:"state"`
-	Applied     bool          `json:"applied"`
-	UpdatedAt   time.Time     `json:"updated_at"`
+	OperationID        string        `json:"operation_id"`
+	ByteCount          int           `json:"byte_count,omitempty"`
+	DataKind           string        `json:"data_kind,omitempty"`
+	Digest             string        `json:"digest"`
+	TargetDigest       string        `json:"target_digest,omitempty"`
+	ReceiptDigest      string        `json:"receipt_digest,omitempty"`
+	ReceiptBytes       int           `json:"receipt_bytes,omitempty"`
+	ReceiptOperationID string        `json:"receipt_operation_id,omitempty"`
+	ReceiptHandoffID   string        `json:"receipt_handoff_id,omitempty"`
+	RecipientReceipt   []byte        `json:"recipient_receipt,omitempty"`
+	State              DeliveryState `json:"state"`
+	Applied            bool          `json:"applied"`
+	UpdatedAt          time.Time     `json:"updated_at"`
 }
 
 // OperationJournal is a durable, plaintext-free record store keyed by a
@@ -201,8 +218,8 @@ func NewOperationJournal(dir string) (*OperationJournal, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("operation journal directory required")
 	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return nil, fmt.Errorf("operation journal create: %w", err)
+	if err := ensureOperationJournalDir(dir); err != nil {
+		return nil, fmt.Errorf("operation journal directory: %w", err)
 	}
 	return &OperationJournal{dir: dir}, nil
 }
@@ -279,7 +296,15 @@ func (j *OperationJournal) Upsert(entry JournalEntry) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	dir, err := os.Open(j.dir)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 // List returns every journaled entry (bounded by the caller).
@@ -311,6 +336,19 @@ func (j *OperationJournal) List() ([]JournalEntry, error) {
 // operation and commits the secret through a destination-specific
 // CredentialCommitter. It reports StateApplied only when the committer
 // verifies the intended effect; otherwise it reports StateDurablyAccepted.
+
+func appTargetDigest(target *types.AppCredentialTarget) (string, error) {
+	if target == nil {
+		return "", nil
+	}
+	b, err := json.Marshal(target)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:]), nil
+}
+
 type ApplicationConsumer struct {
 	journal    *OperationJournal
 	committer  CredentialCommitter
@@ -332,7 +370,16 @@ func NewApplicationConsumer(journal *OperationJournal, committer CredentialCommi
 // is acknowledged idempotently without repeating the side effect; a repeated
 // operation id with a different digest is refused.
 func (c *ApplicationConsumer) Accept(ctx context.Context, d Delivery) (Acceptance, error) {
+	unlock, err := c.journal.lockOperation(d.OperationID)
+	if err != nil {
+		return Acceptance{OperationID: d.OperationID, State: StateRejected}, err
+	}
+	defer unlock()
 	digest := PayloadDigest(d.Payload)
+	targetDigest, err := appTargetDigest(d.Target)
+	if err != nil {
+		return Acceptance{OperationID: d.OperationID, State: StateRejected}, err
+	}
 	if err := ValidateDelivery(d, digest); err != nil {
 		return Acceptance{OperationID: d.OperationID, State: StateRejected}, err
 	}
@@ -341,30 +388,40 @@ func (c *ApplicationConsumer) Accept(ctx context.Context, d Delivery) (Acceptanc
 		return Acceptance{OperationID: d.OperationID, State: StateRejected}, err
 	}
 	if ok {
-		if existing.Digest != digest {
-			return Acceptance{
-				OperationID: d.OperationID,
-				DataKind:    existing.DataKind,
-				Digest:      existing.Digest,
-				State:       existing.State,
-			}, ErrOperationConflict
+		if existing.Digest != digest || existing.TargetDigest != targetDigest {
+			return Acceptance{OperationID: d.OperationID, DataKind: existing.DataKind, Digest: existing.Digest, State: existing.State}, ErrOperationConflict
 		}
-		// Idempotent replay: report the state already reached, no re-commit.
-		return Acceptance{
-			OperationID: d.OperationID,
-			DataKind:    existing.DataKind,
-			Digest:      existing.Digest,
-			State:       existing.State,
-			Duplicate:   true,
-		}, nil
+		// Terminal states are safe idempotent acknowledgments. A received
+		// state is ambiguous after a crash, so only a read-only reconciler may
+		// settle it; the original write is never blindly replayed.
+		if existing.State == StateReceived {
+			if reconciler, ok := c.committer.(CredentialReconciler); ok {
+				committed, err := reconciler.Reconcile(ctx, d)
+				if err != nil {
+					return Acceptance{OperationID: d.OperationID, DataKind: existing.DataKind, Digest: digest, State: StateReceived, Duplicate: true}, err
+				}
+				if committed.Digest != "" && committed.Digest != digest {
+					return Acceptance{OperationID: d.OperationID, DataKind: existing.DataKind, Digest: digest, State: StateReceived, Duplicate: true}, invalid("reconciler reported a different payload digest")
+				}
+				if committed.Applied {
+					existing.State, existing.Applied, existing.UpdatedAt = StateApplied, true, time.Now().UTC()
+					if err := c.journal.Upsert(existing); err != nil {
+						return Acceptance{OperationID: d.OperationID, DataKind: existing.DataKind, Digest: digest, State: StateReceived, Duplicate: true}, err
+					}
+				}
+			}
+		}
+		return Acceptance{OperationID: d.OperationID, DataKind: existing.DataKind, Digest: existing.Digest, State: existing.State, Duplicate: true}, nil
 	}
 	// Record receipt before the (possibly slow, possibly external) commit so
 	// a crash mid-commit is visible for reconciliation rather than silent.
 	if err := c.journal.Upsert(JournalEntry{
-		OperationID: d.OperationID,
-		DataKind:    d.DataKind,
-		Digest:      digest,
-		State:       StateReceived,
+		OperationID:  d.OperationID,
+		ByteCount:    len(d.Payload),
+		DataKind:     d.DataKind,
+		Digest:       digest,
+		TargetDigest: targetDigest,
+		State:        StateReceived,
 	}); err != nil {
 		return Acceptance{OperationID: d.OperationID, State: StateRejected}, err
 	}
@@ -393,11 +450,13 @@ func (c *ApplicationConsumer) Accept(ctx context.Context, d Delivery) (Acceptanc
 		state = StateApplied
 	}
 	if err := c.journal.Upsert(JournalEntry{
-		OperationID: d.OperationID,
-		DataKind:    d.DataKind,
-		Digest:      digest,
-		State:       state,
-		Applied:     committed.Applied,
+		OperationID:  d.OperationID,
+		ByteCount:    len(d.Payload),
+		DataKind:     d.DataKind,
+		Digest:       digest,
+		TargetDigest: targetDigest,
+		State:        state,
+		Applied:      committed.Applied,
 	}); err != nil {
 		return Acceptance{
 			OperationID: d.OperationID,
@@ -530,66 +589,66 @@ func (c *CallbackCommitter) Commit(ctx context.Context, d Delivery) (Committed, 
 	return c.Fn(ctx, d)
 }
 
-// FileCommitter durably commits a secret to an owner-only file and verifies
-// the intended effect by reading the file back and comparing digests. It is
-// the reference "securely store it" consumer used by the privileged
-// qualification harness: the destination directory must be 0700 and the file
-// is written 0600 with fsync before rename.
+// FileCommitter stores credential bytes as plaintext in an owner-only file.
+// This can be appropriate for a recipient's trusted application storage, but
+// it is not encrypted-at-rest storage and is not equivalent to AegisKeys.
+// The directory is pinned by device/inode, opened without following symlinks,
+// and every commit uses descriptor-relative operations.
 type FileCommitter struct {
 	dir string
+	dev uint64
+	ino uint64
 }
 
-// NewFileCommitter creates the destination directory (0700).
+// NewFileCommitter creates a missing private directory and validates an
+// existing one. The final directory must belong to the current UID and have
+// no group/other permissions. Symlinks anywhere in its path are rejected.
 func NewFileCommitter(dir string) (*FileCommitter, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("file committer directory required")
 	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	dirFD, canonical, dev, ino, err := openSecureCommitDir(dir)
+	if err != nil {
 		return nil, err
 	}
-	return &FileCommitter{dir: dir}, nil
+	closeCommitDir(dirFD)
+	return &FileCommitter{dir: canonical, dev: dev, ino: ino}, nil
 }
 
-// Commit writes the payload to <dir>/<operation-id>.secret and verifies the
-// digest by reading it back.
+// Commit writes <operation-id>.secret without replacing an existing file,
+// fsyncs both file and directory, and verifies the committed bytes by digest.
 func (f *FileCommitter) Commit(ctx context.Context, d Delivery) (Committed, error) {
+	if err := ctx.Err(); err != nil {
+		return Committed{}, err
+	}
 	digest := PayloadDigest(d.Payload)
 	if err := ValidateDelivery(d, digest); err != nil {
 		return Committed{}, err
 	}
-	path := filepath.Join(f.dir, d.OperationID+".secret")
-	tmp, err := os.CreateTemp(f.dir, ".commit-*.tmp")
+	dirFD, _, dev, ino, err := openSecureCommitDir(f.dir)
 	if err != nil {
 		return Committed{}, err
 	}
-	tmpName := tmp.Name()
-	defer func() {
-		_ = os.Remove(tmpName)
-		_ = tmp.Close()
-	}()
-	if err := tmp.Chmod(0600); err != nil {
-		return Committed{}, err
+	defer closeCommitDir(dirFD)
+	if dev != f.dev || ino != f.ino {
+		return Committed{}, fmt.Errorf("credential destination directory changed after initialization")
 	}
-	if _, err := tmp.Write(d.Payload); err != nil {
-		return Committed{}, err
-	}
-	if err := tmp.Sync(); err != nil {
-		return Committed{}, err
-	}
-	if err := tmp.Close(); err != nil {
-		return Committed{}, err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return Committed{}, err
-	}
-	// Independently verify the intended effect: the destination now holds
-	// exactly the digest that was committed.
-	readback, err := os.ReadFile(path)
+	name := d.OperationID + ".secret"
+	created, err := writeCommitFileAt(dirFD, name, d.Payload)
 	if err != nil {
-		return Committed{}, fmt.Errorf("verify readback: %w", err)
+		return Committed{}, err
+	}
+	// Existing identical operation files are idempotent; a different payload
+	// under the same operation ID is a conflict, never an overwrite.
+	readback, err := readCommitFileAt(dirFD, name, len(d.Payload))
+	if err != nil {
+		return Committed{}, fmt.Errorf("verify committed file: %w", err)
 	}
 	if got := PayloadDigest(readback); got != digest {
-		return Committed{Digest: got}, fmt.Errorf("readback digest mismatch")
+		if created {
+			return Committed{Digest: got}, fmt.Errorf("readback digest mismatch")
+		}
+		return Committed{Digest: got}, fmt.Errorf("destination already contains different credential bytes")
 	}
 	return Committed{Applied: true, Digest: digest}, nil
 }

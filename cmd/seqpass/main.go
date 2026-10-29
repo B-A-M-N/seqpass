@@ -7,7 +7,9 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -18,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/secretbridge/secretbridge/internal/approval"
+	"github.com/secretbridge/secretbridge/internal/capsule"
 	"github.com/secretbridge/secretbridge/internal/config"
 	"github.com/secretbridge/secretbridge/internal/daemon"
 	"github.com/secretbridge/secretbridge/internal/ipc"
@@ -33,7 +36,8 @@ import (
 // command so a client cannot talk to a different installation than the
 // broker it was started with.
 func defaultPaths() (db, sock, admin, intake string) {
-	return config.Paths()
+	d := loadBase()
+	return d.DBPath, d.SocketPath, d.AdminSocket, d.IntakeSocket
 }
 
 // loadBase resolves the installation-wide configuration (config file +
@@ -94,8 +98,8 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, "seqpass - native secret broker for coding harnesses")
 	fmt.Fprintln(os.Stderr, "Usage:")
-	fmt.Fprintln(os.Stderr, "  seqpass broker --vault aegiskeys [--assurance best-effort|isolated] [--db PATH] [--socket PATH] [--admin-uid UID,...] [--agent-uid UID,...] [--intake-uid UID,...] [--intake-group GROUP] [--host-socket PATH] [--auto-execute]")
-	fmt.Fprintln(os.Stderr, "  seqpass broker --vault memory-test --dev  # development only, never production")
+	fmt.Fprintln(os.Stderr, "  seqpass broker --vault aegiskeys --aegiskeys-resolve-helper PATH --aegiskeys-resolve-helper-sha256 SHA256 [--assurance isolated] [--db PATH] [--socket PATH] [--admin-uid UID,...] [--agent-uid UID,...] [--intake-uid UID,...] [--intake-group GROUP] [--host-socket PATH] [--auto-execute]")
+	fmt.Fprintln(os.Stderr, "  seqpass broker --vault relay-only --assurance isolated  # production relay service without a credential backend")
 	fmt.Fprintln(os.Stderr, "  seqpass mcp [--socket PATH]   # stdio adapter; register in Codex/Claude/Hermes")
 	fmt.Fprintln(os.Stderr, "  seqpass admin <catalog|pending|show|approve|reject|add-secret|add-dest|add-policy|set-policy|update-dest|execute|host-binding> ...")
 	fmt.Fprintln(os.Stderr, "  seqpass relay <inbox|fulfill|status|cancel|request|credential-save> ...  # trusted human handoff (intake socket)")
@@ -122,28 +126,34 @@ func brokerCmd(args []string) {
 	sockF := fs.String("socket", base.SocketPath, "Broker socket")
 	adminF := fs.String("admin-socket", base.AdminSocket, "Admin socket")
 	intakeF := fs.String("intake-socket", base.IntakeSocket, "Trusted human intake socket (owner-only unless --intake-group is set)")
-	intakeUIDs := fs.String("intake-uid", "", "comma-separated human intake UIDs (default: admin UIDs; list agent UIDs here only for same-user best-effort mode)")
-	intakeGroup := fs.String("intake-group", "", "optional trusted intake socket group; must differ from agent group and exclude agent UIDs")
-	hostF := fs.String("host-socket", "", "optional display-only native-host adapter socket; owner-only, separate directory required")
-	vaultF := fs.String("vault", "", "required: aegiskeys|memory-test")
-	devF := fs.Bool("dev", false, "allow memory-test ephemeral vault (development only, never production)")
-	autoF := fs.Bool("auto-execute", false, "run trusted worker executing authorized ops without manual admin execute")
-	noRelayF := fs.Bool("no-relay-auto-deliver", false, "disable the default broker-managed relay delivery queue (F05); with it set, fulfilled relays need --auto-execute or manual admin execute")
-	aegisSock := fs.String("aegiskeys-socket", "", "AegisKeys broker socket")
-	aegisDir := fs.String("aegiskeys-dir", "", "AegisKeys config dir")
+	recipientF := fs.String("recipient-socket", base.RecipientSocket, "optional recipient-only ticket redemption socket")
+	recipientUIDs := fs.String("recipient-uid", joinUIDs(base.RecipientUIDs), "comma-separated registered application recipient UIDs")
+	recipientGroup := fs.String("recipient-group", base.RecipientGroup, "optional recipient Unix group for cross-UID access")
+	intakeUIDs := fs.String("intake-uid", joinUIDs(base.IntakeUIDs), "comma-separated human intake UIDs (default: admin UIDs; list agent UIDs here only for same-user best-effort mode)")
+	intakeGroup := fs.String("intake-group", base.IntakeGroup, "optional trusted intake socket group; must differ from agent group and exclude agent UIDs")
+	hostF := fs.String("host-socket", base.HostSocket, "optional display-only native-host adapter socket; owner-only, separate directory required")
+	vaultF := fs.String("vault", base.VaultType, "required: aegiskeys|relay-only|memory-test")
+	devF := fs.Bool("dev", base.Dev, "allow memory-test ephemeral vault (development only, never production)")
+	autoF := fs.Bool("auto-execute", base.AutoExecute, "run trusted worker executing authorized ops without manual admin execute")
+	noRelayF := fs.Bool("no-relay-auto-deliver", base.NoRelayAutoDeliver, "disable the default broker-managed relay delivery queue (F05); with it set, fulfilled relays need --auto-execute or manual admin execute")
+	aegisSock := fs.String("aegiskeys-socket", base.AegisKeysSocket, "AegisKeys broker socket")
+	aegisDir := fs.String("aegiskeys-dir", base.AegisKeysDir, "AegisKeys config dir")
 	// P0-1: trusted credential-resolution helper (isolated deployments).
 	// Operator configuration only — never agent-supplied.
-	helperF := fs.String("aegiskeys-resolve-helper", "", "trusted resolve helper executable (short-lived dumpable process for AegisKeys peer verification); empty = in-process resolve")
+	helperF := fs.String("aegiskeys-resolve-helper", base.AegisKeysResolveHelper, "trusted resolve helper executable (required for isolated AegisKeys)")
+	helperHashF := fs.String("aegiskeys-resolve-helper-sha256", base.AegisKeysResolveHelperSHA256, "expected SHA-256 of the trusted resolve helper executable (required for isolated AegisKeys)")
 	// P0-1 restart strategy, stable-key mode: the attest seed is read from
 	// a provisioned secret file (systemd LoadCredentialEncrypted credential
 	// or a root-owned 0400 file) and never persisted or logged by SeqPass.
 	attestSeedF := fs.String("aegiskeys-attest-seed", "", "path to the 32-byte executor attest seed (systemd encrypted credential or root-owned 0400 file); enables the stable-key restart mode where the grant's attest_key pin survives restarts; empty = fresh key per start with rotation detection")
-	adminUIDs := fs.String("admin-uid", "", "comma-separated admin UIDs (default: broker euid)")
-	agentUIDs := fs.String("agent-uid", "", "comma-separated approved agent UIDs (default: broker euid only)")
-	sockGroup := fs.String("socket-group", "", "agent Unix group owning the agent socket+dir (required for multi-user deployments)")
-	opTTL := fs.Duration("default-op-ttl", 0, "approval window for new requests (default 5m, clamped 1m-24h)")
-	maxConc := fs.Int("max-concurrent-ops", 4, "auto-worker execution pool size (1-32)")
-	assurance := fs.String("assurance", "", "topology label: empty (production default: isolated), isolated, or best-effort (development only, always reported unverified)")
+	handoffKeyIDF := fs.String("handoff-signing-key-id", "", "operator-pinned Ed25519 issuer identity for sealed handoff capsules")
+	handoffSeedF := fs.String("handoff-signing-seed", "", "path to the separate 32-byte sealed-handoff Ed25519 seed (private 0400 file)")
+	adminUIDs := fs.String("admin-uid", joinUIDs(base.AdminUIDs), "comma-separated admin UIDs (default: broker euid)")
+	agentUIDs := fs.String("agent-uid", joinUIDs(base.AgentUIDs), "comma-separated approved agent UIDs (default: broker euid only)")
+	sockGroup := fs.String("socket-group", base.SocketGroup, "agent Unix group owning the agent socket+dir (required for multi-user deployments)")
+	opTTL := fs.Duration("default-op-ttl", base.DefaultOpTTL, "approval window for new requests (default 5m, clamped 1m-24h)")
+	maxConc := fs.Int("max-concurrent-ops", base.MaxConcurrentOps, "auto-worker execution pool size (1-32)")
+	assurance := fs.String("assurance", base.AssuranceMode, "topology label: empty (production default: isolated), isolated, or best-effort (development only, always reported unverified)")
 	_ = fs.Parse(args)
 
 	// F15/§11: the broker holds relay payloads in memory. A crash must
@@ -157,7 +167,7 @@ func brokerCmd(args []string) {
 
 	// Explicit provider configuration (C14): no silent ephemeral vault.
 	if *vaultF == "" {
-		fmt.Fprintln(os.Stderr, "broker requires --vault aegiskeys (production) or --vault memory-test --dev (development only)")
+		fmt.Fprintln(os.Stderr, "broker requires --vault aegiskeys or --vault relay-only (production), or --vault memory-test --dev (development only)")
 		os.Exit(1)
 	}
 	if *vaultF == "memory-test" || *vaultF == "memory" {
@@ -172,27 +182,34 @@ func brokerCmd(args []string) {
 	// Objective 8: UID lists fail closed. A malformed or duplicated UID is a
 	// startup error, never a silently narrowed identity set.
 	intakeUIDList := mustUIDs("intake-uid", *intakeUIDs)
+	recipientUIDList := mustUIDs("recipient-uid", *recipientUIDs)
 	adminUIDList := mustUIDs("admin-uid", *adminUIDs)
 	agentUIDList := mustUIDs("agent-uid", *agentUIDs)
 	d, err := daemon.New(daemon.Config{
-		AssuranceMode: *assurance,
-		DBPath:        *dbF,
-		VaultType:     *vaultF,
-		SocketPath:    *sockF,
-		AdminSocket:   *adminF,
-		IntakeSocket:  *intakeF,
-		HostSocket:    *hostF,
-		IntakeUIDs:    intakeUIDList,
-		AdminUIDs:     adminUIDList,
-		AgentUIDs:     agentUIDList, SocketGroup: *sockGroup, AegisKeysSocket: *aegisSock,
-		IntakeGroup:             *intakeGroup,
-		NoRelayAutoDeliver:      *noRelayF,
-		AegisKeysDir:            *aegisDir,
-		AegisKeysResolveHelper:  *helperF,
-		AegisKeysAttestSeedPath: *attestSeedF,
-		AutoExecute:             *autoF,
-		DefaultOpTTL:            *opTTL,
-		MaxConcurrentOps:        *maxConc,
+		AssuranceMode:   *assurance,
+		DBPath:          *dbF,
+		VaultType:       *vaultF,
+		SocketPath:      *sockF,
+		AdminSocket:     *adminF,
+		IntakeSocket:    *intakeF,
+		RecipientSocket: *recipientF,
+		RecipientUIDs:   recipientUIDList,
+		RecipientGroup:  *recipientGroup,
+		HostSocket:      *hostF,
+		IntakeUIDs:      intakeUIDList,
+		AdminUIDs:       adminUIDList,
+		AgentUIDs:       agentUIDList, SocketGroup: *sockGroup, AegisKeysSocket: *aegisSock,
+		IntakeGroup:                  *intakeGroup,
+		NoRelayAutoDeliver:           *noRelayF,
+		AegisKeysDir:                 *aegisDir,
+		AegisKeysResolveHelper:       *helperF,
+		AegisKeysResolveHelperSHA256: *helperHashF,
+		AegisKeysAttestSeedPath:      *attestSeedF,
+		HandoffSigningKeyID:          *handoffKeyIDF,
+		HandoffSigningSeedPath:       *handoffSeedF,
+		AutoExecute:                  *autoF,
+		DefaultOpTTL:                 *opTTL,
+		MaxConcurrentOps:             *maxConc,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "broker failed: %v\n", err)
@@ -246,6 +263,20 @@ func adminCmd(args []string) {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "admin subcommands: catalog|pending|show|approve|reject|verify|recipient-status|add-secret|stage-secret|add-dest|execute|host-binding")
 		os.Exit(1)
+	}
+	if args[0] == "handoff-issuer-keygen" {
+		fs := flag.NewFlagSet("admin handoff-issuer-keygen", flag.ExitOnError)
+		privatePath := fs.String("private-seed", "", "broker-owned Ed25519 seed path (0400), separate from AegisKeys attest key")
+		publicPath := fs.String("public-key", "", "issuer public key file to provision out-of-band to recipients")
+		_ = fs.Parse(args[1:])
+		if *privatePath == "" || *publicPath == "" {
+			fatal("admin handoff-issuer-keygen --private-seed FILE --public-key FILE")
+		}
+		publicKey, err := capsule.GenerateIssuerKeys(*privatePath, *publicPath)
+		must(err)
+		fingerprint := sha256.Sum256(publicKey)
+		fmt.Printf("handoff issuer key generated; public SHA-256 %s\nprivate seed: %s\npublic key: %s\n", hex.EncodeToString(fingerprint[:]), *privatePath, *publicPath)
+		return
 	}
 	cli := adminClient()
 	defer cli.Close()
@@ -412,13 +443,69 @@ func adminCmd(args []string) {
 	case "add-dest":
 		fs := flag.NewFlagSet("add-dest", flag.ExitOnError)
 		name := fs.String("name", "", "name")
-		typ := fs.String("type", "recipient-socket", "recipient-socket | http-pinned | process-pinned | git-pinned")
+		typ := fs.String("type", "recipient-socket", "recipient-socket | sealed-capsule | http-pinned | process-pinned | git-pinned")
 		ep := fs.String("endpoint", "", "recipient-socket: unix socket path; http-pinned: pinned origin (https://host[:port]); process-pinned: absolute executable path; git-pinned: pinned git remote URL (https://host[:port]/path.git)")
 		src := fs.String("source-repo", "", "git-pinned only: absolute source repository path to pin for git.push (pushed content is a registration fact, never an agent parameter)")
-		expectUID := fs.Int("expect-uid", -1, "pinned recipient UID (recipient-socket only)")
-		expectGID := fs.Int("expect-gid", -1, "pinned recipient GID (optional, recipient-socket only)")
+		handoffMode := fs.String("handoff-mode", "direct-socket", "direct-socket|recipient-pull|sealed-capsule")
+		recipientKeyID := fs.String("recipient-key-id", "", "sealed-capsule recipient public-key identity")
+		recipientKeyFile := fs.String("recipient-public-key", "", "sealed-capsule raw 32-byte X25519 public key file")
+		receiptKeyID := fs.String("receipt-key-id", "", "recipient Ed25519 receipt key identity")
+		receiptKeyFile := fs.String("receipt-public-key", "", "raw 32-byte recipient Ed25519 receipt public key file")
+		issuerKeyID := fs.String("issuer-key-id", "", "out-of-band pinned issuer signing key identity")
+		issuerPublicFile := fs.String("issuer-public-key", "", "raw 32-byte Ed25519 issuer public key file")
+		app := fs.String("app", "", "sealed-capsule target app ID")
+		appProvider := fs.String("app-provider", "", "FI Gateway target upstream provider ID")
+		account := fs.String("account", "", "sealed-capsule target account ID")
+		slot := fs.String("slot", "", "sealed-capsule target credential slot")
+		updateMethod := fs.String("update-method", "", "sealed-capsule target adapter method")
+		sourceRef := fs.String("source-ref", "", "sealed-capsule pinned credential source ID")
+		sourceRevision := fs.Int("source-revision", 0, "sealed-capsule pinned credential source revision")
+		activation := fs.String("activation", "", "sealed-capsule target activation policy")
+		expectUID := fs.Int("expect-uid", -1, "pinned trusted recipient UID (required for recipient handoffs)")
+		expectGID := fs.Int("expect-gid", -1, "pinned recipient GID (optional, socket recipients only)")
 		_ = fs.Parse(args[1:])
-		params := map[string]interface{}{"name": *name, "type": *typ, "endpoint": *ep}
+		params := map[string]interface{}{"name": *name, "type": *typ, "endpoint": *ep, "handoff_mode": *handoffMode}
+		if *handoffMode == "recipient-pull" || *handoffMode == "sealed-capsule" {
+			if *app == "" || *account == "" || *slot == "" || *updateMethod == "" || *sourceRef == "" || *sourceRevision <= 0 {
+				fatal("recipient handoff requires --app APP --account ACCOUNT --slot SLOT --update-method METHOD --source-ref REF --source-revision N")
+			}
+			targetID := *app + ":" + *account + ":" + *slot
+			target := map[string]interface{}{"id": targetID, "app": *app, "account": *account, "slot": *slot, "update_method": *updateMethod, "source_ref": *sourceRef, "source_revision": *sourceRevision, "activation": *activation}
+			if *app == "fi-gateway" {
+				if *appProvider == "" || *slot != "api_key" {
+					fatal("FI Gateway targets require --app-provider PROVIDER and --slot api_key")
+				}
+				target["provider"] = *appProvider
+				target["id"] = "fi-gateway:" + *appProvider + ":" + *account + ":api_key"
+			}
+			params["credential_target"] = target
+		}
+		if *handoffMode == "sealed-capsule" {
+			if *recipientKeyID == "" || *recipientKeyFile == "" || *receiptKeyID == "" || *receiptKeyFile == "" || *issuerKeyID == "" || *issuerPublicFile == "" {
+				fatal("sealed-capsule requires recipient HPKE, recipient receipt, and issuer key IDs and public-key files")
+			}
+			publicKey, err := os.ReadFile(*recipientKeyFile)
+			must(err)
+			if len(publicKey) != 32 {
+				fatal("recipient public key must be a raw 32-byte X25519 key")
+			}
+			params["recipient_key_id"] = *recipientKeyID
+			params["recipient_public_key_b64"] = base64.StdEncoding.EncodeToString(publicKey)
+			receiptPublic, err := os.ReadFile(*receiptKeyFile)
+			must(err)
+			if len(receiptPublic) != 32 {
+				fatal("recipient receipt public key must be a raw 32-byte Ed25519 key")
+			}
+			params["receipt_key_id"] = *receiptKeyID
+			params["receipt_public_key_b64"] = base64.StdEncoding.EncodeToString(receiptPublic)
+			params["issuer_key_id"] = *issuerKeyID
+			issuerPublic, err := os.ReadFile(*issuerPublicFile)
+			must(err)
+			if len(issuerPublic) != 32 {
+				fatal("issuer public key must be a raw 32-byte Ed25519 key")
+			}
+			params["issuer_public_key_b64"] = base64.StdEncoding.EncodeToString(issuerPublic)
+		}
 		switch *typ {
 		case "recipient-socket":
 			if *name == "" || *ep == "" || *expectUID < 0 {
@@ -428,6 +515,11 @@ func adminCmd(args []string) {
 			if *expectGID >= 0 {
 				params["expected_gid"] = *expectGID
 			}
+		case "sealed-capsule":
+			if *name == "" || *expectUID < 0 {
+				fatal("add-dest --name N --type sealed-capsule --expect-uid UID --handoff-mode sealed-capsule")
+			}
+			params["expected_uid"] = *expectUID
 		case "http-pinned":
 			if *name == "" || *ep == "" {
 				fatal("add-dest --name N --type http-pinned --endpoint https://host[:port]")
@@ -477,16 +569,78 @@ func adminCmd(args []string) {
 		ep := fs.String("endpoint", "", "new recipient socket path")
 		expectUID := fs.Int("expect-uid", -1, "re-pin recipient UID")
 		expectGID := fs.Int("expect-gid", -1, "re-pin recipient GID")
+		handoffMode := fs.String("handoff-mode", "", "direct-socket|recipient-pull|sealed-capsule (rotates target/key and invalidates approvals)")
+		recipientKeyID := fs.String("recipient-key-id", "", "new sealed-capsule recipient key ID")
+		recipientKeyFile := fs.String("recipient-public-key", "", "new raw 32-byte X25519 public-key file")
+		receiptKeyID := fs.String("receipt-key-id", "", "new recipient Ed25519 receipt key ID")
+		receiptKeyFile := fs.String("receipt-public-key", "", "new raw 32-byte recipient Ed25519 receipt public-key file")
+		issuerKeyID := fs.String("issuer-key-id", "", "new sealed-capsule issuer key ID")
+		issuerPublicFile := fs.String("issuer-public-key", "", "new raw 32-byte Ed25519 issuer public-key file")
+		app := fs.String("app", "", "registered target app ID")
+		appProvider := fs.String("app-provider", "", "FI Gateway target upstream provider ID")
+		account := fs.String("account", "", "registered target account ID")
+		slot := fs.String("slot", "", "registered target credential slot")
+		updateMethod := fs.String("update-method", "", "registered target adapter method")
+		sourceRef := fs.String("source-ref", "", "registered source reference")
+		sourceRevision := fs.Int("source-revision", 0, "registered source revision")
+		activation := fs.String("activation", "", "registered target activation policy")
 		_ = fs.Parse(args[1:])
-		if *id == "" || *ep == "" {
-			fatal("update-dest --id ID --endpoint SOCK [--expect-uid UID] (invalidates outstanding approvals)")
+		if *id == "" || (*ep == "" && *handoffMode == "") {
+			fatal("update-dest --id ID (--endpoint SOCK | --handoff-mode MODE ...)")
 		}
-		params := map[string]interface{}{"id": *id, "endpoint": *ep}
+		params := map[string]interface{}{"id": *id}
+		if *ep != "" {
+			params["endpoint"] = *ep
+		}
 		if *expectUID >= 0 {
 			params["expected_uid"] = *expectUID
 		}
 		if *expectGID >= 0 {
 			params["expected_gid"] = *expectGID
+		}
+		if *handoffMode != "" {
+			params["handoff_mode"] = *handoffMode
+			if *handoffMode == "recipient-pull" || *handoffMode == "sealed-capsule" {
+				if *app == "" || *account == "" || *slot == "" || *updateMethod == "" || *sourceRef == "" || *sourceRevision <= 0 {
+					fatal("recipient handoff update requires --app --account --slot --update-method --source-ref --source-revision")
+				}
+				targetID := *app + ":" + *account + ":" + *slot
+				target := map[string]interface{}{"id": targetID, "app": *app, "account": *account, "slot": *slot, "update_method": *updateMethod, "source_ref": *sourceRef, "source_revision": *sourceRevision, "activation": *activation}
+				if *app == "fi-gateway" {
+					if *appProvider == "" || *slot != "api_key" {
+						fatal("FI Gateway targets require --app-provider PROVIDER and --slot api_key")
+					}
+					target["provider"] = *appProvider
+					target["id"] = "fi-gateway:" + *appProvider + ":" + *account + ":api_key"
+				}
+				params["credential_target"] = target
+			}
+			if *handoffMode == "sealed-capsule" {
+				if *recipientKeyID == "" || *recipientKeyFile == "" || *receiptKeyID == "" || *receiptKeyFile == "" || *issuerKeyID == "" || *issuerPublicFile == "" {
+					fatal("sealed-capsule rotation requires recipient HPKE, recipient receipt, and issuer key IDs and public-key files")
+				}
+				pub, err := os.ReadFile(*recipientKeyFile)
+				must(err)
+				if len(pub) != 32 {
+					fatal("recipient public key must be a raw 32-byte X25519 key")
+				}
+				params["recipient_key_id"] = *recipientKeyID
+				params["recipient_public_key_b64"] = base64.StdEncoding.EncodeToString(pub)
+				receiptPublic, err := os.ReadFile(*receiptKeyFile)
+				must(err)
+				if len(receiptPublic) != 32 {
+					fatal("recipient receipt public key must be a raw 32-byte Ed25519 key")
+				}
+				params["receipt_key_id"] = *receiptKeyID
+				params["receipt_public_key_b64"] = base64.StdEncoding.EncodeToString(receiptPublic)
+				params["issuer_key_id"] = *issuerKeyID
+				issuerPublic, err := os.ReadFile(*issuerPublicFile)
+				must(err)
+				if len(issuerPublic) != 32 {
+					fatal("issuer public key must be a raw 32-byte Ed25519 key")
+				}
+				params["issuer_public_key_b64"] = base64.StdEncoding.EncodeToString(issuerPublic)
+			}
 		}
 		_, err := cli.Call(ipc.MethodDestUpdate, params)
 		must(err)
@@ -617,18 +771,23 @@ func doctorCmd(args []string) {
 	sockF := fs.String("socket", sock, "broker socket")
 	adminF := fs.String("admin-socket", admin, "admin socket")
 	intakeF := fs.String("intake-socket", intake, "trusted intake socket")
-	dbF := fs.String("db", "", "database path (defaults to the standard location)")
-	vaultF := fs.String("vault", "", "vault type: aegiskeys|memory-test")
-	devF := fs.Bool("dev", false, "memory-test vault acknowledgement (development only)")
-	assuranceF := fs.String("assurance", "", "topology claim: isolated|best-effort (default: derived from the vault)")
-	agentUIDsF := fs.String("agent-uid", "", "comma-separated approved agent UIDs")
-	adminUIDsF := fs.String("admin-uid", "", "comma-separated admin UIDs")
-	intakeUIDsF := fs.String("intake-uid", "", "comma-separated trusted intake UIDs")
-	groupF := fs.String("socket-group", "", "agent socket group")
-	intakeGroupF := fs.String("intake-group", "", "trusted intake socket group")
-	hostF := fs.String("host-socket", "", "display-only native-host adapter socket")
-	aegisSock := fs.String("aegiskeys-socket", "", "AegisKeys broker socket")
-	aegisDir := fs.String("aegiskeys-dir", "", "AegisKeys config dir")
+	recipientF := fs.String("recipient-socket", base.RecipientSocket, "optional recipient-only handoff socket")
+	recipientUIDsF := fs.String("recipient-uid", joinUIDs(base.RecipientUIDs), "registered application recipient UIDs")
+	recipientGroupF := fs.String("recipient-group", base.RecipientGroup, "recipient Unix socket group")
+	dbF := fs.String("db", base.DBPath, "database path")
+	vaultF := fs.String("vault", base.VaultType, "vault type: aegiskeys|relay-only|memory-test")
+	devF := fs.Bool("dev", base.Dev, "memory-test vault acknowledgement (development only)")
+	assuranceF := fs.String("assurance", base.AssuranceMode, "topology claim: isolated|best-effort (default: derived from the vault)")
+	agentUIDsF := fs.String("agent-uid", joinUIDs(base.AgentUIDs), "comma-separated approved agent UIDs")
+	adminUIDsF := fs.String("admin-uid", joinUIDs(base.AdminUIDs), "comma-separated admin UIDs")
+	intakeUIDsF := fs.String("intake-uid", joinUIDs(base.IntakeUIDs), "comma-separated trusted intake UIDs")
+	groupF := fs.String("socket-group", base.SocketGroup, "agent socket group")
+	intakeGroupF := fs.String("intake-group", base.IntakeGroup, "trusted intake socket group")
+	hostF := fs.String("host-socket", base.HostSocket, "display-only native-host adapter socket")
+	aegisSock := fs.String("aegiskeys-socket", base.AegisKeysSocket, "AegisKeys broker socket")
+	aegisDir := fs.String("aegiskeys-dir", base.AegisKeysDir, "AegisKeys config dir")
+	helperF := fs.String("aegiskeys-resolve-helper", base.AegisKeysResolveHelper, "trusted resolve helper executable")
+	helperHashF := fs.String("aegiskeys-resolve-helper-sha256", base.AegisKeysResolveHelperSHA256, "trusted resolve helper SHA-256 pin")
 	_ = fs.Parse(args)
 
 	if !*topology {
@@ -663,6 +822,9 @@ func doctorCmd(args []string) {
 	d.SocketPath = *sockF
 	d.AdminSocket = *adminF
 	d.IntakeSocket = *intakeF
+	d.RecipientSocket = *recipientF
+	d.RecipientUIDs = mustUIDs("recipient-uid", *recipientUIDsF)
+	d.RecipientGroup = *recipientGroupF
 	d.HostSocket = *hostF
 	d.VaultType = *vaultF
 	d.Dev = *devF
@@ -671,6 +833,8 @@ func doctorCmd(args []string) {
 	d.IntakeGroup = *intakeGroupF
 	d.AegisKeysSocket = *aegisSock
 	d.AegisKeysDir = *aegisDir
+	d.AegisKeysResolveHelper = *helperF
+	d.AegisKeysResolveHelperSHA256 = *helperHashF
 	d.AgentUIDs = mustUIDs("agent-uid", *agentUIDsF)
 	d.AdminUIDs = mustUIDs("admin-uid", *adminUIDsF)
 	d.IntakeUIDs = mustUIDs("intake-uid", *intakeUIDsF)
@@ -731,23 +895,43 @@ func initCmd(args []string) {
 	base := loadBase()
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	dbF := fs.String("db", base.DBPath, "database path")
-	vaultF := fs.String("vault", config.VaultAegisKeys, "vault type: aegiskeys (production) or memory-test (development, requires --dev)")
-	devF := fs.Bool("dev", false, "development-only acknowledgement for the memory-test vault")
-	assuranceF := fs.String("assurance", "", "topology claim: isolated|best-effort (default: derived from the vault)")
-	agentUIDsF := fs.String("agent-uid", "", "comma-separated approved agent UIDs (required for a production vault)")
-	adminUIDsF := fs.String("admin-uid", "", "comma-separated admin UIDs")
-	intakeUIDsF := fs.String("intake-uid", "", "comma-separated trusted intake UIDs")
-	groupF := fs.String("socket-group", "", "agent socket group (required for a production vault)")
+	sockF := fs.String("socket", base.SocketPath, "agent broker socket")
+	adminF := fs.String("admin-socket", base.AdminSocket, "admin socket")
+	intakeF := fs.String("intake-socket", base.IntakeSocket, "trusted intake socket")
+	recipientF := fs.String("recipient-socket", base.RecipientSocket, "optional recipient-only handoff socket")
+	recipientUIDsF := fs.String("recipient-uid", joinUIDs(base.RecipientUIDs), "registered application recipient UIDs")
+	recipientGroupF := fs.String("recipient-group", base.RecipientGroup, "recipient Unix socket group")
+	vaultF := fs.String("vault", config.VaultAegisKeys, "vault type: aegiskeys or relay-only (production), or memory-test (development, requires --dev)")
+	devF := fs.Bool("dev", base.Dev, "development-only acknowledgement for the memory-test vault")
+	assuranceF := fs.String("assurance", base.AssuranceMode, "topology claim: isolated|best-effort (default: derived from the vault)")
+	agentUIDsF := fs.String("agent-uid", joinUIDs(base.AgentUIDs), "comma-separated approved agent UIDs (required for a production vault)")
+	adminUIDsF := fs.String("admin-uid", joinUIDs(base.AdminUIDs), "comma-separated admin UIDs")
+	intakeUIDsF := fs.String("intake-uid", joinUIDs(base.IntakeUIDs), "comma-separated trusted intake UIDs")
+	groupF := fs.String("socket-group", base.SocketGroup, "agent socket group (required for a production vault)")
+	aegisSockF := fs.String("aegiskeys-socket", base.AegisKeysSocket, "AegisKeys broker socket")
+	aegisDirF := fs.String("aegiskeys-dir", base.AegisKeysDir, "AegisKeys config directory")
+	helperF := fs.String("aegiskeys-resolve-helper", base.AegisKeysResolveHelper, "trusted resolve helper executable (required for an AegisKeys production vault)")
+	helperHashF := fs.String("aegiskeys-resolve-helper-sha256", base.AegisKeysResolveHelperSHA256, "SHA-256 identity pin for the AegisKeys resolve helper")
 	outF := fs.String("out", "", "write the installation-wide config file here (default: /etc/seqpass/config.json when running as root)")
 	forceF := fs.Bool("force", false, "overwrite an existing, differing config file")
 	_ = fs.Parse(args)
 
 	d := base
 	d.DBPath = *dbF
+	d.SocketPath = *sockF
+	d.AdminSocket = *adminF
+	d.IntakeSocket = *intakeF
+	d.RecipientSocket = *recipientF
+	d.RecipientUIDs = mustUIDs("recipient-uid", *recipientUIDsF)
+	d.RecipientGroup = *recipientGroupF
 	d.VaultType = *vaultF
 	d.Dev = *devF
 	d.AssuranceMode = *assuranceF
 	d.SocketGroup = *groupF
+	d.AegisKeysSocket = *aegisSockF
+	d.AegisKeysDir = *aegisDirF
+	d.AegisKeysResolveHelper = *helperF
+	d.AegisKeysResolveHelperSHA256 = *helperHashF
 	d.AgentUIDs = mustUIDs("agent-uid", *agentUIDsF)
 	d.AdminUIDs = mustUIDs("admin-uid", *adminUIDsF)
 	d.IntakeUIDs = mustUIDs("intake-uid", *intakeUIDsF)
@@ -874,10 +1058,21 @@ func writeInstallConfigPath(path string, data []byte, force bool) error {
 // these lines are the installation, and a missing flag in them is a broken
 // installation the operator pastes verbatim.
 func printNextSteps(d config.Deployment) {
-	_, sock, admin, intake := defaultPaths()
+	sock, admin, intake := d.SocketPath, d.AdminSocket, d.IntakeSocket
 	// The printed commands must run as printed: the development acknowledgement
 	// is required by both the broker and the doctor, whichever claim is used.
 	devFlag := map[bool]string{true: " --dev", false: ""}[d.VaultType == config.VaultMemoryTest]
+	var helperFlags string
+	if d.VaultType == config.VaultAegisKeys {
+		if d.AegisKeysSocket != "" {
+			helperFlags += " --aegiskeys-socket " + shellSingleQuote(d.AegisKeysSocket)
+		}
+		if d.AegisKeysDir != "" {
+			helperFlags += " --aegiskeys-dir " + shellSingleQuote(d.AegisKeysDir)
+		}
+		helperFlags += " --aegiskeys-resolve-helper " + shellSingleQuote(d.AegisKeysResolveHelper) +
+			" --aegiskeys-resolve-helper-sha256 " + d.AegisKeysResolveHelperSHA256
+	}
 	var idFlags string
 	if d.SocketGroup != "" {
 		idFlags += " --socket-group " + d.SocketGroup
@@ -891,18 +1086,31 @@ func printNextSteps(d config.Deployment) {
 	if len(d.AdminUIDs) > 0 {
 		idFlags += " --admin-uid " + joinUIDs(d.AdminUIDs)
 	}
+	if d.RecipientSocket != "" {
+		idFlags += " --recipient-socket " + shellSingleQuote(d.RecipientSocket)
+		if len(d.RecipientUIDs) > 0 {
+			idFlags += " --recipient-uid " + joinUIDs(d.RecipientUIDs)
+		}
+		if d.RecipientGroup != "" {
+			idFlags += " --recipient-group " + d.RecipientGroup
+		}
+	}
 	if d.EffectiveAssurance() == config.AssuranceIsolated {
-		fmt.Printf("  seqpass broker --vault %s%s --assurance isolated --db %s --socket %s \\\n", d.VaultType, devFlag, d.DBPath, sock)
-		fmt.Printf("    --admin-socket %s --intake-socket %s%s\n", admin, intake, idFlags)
+		fmt.Printf("  seqpass broker --vault %s%s%s --assurance isolated --db %s --socket %s \\\n", d.VaultType, devFlag, helperFlags, shellSingleQuote(d.DBPath), shellSingleQuote(sock))
+		fmt.Printf("    --admin-socket %s --intake-socket %s%s\n", shellSingleQuote(admin), shellSingleQuote(intake), idFlags)
 	} else {
 		// Best-effort still carries the identities the operator declared, so
 		// the printed command cannot quietly narrow the authorization to
 		// euid-only.
-		fmt.Printf("  seqpass broker --vault %s%s --assurance best-effort --db %s --socket %s%s\n", d.VaultType, devFlag, d.DBPath, sock, idFlags)
+		fmt.Printf("  seqpass broker --vault %s%s%s --assurance best-effort --db %s --socket %s%s\n", d.VaultType, devFlag, helperFlags, shellSingleQuote(d.DBPath), shellSingleQuote(sock), idFlags)
 	}
-	fmt.Printf("  seqpass doctor --topology --vault %s%s --db %s%s\n", d.VaultType, devFlag, d.DBPath, idFlags)
+	fmt.Printf("  seqpass doctor --topology --vault %s%s%s --db %s --socket %s --admin-socket %s --intake-socket %s%s\n", d.VaultType, devFlag, helperFlags, shellSingleQuote(d.DBPath), shellSingleQuote(sock), shellSingleQuote(admin), shellSingleQuote(intake), idFlags)
 	fmt.Println()
 	fmt.Println("Then register the adapter: seqpass mcp (Codex/Claude/Hermes) or seqpass agent.")
+}
+
+func shellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 // joinUIDs renders a UID list the way the flags accept it.

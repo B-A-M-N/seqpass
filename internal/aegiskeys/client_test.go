@@ -176,3 +176,17 @@ func TestValidOperationNameGrammar(t *testing.T) {
 		}
 	}
 }
+
+// AegisKeys added this metadata field to v3 provisioning responses. The
+// strict decoder must accept the known field while continuing to reject
+// genuinely unknown response fields.
+func TestDecodeProvisionResponseAcceptsStagingDisposition(t *testing.T) {
+	resp := testResponse(nil, http.StatusOK, `{"request_id":"req-1","status":"ready","staging_disposition":"staged"}`)
+	out, err := decodeProvisionResponse(resp)
+	if err != nil {
+		t.Fatalf("decode v3 provision response: %v", err)
+	}
+	if out.StagingDisposition != "staged" {
+		t.Fatalf("staging disposition = %q, want staged", out.StagingDisposition)
+	}
+}

@@ -288,7 +288,7 @@ func runHelperExchange(ctx context.Context, helperPath, aegisSocket string, req 
 	cmdCtx := ctx
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		var cancel context.CancelFunc
-		cmdCtx, cancel = context.WithTimeout(context.Background(), 12*time.Second)
+		cmdCtx, cancel = context.WithTimeout(ctx, 12*time.Second)
 		defer cancel()
 	}
 	cmd := helperCommand(cmdCtx, helperPath, aegisSocket, child)

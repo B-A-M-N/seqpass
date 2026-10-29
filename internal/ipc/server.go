@@ -60,9 +60,10 @@ type Authorizer interface {
 // A nil AgentUIDs map means "broker euid only" (fail-closed default); the
 // operator opens agent access explicitly via --agent-uid.
 type UIDAuthorizer struct {
-	AdminUIDs  map[uint32]bool
-	AgentUIDs  map[uint32]bool
-	IntakeUIDs map[uint32]bool
+	AdminUIDs     map[uint32]bool
+	AgentUIDs     map[uint32]bool
+	IntakeUIDs    map[uint32]bool
+	RecipientUIDs map[uint32]bool
 	// PrincipalAdmin marks intake identities authorized to create
 	// trusted host principal bindings. Principal strings mirror the
 	// broker's UID mapping (for example "uid:1000").
@@ -93,6 +94,10 @@ func (a *UIDAuthorizer) CanConnectAdmin(p AuthenticatedPrincipal) bool {
 // UIDs are never sufficient here unless the operator explicitly lists
 // them: intake authorizes value release, so its identities are named
 // separately from agent submit rights.
+func (a *UIDAuthorizer) CanConnectRecipient(p AuthenticatedPrincipal) bool {
+	return p.Principal != "" && a.RecipientUIDs[p.Peer.UID]
+}
+
 func (a *UIDAuthorizer) CanConnectIntake(p AuthenticatedPrincipal) bool {
 	if p.Principal == "" {
 		return false
@@ -124,19 +129,22 @@ type Server struct {
 	// IntakeSocket, when non-empty, serves the trusted human-side
 	// intake domain on its own owner-only socket (QR-02/SP-TUI-04).
 	// Set before Start, like AgentGID.
-	IntakeSocket string
+	IntakeSocket    string
+	RecipientSocket string
+	RecipientGID    *uint32
 	// HostSocket, when non-empty, serves the display-only native-host
 	// presentation domain (HI-02/HI-03). Empty keeps the domain disabled;
 	// Start never creates it implicitly.
-	HostSocket string
-	mapper     PrincipalMapper
-	auth       Authorizer
-	listener   net.Listener
-	adminLis   net.Listener
-	intakeLis  net.Listener
-	hostLis    net.Listener
-	created    []string          // sockets created by this process (removed on close)
-	createdID  map[string]fileID // device+inode at bind time (C09)
+	HostSocket   string
+	mapper       PrincipalMapper
+	auth         Authorizer
+	listener     net.Listener
+	adminLis     net.Listener
+	intakeLis    net.Listener
+	hostLis      net.Listener
+	recipientLis net.Listener
+	created      []string          // sockets created by this process (removed on close)
+	createdID    map[string]fileID // device+inode at bind time (C09)
 
 	mu         sync.Mutex
 	conns      map[net.Conn]struct{}
@@ -419,6 +427,28 @@ func (s *Server) Start() error {
 		s.wg.Add(1)
 		go s.serve(il, RoleIntake)
 	}
+	if s.RecipientSocket != "" {
+		if s.RecipientSocket == s.socket || s.RecipientSocket == s.adminSock || s.RecipientSocket == s.IntakeSocket || s.RecipientSocket == s.HostSocket {
+			_ = s.Close()
+			return fmt.Errorf("recipient socket must be separate from other sockets")
+		}
+		mode, dirMode := os.FileMode(0600), os.FileMode(0700)
+		if s.RecipientGID != nil {
+			mode, dirMode = 0660, 0710
+		}
+		rl, err := listenUnix(s.RecipientSocket, mode, dirMode, s.RecipientGID)
+		if err != nil {
+			_ = s.Close()
+			return fmt.Errorf("recipient socket: %w", err)
+		}
+		s.recipientLis = rl
+		s.created = append(s.created, s.RecipientSocket)
+		if fi, err := os.Stat(s.RecipientSocket); err == nil {
+			s.createdID[s.RecipientSocket] = statID(fi)
+		}
+		s.wg.Add(1)
+		go s.serve(rl, RoleRecipient)
+	}
 	if s.HostSocket != "" {
 		hl, err := listenUnix(s.HostSocket, 0600, 0700, nil)
 		if err != nil {
@@ -502,6 +532,9 @@ func (s *Server) Close() error {
 	if s.hostLis != nil {
 		_ = s.hostLis.Close()
 	}
+	if s.recipientLis != nil {
+		_ = s.recipientLis.Close()
+	}
 	// Unblock idle scanners so shutdown cannot wait on silent clients (F09).
 	s.mu.Lock()
 	for c := range s.conns {
@@ -546,6 +579,13 @@ func (s *Server) handleConn(conn net.Conn, role Role) {
 			_ = writeDenied(conn)
 			return
 		}
+	case RoleRecipient:
+		if auth, ok := s.auth.(interface {
+			CanConnectRecipient(AuthenticatedPrincipal) bool
+		}); !ok || !auth.CanConnectRecipient(ap) {
+			_ = writeDenied(conn)
+			return
+		}
 	case RoleIntake, RoleHost:
 		if !s.auth.CanConnectIntake(ap) {
 			_ = writeDenied(conn)
@@ -578,6 +618,11 @@ func (s *Server) handleConn(conn net.Conn, role Role) {
 		resp.ID = req.ID
 		_ = enc.Encode(resp)
 		_ = w.Flush()
+		if d, ok := resp.Data.(*types.HandoffDelivery); ok && d != nil {
+			for i := range d.Payload {
+				d.Payload[i] = 0
+			}
+		}
 	}
 }
 
@@ -602,6 +647,8 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 		allow = IntakeAllowlist
 	case RoleHost:
 		allow = HostAllowlist
+	case RoleRecipient:
+		allow = RecipientAllowlist
 	}
 	if !allow[req.Method] {
 		return Response{OK: false, Error: "access denied"}
@@ -719,6 +766,52 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 			return Response{OK: false, Error: "internal error"}
 		}
 		return Response{OK: true, Data: map[string]interface{}{"uses": uses, "transfers": transfers}}
+	case MethodHandoffIssue:
+		t, err := s.svc.IssueHandoff(ctx, principal, strParam(p, "op_id"))
+		if err != nil {
+			return Response{OK: false, Error: err.Error()}
+		}
+		return Response{OK: true, Data: t}
+	case MethodHandoffRetrieve:
+		capsule, err := s.svc.RetrieveHandoffCapsule(principal, strParam(p, "op_id"))
+		if err != nil {
+			return Response{OK: false, Error: "sealed handoff retrieval unavailable"}
+		}
+		return Response{OK: true, Data: capsule}
+	case MethodHandoffReceipt:
+		raw := strParam(p, "receipt_b64")
+		if len(raw) == 0 || len(raw) > 24*1024 {
+			return Response{OK: false, Error: "invalid recipient receipt"}
+		}
+		receipt, err := base64.StdEncoding.DecodeString(raw)
+		if err != nil || len(receipt) > 16*1024 {
+			return Response{OK: false, Error: "invalid recipient receipt"}
+		}
+		if err := s.svc.CompleteSealedHandoffReceipt(receipt); err != nil {
+			return Response{OK: false, Error: "recipient receipt rejected"}
+		}
+		return Response{OK: true, Data: map[string]string{"status": "recorded"}}
+	case MethodHandoffRedeem:
+		d, err := s.svc.RedeemHandoffTicket(ctx, strParam(p, "ticket_id"), strParam(p, "nonce"), ap.Peer.UID)
+		if err != nil {
+			return Response{OK: false, Error: err.Error()}
+		}
+		return Response{OK: true, Data: d}
+	case MethodHandoffComplete:
+		bytes, ok := uintParam(p, "bytes")
+		if !ok || bytes > 1<<20 {
+			return Response{OK: false, Error: "invalid byte count"}
+		}
+		var receiptErr error
+		if handoffID := strParam(p, "handoff_id"); handoffID != "" {
+			receiptErr = s.svc.CompleteSealedHandoff(ap.Peer.UID, handoffID, strParam(p, "op_id"), strParam(p, "digest"), strParam(p, "state"), int(bytes))
+		} else {
+			receiptErr = s.svc.CompleteHandoff(ap.Peer.UID, strParam(p, "op_id"), strParam(p, "digest"), strParam(p, "state"), int(bytes))
+		}
+		if receiptErr != nil {
+			return Response{OK: false, Error: receiptErr.Error()}
+		}
+		return Response{OK: true, Data: map[string]string{"status": "recorded"}}
 	case MethodRecipientStatus:
 		res, err := s.svc.RecipientStatus(ctx, principal, strParam(p, "op_id"), role == RoleAdmin)
 		if err != nil {
@@ -796,6 +889,69 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 		}
 		return Response{OK: true}
 	case MethodDestUpdate:
+		// Handoff key/target rotations are authorization-affecting and
+		// always bump the destination revision and global epoch.
+		if rawMode, hasMode := p["handoff_mode"]; hasMode {
+			modeText, _ := rawMode.(string)
+			var target *types.AppCredentialTarget
+			if raw, ok := p["credential_target"]; ok {
+				b, err := json.Marshal(raw)
+				if err != nil {
+					return Response{OK: false, Error: "invalid credential target"}
+				}
+				var parsed types.AppCredentialTarget
+				dec := json.NewDecoder(strings.NewReader(string(b)))
+				dec.DisallowUnknownFields()
+				if err := dec.Decode(&parsed); err != nil {
+					return Response{OK: false, Error: "invalid credential target"}
+				}
+				target = &parsed
+			}
+			var publicKey []byte
+			if raw := strParam(p, "recipient_public_key_b64"); raw != "" {
+				if len(raw) > 256 {
+					return Response{OK: false, Error: "invalid recipient public key"}
+				}
+				decoded, err := base64.StdEncoding.DecodeString(raw)
+				if err != nil || len(decoded) != 32 {
+					return Response{OK: false, Error: "invalid recipient public key"}
+				}
+				publicKey = decoded
+			}
+			var receiptPublicKey []byte
+			if raw := strParam(p, "receipt_public_key_b64"); raw != "" {
+				if len(raw) > 256 {
+					return Response{OK: false, Error: "invalid recipient receipt public key"}
+				}
+				decoded, err := base64.StdEncoding.DecodeString(raw)
+				if err != nil || len(decoded) != 32 {
+					return Response{OK: false, Error: "invalid recipient receipt public key"}
+				}
+				receiptPublicKey = decoded
+			}
+			var issuerPublicKey []byte
+			if raw := strParam(p, "issuer_public_key_b64"); raw != "" {
+				if len(raw) > 256 {
+					return Response{OK: false, Error: "invalid issuer public key"}
+				}
+				decoded, err := base64.StdEncoding.DecodeString(raw)
+				if err != nil || len(decoded) != 32 {
+					return Response{OK: false, Error: "invalid issuer public key"}
+				}
+				issuerPublicKey = decoded
+			}
+			var recipientUID, recipientGID *uint32
+			if uid, ok := uintParam(p, "expected_uid"); ok {
+				recipientUID = &uid
+			}
+			if gid, ok := uintParam(p, "expected_gid"); ok {
+				recipientGID = &gid
+			}
+			if err := s.svc.DB().UpdateDestinationHandoffIdentity(strParam(p, "id"), types.HandoffMode(modeText), strParam(p, "recipient_key_id"), publicKey, strParam(p, "receipt_key_id"), receiptPublicKey, strParam(p, "issuer_key_id"), issuerPublicKey, recipientUID, recipientGID, target, principal); err != nil {
+				return Response{OK: false, Error: err.Error()}
+			}
+			return Response{OK: true}
+		}
 		// Re-pinning endpoint and/or recipient identity in one atomic
 		// mutation (C05). Identity params are optional here; when present
 		// they replace the pins. Endpoint-only changes keep identity.
@@ -853,12 +1009,59 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 		return Response{OK: true}
 	case MethodDestAdd:
 		d := &types.Destination{
-			Name:       strParam(p, "name"),
-			Type:       strParam(p, "type"),
-			Endpoint:   strParam(p, "endpoint"),
-			SourceRepo: strParam(p, "source_repo"),
+			Name:           strParam(p, "name"),
+			Type:           strParam(p, "type"),
+			Endpoint:       strParam(p, "endpoint"),
+			SourceRepo:     strParam(p, "source_repo"),
+			HandoffMode:    types.HandoffMode(strParam(p, "handoff_mode")),
+			RecipientKeyID: strParam(p, "recipient_key_id"),
+			ReceiptKeyID:   strParam(p, "receipt_key_id"),
+			IssuerKeyID:    strParam(p, "issuer_key_id"),
 		}
-		if d.Name == "" || d.Endpoint == "" || d.Type == "" {
+		if raw := strParam(p, "recipient_public_key_b64"); raw != "" {
+			if len(raw) > 256 {
+				return Response{OK: false, Error: "invalid recipient public key"}
+			}
+			key, err := base64.StdEncoding.DecodeString(raw)
+			if err != nil || len(key) != 32 {
+				return Response{OK: false, Error: "invalid recipient public key"}
+			}
+			d.RecipientPublicKey = key
+		}
+		if raw := strParam(p, "receipt_public_key_b64"); raw != "" {
+			if len(raw) > 256 {
+				return Response{OK: false, Error: "invalid recipient receipt public key"}
+			}
+			key, err := base64.StdEncoding.DecodeString(raw)
+			if err != nil || len(key) != 32 {
+				return Response{OK: false, Error: "invalid recipient receipt public key"}
+			}
+			d.ReceiptPublicKey = key
+		}
+		if raw := strParam(p, "issuer_public_key_b64"); raw != "" {
+			if len(raw) > 256 {
+				return Response{OK: false, Error: "invalid issuer public key"}
+			}
+			key, err := base64.StdEncoding.DecodeString(raw)
+			if err != nil || len(key) != 32 {
+				return Response{OK: false, Error: "invalid issuer public key"}
+			}
+			d.IssuerPublicKey = key
+		}
+		if raw, ok := p["credential_target"]; ok {
+			encoded, err := json.Marshal(raw)
+			if err != nil {
+				return Response{OK: false, Error: "invalid credential target"}
+			}
+			var target types.AppCredentialTarget
+			dec := json.NewDecoder(strings.NewReader(string(encoded)))
+			dec.DisallowUnknownFields()
+			if err := dec.Decode(&target); err != nil {
+				return Response{OK: false, Error: "invalid credential target"}
+			}
+			d.CredentialTarget = &target
+		}
+		if d.Name == "" || d.Type == "" || d.Endpoint == "" && d.Type != "sealed-capsule" {
 			return Response{OK: false, Error: "missing fields"}
 		}
 		switch d.Type {
@@ -875,6 +1078,14 @@ func (s *Server) dispatch(ctx context.Context, ap AuthenticatedPrincipal, req Re
 			}
 			if d.ExpectedUID == nil {
 				return Response{OK: false, Error: "expected_uid is required for recipient-socket"}
+			}
+		case "sealed-capsule":
+			if uid, ok := uintParam(p, "expected_uid"); ok {
+				u := uid
+				d.ExpectedUID = &u
+			}
+			if d.ExpectedUID == nil {
+				return Response{OK: false, Error: "expected_uid is required for sealed-capsule recipient receipts"}
 			}
 		case secureops.DestTypeHTTPPinned, secureops.DestTypeProcessPinned, secureops.DestTypeGitPinned:
 			// Pinned operation profiles carry no identity pin; their

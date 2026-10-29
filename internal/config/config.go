@@ -17,6 +17,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -35,6 +36,7 @@ const (
 	AssuranceBestEffort = "best-effort"
 
 	VaultAegisKeys  = "aegiskeys"
+	VaultRelayOnly  = "relay-only"
 	VaultMemoryTest = "memory-test"
 )
 
@@ -59,8 +61,9 @@ const (
 	// SystemSocketDir and SystemStateDir are the secure system defaults for
 	// a multi-UID installation: sockets under /run (tmpfs, wiped on boot and
 	// recreated by the broker), broker-owned durable state under /var/lib.
-	SystemSocketDir = "/run/seqpass"
-	SystemStateDir  = "/var/lib/seqpass"
+	SystemSocketDir      = "/run/seqpass"
+	SystemAgentSocketDir = "/run/seqpass-agent"
+	SystemStateDir       = "/var/lib/seqpass"
 )
 
 // Config-file environment override. SEQ_PASS_CONFIG follows the package's
@@ -68,17 +71,17 @@ const (
 // missing or malformed explicit file is an error, never a silent fallback.
 const EnvConfig = "SEQ_PASS_CONFIG"
 
-// systemDefaults returns the multi-UID installation defaults: sockets under
-// /run/seqpass and broker state under /var/lib/seqpass. They are only used
+// systemDefaults returns the multi-UID installation defaults: the agent socket
+// has its own /run/seqpass-agent directory, trusted sockets stay under
+// /run/seqpass, and broker state lives under /var/lib/seqpass. They are only used
 // when the installation is system-scoped (see Load), because /run and
 // /var/lib are not writable by an unprivileged development user.
 func systemDefaults() Deployment {
-	sock := filepath.Join(SystemSocketDir, "broker.sock")
 	return Deployment{
 		DBPath:       filepath.Join(SystemStateDir, "metadata.db"),
-		SocketPath:   sock,
-		AdminSocket:  sock + ".admin",
-		IntakeSocket: sock + ".intake",
+		SocketPath:   filepath.Join(SystemAgentSocketDir, "broker.sock"),
+		AdminSocket:  filepath.Join(SystemSocketDir, "admin.sock"),
+		IntakeSocket: filepath.Join(SystemSocketDir, "intake.sock"),
 	}
 }
 
@@ -86,25 +89,30 @@ func systemDefaults() Deployment {
 // Pointer fields distinguish "absent" from "zero" so loading a sparse file
 // never zeroes a path that the defaults already resolved.
 type configFile struct {
-	DBPath        *string  `json:"db_path,omitempty"`
-	SocketPath    *string  `json:"socket_path,omitempty"`
-	AdminSocket   *string  `json:"admin_socket,omitempty"`
-	IntakeSocket  *string  `json:"intake_socket,omitempty"`
-	HostSocket    *string  `json:"host_socket,omitempty"`
-	VaultType     *string  `json:"vault,omitempty"`
-	Assurance     *string  `json:"assurance,omitempty"`
-	Dev           *bool    `json:"dev,omitempty"`
-	AgentUIDs     []uint32 `json:"agent_uids,omitempty"`
-	AdminUIDs     []uint32 `json:"admin_uids,omitempty"`
-	IntakeUIDs    []uint32 `json:"intake_uids,omitempty"`
-	SocketGroup   *string  `json:"socket_group,omitempty"`
-	IntakeGroup   *string  `json:"intake_group,omitempty"`
-	AegisSocket   *string  `json:"aegiskeys_socket,omitempty"`
-	AegisDir      *string  `json:"aegiskeys_dir,omitempty"`
-	MaxConcOps    *int     `json:"max_concurrent_ops,omitempty"`
-	DefaultTTL    *string  `json:"default_op_ttl,omitempty"`
-	AutoExecute   *bool    `json:"auto_execute,omitempty"`
-	NoAutoDeliver *bool    `json:"no_relay_auto_deliver,omitempty"`
+	DBPath          *string  `json:"db_path,omitempty"`
+	SocketPath      *string  `json:"socket_path,omitempty"`
+	AdminSocket     *string  `json:"admin_socket,omitempty"`
+	IntakeSocket    *string  `json:"intake_socket,omitempty"`
+	RecipientSocket *string  `json:"recipient_socket,omitempty"`
+	HostSocket      *string  `json:"host_socket,omitempty"`
+	VaultType       *string  `json:"vault,omitempty"`
+	Assurance       *string  `json:"assurance,omitempty"`
+	Dev             *bool    `json:"dev,omitempty"`
+	AgentUIDs       []uint32 `json:"agent_uids,omitempty"`
+	AdminUIDs       []uint32 `json:"admin_uids,omitempty"`
+	IntakeUIDs      []uint32 `json:"intake_uids,omitempty"`
+	RecipientUIDs   []uint32 `json:"recipient_uids,omitempty"`
+	SocketGroup     *string  `json:"socket_group,omitempty"`
+	IntakeGroup     *string  `json:"intake_group,omitempty"`
+	RecipientGroup  *string  `json:"recipient_group,omitempty"`
+	AegisSocket     *string  `json:"aegiskeys_socket,omitempty"`
+	AegisDir        *string  `json:"aegiskeys_dir,omitempty"`
+	AegisHelper     *string  `json:"aegiskeys_resolve_helper,omitempty"`
+	AegisHelperSHA  *string  `json:"aegiskeys_resolve_helper_sha256,omitempty"`
+	MaxConcOps      *int     `json:"max_concurrent_ops,omitempty"`
+	DefaultTTL      *string  `json:"default_op_ttl,omitempty"`
+	AutoExecute     *bool    `json:"auto_execute,omitempty"`
+	NoAutoDeliver   *bool    `json:"no_relay_auto_deliver,omitempty"`
 }
 
 // ConfigPath resolves which configuration file governs this installation:
@@ -204,6 +212,9 @@ func applyConfigFile(d *Deployment, path string) error {
 	if fc.IntakeSocket != nil {
 		d.IntakeSocket = *fc.IntakeSocket
 	}
+	if fc.RecipientSocket != nil {
+		d.RecipientSocket = *fc.RecipientSocket
+	}
 	if fc.HostSocket != nil {
 		d.HostSocket = *fc.HostSocket
 	}
@@ -232,6 +243,7 @@ func applyConfigFile(d *Deployment, path string) error {
 		{"agent_uids", fc.AgentUIDs, func(u []uint32) { d.AgentUIDs = u }},
 		{"admin_uids", fc.AdminUIDs, func(u []uint32) { d.AdminUIDs = u }},
 		{"intake_uids", fc.IntakeUIDs, func(u []uint32) { d.IntakeUIDs = u }},
+		{"recipient_uids", fc.RecipientUIDs, func(u []uint32) { d.RecipientUIDs = u }},
 	}
 	for _, f := range uidFields {
 		if f.uids == nil {
@@ -252,11 +264,20 @@ func applyConfigFile(d *Deployment, path string) error {
 	if fc.IntakeGroup != nil {
 		d.IntakeGroup = *fc.IntakeGroup
 	}
+	if fc.RecipientGroup != nil {
+		d.RecipientGroup = *fc.RecipientGroup
+	}
 	if fc.AegisSocket != nil {
 		d.AegisKeysSocket = *fc.AegisSocket
 	}
 	if fc.AegisDir != nil {
 		d.AegisKeysDir = *fc.AegisDir
+	}
+	if fc.AegisHelper != nil {
+		d.AegisKeysResolveHelper = *fc.AegisHelper
+	}
+	if fc.AegisHelperSHA != nil {
+		d.AegisKeysResolveHelperSHA256 = *fc.AegisHelperSHA
 	}
 	if fc.MaxConcOps != nil {
 		if *fc.MaxConcOps < 0 {
@@ -285,10 +306,10 @@ func applyConfigFile(d *Deployment, path string) error {
 
 func validateVault(v string) error {
 	switch v {
-	case VaultAegisKeys, VaultMemoryTest:
+	case VaultAegisKeys, VaultRelayOnly, VaultMemoryTest:
 		return nil
 	default:
-		return fmt.Errorf("unknown vault %q (want %s or %s)", v, VaultAegisKeys, VaultMemoryTest)
+		return fmt.Errorf("unknown vault %q (want %s, %s, or %s)", v, VaultAegisKeys, VaultRelayOnly, VaultMemoryTest)
 	}
 }
 
@@ -306,6 +327,9 @@ func RenderConfig(d Deployment) ([]byte, error) {
 	if d.HostSocket != "" {
 		fc.HostSocket = &d.HostSocket
 	}
+	if d.RecipientSocket != "" {
+		fc.RecipientSocket = &d.RecipientSocket
+	}
 	if d.VaultType != "" {
 		fc.VaultType = &d.VaultType
 	}
@@ -318,17 +342,27 @@ func RenderConfig(d Deployment) ([]byte, error) {
 	fc.AgentUIDs = d.AgentUIDs
 	fc.AdminUIDs = d.AdminUIDs
 	fc.IntakeUIDs = d.IntakeUIDs
+	fc.RecipientUIDs = d.RecipientUIDs
 	if d.SocketGroup != "" {
 		fc.SocketGroup = &d.SocketGroup
 	}
 	if d.IntakeGroup != "" {
 		fc.IntakeGroup = &d.IntakeGroup
 	}
+	if d.RecipientGroup != "" {
+		fc.RecipientGroup = &d.RecipientGroup
+	}
 	if d.AegisKeysSocket != "" {
 		fc.AegisSocket = &d.AegisKeysSocket
 	}
 	if d.AegisKeysDir != "" {
 		fc.AegisDir = &d.AegisKeysDir
+	}
+	if d.AegisKeysResolveHelper != "" {
+		fc.AegisHelper = &d.AegisKeysResolveHelper
+	}
+	if d.AegisKeysResolveHelperSHA256 != "" {
+		fc.AegisHelperSHA = &d.AegisKeysResolveHelperSHA256
 	}
 	if d.MaxConcurrentOps > 0 {
 		fc.MaxConcOps = &d.MaxConcurrentOps
@@ -362,7 +396,8 @@ type Deployment struct {
 	HostSocket  string
 	// IntakeSocket is the trusted human-side endpoint. It is owner-only by
 	// default because a human who can write there can authorize operations.
-	IntakeSocket string
+	IntakeSocket    string
+	RecipientSocket string
 
 	VaultType string
 	// AssuranceMode is the topology claim. Empty means "let the broker
@@ -373,15 +408,19 @@ type Deployment struct {
 	// fall back to a vault that holds nothing durable.
 	Dev bool
 
-	AdminUIDs  []uint32
-	AgentUIDs  []uint32
-	IntakeUIDs []uint32
+	AdminUIDs     []uint32
+	AgentUIDs     []uint32
+	IntakeUIDs    []uint32
+	RecipientUIDs []uint32
 
-	SocketGroup string
-	IntakeGroup string
+	SocketGroup    string
+	IntakeGroup    string
+	RecipientGroup string
 
-	AegisKeysSocket string
-	AegisKeysDir    string
+	AegisKeysSocket              string
+	AegisKeysDir                 string
+	AegisKeysResolveHelper       string
+	AegisKeysResolveHelperSHA256 string
 
 	DefaultOpTTL     time.Duration
 	MaxConcurrentOps int
@@ -466,10 +505,11 @@ func (d *Deployment) ApplyEnv() {
 	}
 }
 
-// IsProductionVault reports whether the vault is the durable, encrypted
-// production store rather than the development fixture.
+// IsProductionVault reports whether this is a production deployment rather
+// than the development fixture. relay-only is production-secure operation
+// without a persistent credential backend.
 func (d Deployment) IsProductionVault() bool {
-	return d.VaultType == VaultAegisKeys
+	return d.VaultType == VaultAegisKeys || d.VaultType == VaultRelayOnly
 }
 
 // EffectiveAssurance returns the topology the broker will actually run.
@@ -491,17 +531,20 @@ func (d Deployment) EffectiveAssurance() string {
 func (d Deployment) Validate() error {
 	switch d.VaultType {
 	case "":
-		return fmt.Errorf("missing vault: choose %s (production) or %s with --dev (development only)", VaultAegisKeys, VaultMemoryTest)
-	case VaultAegisKeys:
+		return fmt.Errorf("missing vault: choose %s or %s (production), or %s with --dev (development only)", VaultAegisKeys, VaultRelayOnly, VaultMemoryTest)
+	case VaultAegisKeys, VaultRelayOnly:
 		if d.AssuranceMode == AssuranceBestEffort {
-			return fmt.Errorf("a production (%s) vault cannot run a best-effort topology: best-effort is development-only and cannot be verified", VaultAegisKeys)
+			return fmt.Errorf("a production (%s) deployment cannot run a best-effort topology: best-effort is development-only and cannot be verified", d.VaultType)
+		}
+		if d.Dev {
+			return fmt.Errorf("--dev applies only to the %s development fixture", VaultMemoryTest)
 		}
 	case VaultMemoryTest:
 		if !d.Dev {
 			return fmt.Errorf("the %s vault is a development fixture and requires an explicit --dev acknowledgement", VaultMemoryTest)
 		}
 	default:
-		return fmt.Errorf("unknown vault %q (want %s or %s)", d.VaultType, VaultAegisKeys, VaultMemoryTest)
+		return fmt.Errorf("unknown vault %q (want %s, %s, or %s)", d.VaultType, VaultAegisKeys, VaultRelayOnly, VaultMemoryTest)
 	}
 
 	switch d.AssuranceMode {
@@ -513,6 +556,17 @@ func (d Deployment) Validate() error {
 	if d.EffectiveAssurance() == AssuranceIsolated {
 		if len(d.AgentUIDs) == 0 || len(d.IntakeUIDs) == 0 || d.SocketGroup == "" {
 			return fmt.Errorf("isolated assurance requires explicit --agent-uid, --intake-uid and --socket-group")
+		}
+	}
+	if d.EffectiveAssurance() == AssuranceIsolated && d.RecipientSocket != "" && (len(d.RecipientUIDs) == 0 || d.RecipientGroup == "") {
+		return fmt.Errorf("isolated recipient handoff requires --recipient-uid and --recipient-group")
+	}
+	if d.VaultType == VaultAegisKeys {
+		if d.AegisKeysResolveHelper == "" || len(d.AegisKeysResolveHelperSHA256) != 64 {
+			return fmt.Errorf("AegisKeys vault requires --aegiskeys-resolve-helper and --aegiskeys-resolve-helper-sha256")
+		}
+		if _, err := hex.DecodeString(d.AegisKeysResolveHelperSHA256); err != nil {
+			return fmt.Errorf("invalid AegisKeys helper SHA-256 pin: %w", err)
 		}
 	}
 
@@ -535,20 +589,22 @@ func (d Deployment) Validate() error {
 // not running yet).
 func (d Deployment) Isolation(brokerPID int) isolation.Config {
 	return isolation.Config{
-		AssuranceMode:   d.EffectiveAssurance(),
-		BrokerUID:       uint32(os.Geteuid()),
-		BrokerGID:       uint32(os.Getegid()),
-		AgentUIDs:       d.AgentUIDs,
-		IntakeUIDs:      d.IntakeUIDs,
-		AdminUIDs:       d.AdminUIDs,
-		AgentSocket:     d.SocketPath,
-		AdminSocket:     d.AdminSocket,
-		IntakeSocket:    d.IntakeSocket,
-		HostSocket:      d.HostSocket,
-		DBPath:          d.DBPath,
-		AegisKeysDir:    d.AegisKeysDir,
-		AegisKeysSocket: d.AegisKeysSocket,
-		BrokerPID:       brokerPID,
+		AssuranceMode:      d.EffectiveAssurance(),
+		BrokerUID:          uint32(os.Geteuid()),
+		BrokerGID:          uint32(os.Getegid()),
+		AgentUIDs:          d.AgentUIDs,
+		IntakeUIDs:         d.IntakeUIDs,
+		AdminUIDs:          d.AdminUIDs,
+		AgentSocket:        d.SocketPath,
+		AdminSocket:        d.AdminSocket,
+		IntakeSocket:       d.IntakeSocket,
+		RecipientEndpoints: endpointSlice(d.RecipientSocket),
+		RecipientUIDs:      d.RecipientUIDs,
+		HostSocket:         d.HostSocket,
+		DBPath:             d.DBPath,
+		AegisKeysDir:       d.AegisKeysDir,
+		AegisKeysSocket:    d.AegisKeysSocket,
+		BrokerPID:          brokerPID,
 	}
 }
 
@@ -570,4 +626,11 @@ func (d Deployment) StateDir() string {
 		return ""
 	}
 	return filepath.Dir(d.DBPath)
+}
+
+func endpointSlice(v string) []string {
+	if v == "" {
+		return nil
+	}
+	return []string{v}
 }
