@@ -1,678 +1,209 @@
 # SeqPass
 
-Agent-agnostic secret broker for native coding-harness integration. In the
-`isolated` Linux topology, agents run under separate UIDs and the broker
-keeps credential material outside those process identities. Same-user
-`best-effort` deployments do not provide that isolation guarantee.
+An agent-agnostic secret broker for native coding-harness integration.
 
-- **Mode A (credential use):** broker executes an allowlisted operation with a
-  credential resolved from AegisKeys, returns sanitized DTOs + receipt.
-- **Mode B (blind transfer):** broker delivers sensitive data directly to a
-  trusted recipient socket. Agent sees receipt + destination + status only.
-  Production transfers resolve AegisKeys bindings (default value or one
-  explicit `component:<name>` selector. Resolve v2 matches logical AegisKeys
-  component keys; the backward-compatible v1 fallback matches response-map
-  keys, historically component environment-variable names. Unbound
-  ephemeral payloads are a `memory-test --dev` fixture only and are rejected
-  under `--vault aegiskeys`. Resolution follows rotation (latest authorized
-  value of the approved binding); pinned-version semantics are not claimed.
-- **Mode C (sealed handoff):** after approval, SeqPass creates a short-lived
-  HPKE capsule for a pinned recipient key and signs it with a separate issuer
-  key. The agent can carry the ciphertext but cannot read or retarget it. The
-  recipient installs through its application adapter and returns a
-  UID-authenticated receipt; issuance alone remains uncertain.
+SeqPass lets an agent request a credential or a privileged operation without ever receiving the credential itself. A broker process running under its own OS identity resolves secrets from AegisKeys (or accepts a one-time value from a trusted human), applies default-deny policy, executes only allowlisted operations, and returns opaque IDs and receipts to the agent.
+
+In the `isolated` Linux topology, agents run under separate UIDs and credential material stays outside those process identities. Same-user `best-effort` deployments do not provide that isolation guarantee and are development-only.
+
+SeqPass is an experimental project tied to other applications: AegisKeys as the authoritative vault, the FI Gateway credential manager, and coding harnesses such as Codex, Claude Code, Hermes, OpenCode, and Pi. Work continues as time permits. See [Project status](#project-status).
+
+## Why
+
+Giving a coding agent an API key usually means putting that key somewhere the agent can read it: an environment variable, a config file, a chat message, or a tool argument. Once it is readable, it can be logged, echoed, or sent to a model. SeqPass inverts that arrangement. The agent sees an opaque request ID and a status; the secret moves only between trusted processes over authenticated Unix sockets, and every release is policy-checked and audited.
+
+## What it does
+
+| Mode | Flow | What the agent sees |
+|---|---|---|
+| **A - credential use** | Broker executes an allowlisted operation with a credential resolved from AegisKeys | Sanitized result DTO and receipt |
+| **B - blind transfer** | Broker delivers sensitive data directly to a trusted recipient socket | Receipt, destination, and status only |
+| **C - sealed handoff** | After approval, broker creates a short-lived HPKE capsule for a pinned recipient key and signs it with a separate issuer key | Opaque ciphertext it can carry but cannot read or retarget |
+
+Resolution follows rotation: the latest authorized value of the approved binding is used. Pinned-version semantics are not claimed. Unbound ephemeral payloads are a `memory-test --dev` fixture only and are rejected under `--vault aegiskeys`.
 
 ## Architecture
 
 ```
-harness (Codex / Claude / Hermes)
+harness (Codex / Claude / Hermes / OpenCode / Pi)
   └─ `seqpass mcp` (MCP stdio adapter, untrusted: no vault, no DB)
        └─ Unix socket IPC (peer-credential principals)
             └─ `seqpass broker` (privileged: policy, AegisKeys resolve, execution)
                  └─ AegisKeys broker socket (authoritative encrypted vault)
 ```
 
-## Implementation status
+There is no HTTP listener, no browser UI, and no TCP port. Approvals happen in the operator's trusted terminal with `seqpass admin`; agents observe approval state from inside the harness with `secret_status`.
+
+## Capability status
+
+A capability is **implemented** when code exists and tests pass. It is **production-qualified** only after the required live deployment, credential, and isolation evidence has been independently verified.
 
 | Capability | Status | Evidence |
-|-----------|--------|----------|
+|---|---|---|
 | Broker core (operations, policy, destinations, approval) | Implemented, tested | `go test ./...` |
-| Unix-socket IPC domains (agent / admin / intake / host) | Implemented, tested | IPC tests + socket tests |
-| Relay workflow (request → review → fulfill → dispatch) | Implemented, tested | Service + integration tests |
+| Unix-socket IPC domains (agent / admin / intake / host) | Implemented, tested | IPC and socket tests |
+| Relay workflow (request, review, fulfill, dispatch) | Implemented, tested | Service and integration tests |
 | Administrative host-binding RPC | Implemented, tested | `internal/ipc/hostbinding_rpc_test.go` |
-| Host-session registration + revocation lifecycle | Implemented, tested | `internal/service/hostsession_test.go` |
+| Host-session registration and revocation lifecycle | Implemented, tested | `internal/service/hostsession_test.go` |
 | Relay worker (bounded, deadline-priority) | Implemented, tested | `internal/service/relay_test.go` |
 | Transactional quota enforcement | Implemented, tested | `internal/metadata/relay.go` |
-| OpenCode adapter (trusted host + agent domain) | Type-checked, unit-tested | `bun x tsc --noEmit` + `bun x vitest run` |
-| Pi adapter (trusted host + agent domain) | Type-checked, unit-tested | `bun x tsc --noEmit` + `bun x vitest run` |
-| **Native protected-input isolation** | **Not yet production-qualified** | Requires live multi-UID topology + AegisKeys qualification |
-| **AegisKeys production resolution** | **Not yet production-qualified** | Requires live dedicated-UID grant + rotation tests |
-| Recipient durability contract | Implemented, tested | `internal/transfer/recipient_test.go` + `recipient_server_test.go` |
-| Mode A recipient-pull ticket | Implemented, tested | `internal/service/handoff_test.go` + recipient-only IPC tests |
-| Mode C signed HPKE capsule issue/import/receipt | Implemented, unit-tested | `internal/capsule/`, `internal/service/capsule_issue_test.go`, `cmd/seqpass/recipient_capsule.go` |
-| OpenCode recipient adapter (v1 auth.json + v2 credential store) | Implemented; v2.1.4 app-qualified with synthetic local provider | `internal/apptarget/opencode*.go`; `SEQPASS_QUAL_OPENCODE=1 go test ./qual -run '^TestQualOpenCodeHandoff$' -count=1` |
-| Codex recipient adapter (API key in recipient-pinned CODEX_HOME) | Implemented; codex-cli 0.165.0 app-qualified with synthetic local Responses API, including rotation | `internal/apptarget/codex.go`; `SEQPASS_QUAL_CODEX=1 go test ./qual -run '^TestQualCodexHandoff$' -count=1` |
-| Real credential consumer (`SecretConsumer`) | Implemented, tested | `internal/transfer/consumer.go` + `internal/service/real_consumer_test.go` (delivery → commit → verified `applied`) |
-| Credentialed operations (`http.request`, `process.run`, `git.fetch`, `git.push` pinned profiles) | Implemented, tested | `internal/secureops/` — pinned executables/origins/remotes/sources, credential never in argv/env/URL/DTO (fd-injected; mutation-tested negative controls). `git.push` pushes a branch of the operator-pinned source repository to the operator-pinned remote; no `--force`, the agent supplies only the branch |
-| Generic agent adapter (MCP + CLI) | Implemented, tested | `internal/adapter/` + `cmd/seqpass/agent.go` |
-| Versioned adapter contract (`protocol_version`, sealed frames) | Implemented, tested | `internal/adapter/protocol.go` (`Seal`/`Unseal` refuse unknown versions) |
-| Adapter host-version qualification (register-time detection, incompatible-major refusal) | Implemented, tested | `integrations/opencode/index.ts` + `integrations/pi/client.ts`, vitest suites |
-| `seqpass install <adapter>` (endpoints-only adapter config) | Implemented, tested | `cmd/seqpass/install.go` (no credentials/session tokens in snippets; `--force` overwrite guard) |
-| Installation-wide config (`/etc/seqpass/config.json`, `/run/seqpass`, `/var/lib/seqpass`) | Implemented, tested | `internal/config/config.go` loader (fail-closed on malformed config; dev home-dir fallback unchanged) |
-| Live isolation boundary check + drift revocation | Implemented, tested | `internal/isolation/` + `internal/daemon/isolation_test.go` |
+| OpenCode adapter (trusted host + agent domain) | Type-checked, unit-tested | `bun x tsc --noEmit`, `bun x vitest run` |
+| Pi adapter (trusted host + agent domain) | Type-checked, unit-tested | `bun x tsc --noEmit`, `bun x vitest run` |
+| Recipient durability contract | Implemented, tested | `internal/transfer/recipient_test.go` |
+| Mode A recipient-pull ticket | Implemented, tested | `internal/service/handoff_test.go` |
+| Mode C signed HPKE capsule issue, import, receipt | Implemented, unit-tested | `internal/capsule/`, `internal/service/capsule_issue_test.go` |
+| OpenCode recipient adapter (v1 auth.json + v2 credential store) | Implemented; v2.1.4 app-qualified with synthetic local provider | `internal/apptarget/opencode*.go`; opt-in `./qual` test |
+| Codex recipient adapter (API key in recipient-pinned CODEX_HOME) | Implemented; codex-cli 0.165.0 app-qualified with synthetic local Responses API | `internal/apptarget/codex.go`; opt-in `./qual` test |
+| Real credential consumer | Implemented, tested | `internal/transfer/consumer.go` (delivery, commit, verified `applied`) |
+| Credentialed operations (`http.request`, `process.run`, `git.fetch`, `git.push`) | Implemented, tested | `internal/secureops/`; pinned executables, origins, remotes; credential never in argv, env, URL, or DTO |
+| Generic agent adapter (MCP + CLI) | Implemented, tested | `internal/adapter/`, `cmd/seqpass/agent.go` |
+| Versioned adapter contract (sealed frames) | Implemented, tested | `internal/adapter/protocol.go` (refuses unknown versions) |
+| Adapter host-version qualification | Implemented, tested | `integrations/opencode/`, `integrations/pi/` |
+| `seqpass install <adapter>` (endpoints-only config) | Implemented, tested | `cmd/seqpass/install.go` (no credentials or session tokens) |
+| Installation-wide config | Implemented, tested | `internal/config/config.go` (fail-closed on malformed config) |
+| Live isolation boundary check and drift revocation | Implemented, tested | `internal/isolation/`, `internal/daemon/isolation_test.go` |
 | `seqpass recipient` (deployable consumer endpoint) | Implemented, tested | `cmd/seqpass/recipient.go` |
-| **Recipient live-socket integration** | **Not yet production-qualified** | Requires real recipient process + privileged Unix-socket topology |
-| **Multi-UID isolation qualification (G2–G8)** | **Not yet production-qualified** | Requires separate agent/operator/broker/recipient UIDs; see `qual/PRIVILEGED.md` |
+| **Native protected-input isolation** | **Not yet production-qualified** | Requires live multi-UID topology plus AegisKeys qualification |
+| **AegisKeys production resolution** | **Not yet production-qualified** | Requires live dedicated-UID grant and rotation tests |
+| **Recipient live-socket integration** | **Not yet production-qualified** | Requires real recipient process plus privileged Unix-socket topology |
+| **Multi-UID isolation qualification (G2-G8)** | **Not yet production-qualified** | Requires separate agent, operator, broker, and recipient UIDs; see [privileged qualification](qual/PRIVILEGED.md) |
 
-A capability is **implemented** when code exists and tests pass. A capability
-is **production-qualified** only after the required live deployment,
-credential, and isolation evidence has been independently verified.
-
-No HTTP listener, no browser UI, no TCP port. Approvals happen in the
-operator's trusted terminal (`seqpass admin`); agents observe approval state
-from inside the harness via `secret_status`.
-
-## Build
+## Quick start
 
 ```bash
 go build -o seqpass ./cmd/seqpass
+
+# Development only: memory vault, best-effort assurance, explicit --dev opt-in.
+./seqpass broker --vault memory-test --dev --assurance best-effort
 ```
 
-## Run
+Production uses dedicated UIDs and the AegisKeys vault. The broker requires `--vault aegiskeys`, defaults to `--assurance isolated`, and refuses to start unless the live boundary check passes:
 
 ```bash
-# 1. Development or local single-user setup (best-effort only).
-#    best-effort is development-only and is always reported as unverified;
-#    a production vault refuses it outright, so development uses the
-#    ephemeral memory vault and must opt in with --dev:
-# ./seqpass broker --vault memory-test --dev --assurance best-effort
-#
-# Production topology: broker and AegisKeys use a dedicated service UID;
-# each agent runs as a different UID. The trusted terminal/admin CLI runs as
-# the service UID because the admin and intake sockets are owner-only.
-# --vault is required: aegiskeys for production. A production vault defaults
-# to --assurance isolated and refuses to start unless the live boundary
-# check passes.
 sudo -u seqpass ./seqpass broker --vault aegiskeys --assurance isolated \
   --socket /run/seqpass/agents/broker.sock \
   --admin-socket /run/seqpass/admin/broker.sock \
   --intake-socket /run/seqpass/intake/broker.sock \
   --admin-uid $(id -u seqpass) --intake-uid $(id -u seqpass) \
   --agent-uid 2001,2002 --socket-group seqpass-agents
-# Optional: --auto-execute runs the trusted worker that executes authorized
-# ops without manual `admin execute` (approval still required).
+```
 
-# 2. Register the harness adapter (Codex)
+Register a harness adapter (the config contains endpoints only, never credentials):
+
+```bash
 codex mcp add seqpass -- /usr/local/bin/seqpass mcp
-# Or generate adapter configuration with the install command (endpoints
-# only — never credentials or session tokens; tokens are minted by
-# host.register at runtime):
-# ./seqpass install mcp --print        # exact MCP server registration stanza
-# ./seqpass install opencode --out <plugin-config> --intake-socket ... --host-socket ...
-# ./seqpass install pi --out <extension-config> --intake-socket ... --host-socket ... --agent-socket ...
-# Claude Code
 claude mcp add --scope user seqpass -- /usr/local/bin/seqpass mcp
-# Hermes (~/.hermes/config.yaml): mcp_servers.seqpass.command=/usr/local/bin/seqpass,
-# args=[mcp --socket /run/seqpass/agents/broker.sock],
-# tools.include=[relay_request relay_status secret_catalog secret_use secret_transfer secret_status]
-# No credential travels in this config. The MCP adapter returns an opaque ID;
-# a trusted terminal runs `seqpass relay fulfill` to supply values.
+./seqpass install opencode --out <plugin-config> --intake-socket ... --host-socket ...
+```
 
-# 3. Operator terminal: register, approve, execute
+Operator terminal:
+
+```bash
 ./seqpass admin add-secret --name github/staging --binding inference/staging
-# Dev-mode bounded intake only (memory-test): production payloads live in AegisKeys.
-./seqpass admin add-secret --name intake/demo && ./seqpass admin stage-secret --ref <ref-id> --file ./payload.bin
-./seqpass admin add-dest --name runner --type recipient-socket --endpoint /run/trusted/recipient.sock --expect-uid 3001
+./seqpass admin add-dest --name runner --type recipient-socket \
+  --endpoint /run/trusted/recipient.sock --expect-uid 3001
 ./seqpass admin add-policy --name team --rules '[{"principal":"uid:2001","secret_refs":["<ref>"],"ops":["transfer"],"dest_ids":["<dest>"]}]'
 ./seqpass admin pending
 ./seqpass admin approve --type transfer --id <op-id>
 ./seqpass admin execute --type transfer --id <op-id>
-./seqpass admin verify --type transfer --id <op-id>   # independent postcondition check (SC-14)
-./seqpass admin set-policy --id <pol> --enabled false   # revokes outstanding approvals
-./seqpass admin update-dest --id <dest> --endpoint /run/trusted/new.sock  # invalidates approvals
-./seqpass admin update-dest --id <dest> --endpoint /run/trusted/new.sock --expect-uid 3002  # re-pin identity
-
-# 4. Health (no secrets)
+./seqpass admin verify --type transfer --id <op-id>
 ./seqpass status
 ```
 
-## Secure handoff (relay): trusted terminal intake
+### Standalone relay-only mode
 
-The relay is the primary product flow. The agent decides it needs a
-sensitive value; the user supplies it through a trusted path; SeqPass
-delivers it to the registered recipient; the agent gets status only.
-
-```bash
-# Agent (inside Claude Code / Codex / Hermes) calls relay_request:
-# { destination_id, data_kind: password|one_time_code|api_key|token|pin|text,
-#   purpose, ttl_seconds } -> { request_id, awaiting_user }
-# The MCP adapter returns only an opaque request ID and instructions.
-# It never opens a native elicitation form or handles plaintext. The value
-# enters through the trusted terminal below, outside the agent process.
-
-# User (own terminal session, never the agent's terminal):
-./seqpass tui                               # persistent native inbox TUI (preferred)
-./seqpass relay inbox                       # pending requests, verified fields
-./seqpass relay fulfill <request-id>        # review recipient/action/expiry,
-                                            # enter value hidden, confirm, authorize
-./seqpass relay status <request-id>         # delivered / uncertain / ...
-./seqpass relay cancel <request-id>         # withdraw
-
-# User-initiated (no agent request needed; one trusted interaction,
-# intake socket only — needs no agent IPC privileges):
-./seqpass relay request --to <dest> --kind password --ttl 90s [--file ./secret]
-
-# Broker serves three sockets: agent (harness), admin (operator), and
-# intake (human value-release, owner-only by default, separate UID
-# allowlist via --intake-uid defaulting to admin UIDs; --intake-group
-# opts a distinct-user deployment into a group-accessible intake socket,
-# never the agent group, never world-accessible).
-#
-# Three capabilities: quick relay (single-use handoff), reusable
-# reference (bounded/concurrent deliveries until expiry), and authorized
-# operation execution. Agent requests create SINGLE-USE relays only;
-# reusable/bounded grants need an explicit trusted-user choice.
-# Recipient acknowledgment attests durable acceptance by the pinned
-# recipient process — not proof of downstream task completion.
-# Fulfilled quick relays dispatch from the default broker-managed relay
-# queue (no --auto-execute needed); disable with --no-relay-auto-deliver.
-```
-
-### Native host presentation (HI-02/HI-03/HI-05/HI-07)
-
-SeqPass separates the agent control plane from host presentation. The
-optional `--host-socket PATH` enables a display-only native-host
-presentation domain. A trusted host adapter registers over the protected
-intake trust boundary with `host.register`, receives a broker-minted
-session token, and can then call only `host.event`, `host.notice`,
-`host.review`, and `host.cancel_prompt`.
-Those methods return broker-verified public metadata and a versioned
-protected-input notice; they cannot fulfill or reject a relay.
-
-A host-native secure-input mode is not enabled by this socket. Registration
-negotiates the host kind and non-secret capability flags (`presentation`,
-`input_transport`, `supports_resume`, `supports_cancel_prompt`, and
-`supports_multiple_pending`); the broker always normalizes
-`credential_form_via_mcp=false`. Capability flags describe UI support, not
-security. A native input requires a version-, adapter-, topology- and
-security-configuration-bound qualification record
-(`harness.AdapterQualification`), and the default classification remains
-`model_blind`/`external_tty` until all terminal, process/tool and transcript
-boundaries are verified. Purpose text is untrusted annotation; only
-broker-rendered `trusted_host_render` review DTOs may initiate protected
-input.
-
-Known broker host kinds are `codex`, `opencode`, `pi`, `jcode`,
-`qwen-code`, `claude-code`, and `agy` (plus `generic` for legacy adapters).
-
-
-
-Lifecycle: a pending relay survives an adapter restart until its own
-deadline; host disconnection is only a display-state hint, not user
-rejection. A host adapter may withdraw a still-pending prompt with
-`host.cancel_prompt`; once dispatch has started, the broker returns
-`prompt_cancelled=false` and preserves the uncertain/reconciled outcome
-rather than fabricating a final result.
-
-Relay guarantees: the grant binds exact agent + recipient (+ live
-config) + purpose + deadline + delivery budget, without creating a
-permanent policy and without bumping the global epoch; single-use
-values admit exactly one delivery (concurrent racers converge, the
-loser fails closed); reusable grants serve concurrent apps through the
-bounded worker pool; expiry/revocation/restart (payloads are memory-
-only) all read truthfully and can never start a new dispatch; receipts,
-audit, status and the SQLite file never contain plaintext.
-
-Identity caveat: intake authorizes by UID and the socket is owner-only.
-`best-effort` supports local development and makes no strict process
-isolation claim; it is available only with the development memory vault, and
-a production (`aegiskeys`) installation refuses it outright. `isolated`
-refuses broker/agent and trusted/agent UID overlap, requires an explicit
-agent socket group whose membership includes every configured agent, and
-requires distinct agent versus admin/intake socket directories. A production
-installation defaults to `isolated` and refuses to start unless the live
-boundary check passes. The trusted operator runs the intake CLI as the broker
-service UID. This validates the configured topology; a strict AI-blind
-claim still requires a passing multi-process qualification run and review of
-filesystem ACLs, supplementary groups, executable permissions, and AegisKeys
-grants on the deployment host. The acceptance procedure is in
-[`qual/PRIVILEGED.md`](qual/PRIVILEGED.md); the current opt-in test records the
-process-boundary and protected-relay tiers when a dedicated-UID lab is
-provisioned. Without that environment it records those tiers as blocked; full
-credentialed/provider scenarios remain `not_exercised` and are not a live
-cross-broker qualification.
-
-## Import in a harness (Go)
-
-```go
-import secretbridge "github.com/secretbridge/secretbridge"
-
-c, _ := secretbridge.Dial(os.Getenv("SEQ_PASS_SOCKET"))
-defer c.Close()
-entries, _ := c.Catalog() // refs + discoverable ops (ready vs scoped)
-opID, _ := c.Use("github/staging", "github.get_repo", "", map[string]string{"repo": "org/repo"})
-status, _ := c.Status("use", opID)
-```
+SeqPass can run as a multi-UID relay service without AegisKeys: use `--vault relay-only` with `--assurance isolated`. It keeps separate agent, intake, and admin identities and sockets; an authorized human supplies the payload and the broker holds it in memory for a single dispatch. `relay-only` has no persistent credential store and refuses credential references, AegisKeys resolution, provisioning, staged secret use, and protected credential operations. Use `--vault aegiskeys` for persistent API-key storage and scoped operations.
 
 ## MCP tools
 
 | Tool | Behavior |
-| ---- | -------- |
-| `secret_catalog` | References + capabilities for the authenticated identity |
-| `secret_capabilities` | Discovery: allowlisted operations, accepted data kinds, the closed request-state vocabulary, and the broker's honest input-assurance facts. Never secret material |
-| `secret_use` | Submit allowlisted op; returns opaque op ID |
-| `secret_transfer` | Request broker→recipient transfer; returns opaque op ID |
-| `secret_status` | Caller's own status + durable sanitized receipt when completed |
-| `relay_request` | Request protected user input for a registered recipient; returns an opaque ID for trusted-terminal fulfillment |
-| `relay_status` | Own relay request state, normalized to the closed vocabulary (awaiting_user, authorized, dispatching, accepted, applied, uncertain, rejected, expired, unavailable) — never the secret |
+|---|---|
+| `secret_catalog` | References and capabilities for the authenticated identity |
+| `secret_capabilities` | Allowlisted operations, accepted data kinds, request-state vocabulary, and honest input-assurance facts; never secret material |
+| `secret_use` | Submit an allowlisted operation; returns an opaque ID |
+| `secret_transfer` | Request broker-to-recipient transfer; returns an opaque ID |
+| `secret_status` | Caller's own status and durable sanitized receipt when complete |
+| `relay_request` | Request protected user input for a registered recipient; returns an opaque ID |
+| `relay_status` | Own relay state, normalized to a closed vocabulary, never the secret |
 | `relay_cancel` | Withdraw your own relay request before fulfillment; safe to repeat |
 
-An unqualified or unknown broker state is refused rather than reported to the
-agent. `accepted` means the recipient durably stored the delivery; only
-`applied` means the consumer verified the intended effect.
+An unqualified or unknown broker state is refused. `accepted` means the recipient durably stored the delivery; only `applied` means a consumer verified the intended effect. The same contract is available without MCP via `seqpass agent capabilities|request|status|cancel`.
 
-The same contract is available without MCP as
-`seqpass agent capabilities|request|status|cancel`, for harnesses that speak
-CLI instead of MCP.
+## Trusted-terminal relay flow
 
-## Agent-carried sealed application handoff
-
-The recipient generates its HPKE key under its own service identity. The
-issuer Ed25519 key stays under the SeqPass broker identity; copy only the
-issuer public key to the recipient through a separately trusted enrollment
-channel. This signing key is separate from AegisKeys helper attestation.
+The relay is the primary product flow. The agent decides it needs a value; a human supplies it through a trusted path; the broker delivers it to a registered recipient; the agent gets status only.
 
 ```bash
-# Recipient identity (private key is mode 0400; keep the directory private).
-seqpass recipient keys generate --private-key /var/lib/seqpass-recipient/hpke.json \
-  --public-key /var/lib/seqpass-recipient/hpke.pub \
-  --receipt-private-key /var/lib/seqpass-recipient/receipt.seed \
-  --receipt-public-key /var/lib/seqpass-recipient/receipt.pub
-
-# Issuer identity on the broker host; provision issuer.pub out of band.
-seqpass admin handoff-issuer-keygen --private-seed /var/lib/seqpass/issuer.seed \
-  --public-key /var/lib/seqpass/issuer.pub
-
-# The recipient-only broker socket needs a dedicated group for the gateway
-# service UID. Do not add agent UIDs to this group.
-groupadd --system seqpass-recipients
-usermod -aG seqpass-recipients <gateway-service-user>
-
-# Start the broker with the pinned signing identity.
-seqpass broker --vault aegiskeys --handoff-signing-key-id seqpass-issuer-r1 \
-  --handoff-signing-seed /var/lib/seqpass/issuer.seed \
-  --recipient-socket /run/seqpass/recipient/broker.sock --recipient-uid 3002 \
-  --recipient-group seqpass-recipients
-
-# Register a logical application target. No application config path is supplied.
-seqpass admin add-dest --name opencode-primary --type sealed-capsule \
-  --handoff-mode sealed-capsule --expect-uid 3002 \
-  --recipient-key-id opencode-r1 --recipient-public-key /etc/seqpass-recipient/hpke.pub \
-  --receipt-key-id opencode-receipt-r1 --receipt-public-key /etc/seqpass-recipient/receipt.pub \
-  --issuer-key-id seqpass-issuer-r1 --issuer-public-key /var/lib/seqpass/issuer.pub \
-  --app opencode --account openrouter --slot api_key \
-  --update-method opencode-auth-import-v2 --source-ref openrouter/main --source-revision 4
-
-# Install recipient-local trust once, as the recipient service identity. This
-# create-only registration pins the issuer, HPKE key, logical target, broker
-# receipt socket, and application adapter under the recipient's protected home.
-seqpass recipient capsule register \
-  --destination-id opencode-primary --destination-revision 1 \
-  --recipient-key-id opencode-r1 \
-  --recipient-private-key /var/lib/seqpass-recipient/hpke.json \
-  --receipt-key-id opencode-receipt-r1 \
-  --receipt-private-key /var/lib/seqpass-recipient/receipt.seed \
-  --issuer-key-id seqpass-issuer-r1 \
-  --issuer-public-key /etc/seqpass-recipient/issuer.pub \
-  --target-id opencode:openrouter:api_key --app opencode \
-  --account openrouter --slot api_key --update-method opencode-auth-import-v2 \
-  --source-ref openrouter/main --source-revision 4 \
-  --opencode-command /home/seqpass-recipient/.opencode/bin/opencode
-
-# After operator approval, the agent writes only the opaque envelope.
-seqpass agent handoff issue --op-id <approved-op> --output ./handoff.capsule
-
-# Carry the exact opaque bytes to the trusted recipient. The receiver reads
-# only stdin and loads all trust/target pins from its create-only local
-# registration; the courier cannot replace them with command-line flags.
-cat ./handoff.capsule | seqpass recipient capsule import \
-  --receipt-output /var/lib/seqpass-recipient/handoff-receipt.json
-
-# Carry the signed, secret-free receipt back to the issuer. The agent cannot
-# change its destination, handoff, capsule digest or result without invalidating
-# the recipient's Ed25519 signature.
-seqpass agent handoff receipt --file /path/to/handoff-receipt.json
+# User terminal, never the agent's terminal:
+./seqpass tui                            # persistent native inbox (preferred)
+./seqpass relay inbox                    # pending requests, verified fields
+./seqpass relay fulfill <request-id>     # review recipient, action, expiry; enter hidden
+./seqpass relay status <request-id>      # delivered / uncertain / ...
+./seqpass relay cancel <request-id>      # withdraw
 ```
 
-Capsules expire within five minutes by default (30 seconds minimum, 15 minutes
-maximum). The recipient journal claims a handoff before installation, and
-retries after a crash reconcile by readback instead of repeating the write.
-The recipient signs a receipt bound to its registered receipt key, destination
-revision, handoff ID, operation ID, encrypted capsule digest and result. The
-issuer marks completion only after verifying that signature; a missing receipt
-leaves the operation uncertain. For key replacement, follow the versioned,
-create-only procedure in [docs/handoff-key-rotation.md](docs/handoff-key-rotation.md).
-Online recipients may also configure
-`--broker-socket` to submit the UID-authenticated receipt directly. Offline
-recipients omit it and courier the signed receipt back with
-`seqpass agent handoff receipt`. Receipt signing uses its own Ed25519 key,
-separate from the HPKE decryption key, the capsule issuer key, and the AegisKeys
-helper-attestation key. Destination registration rejects reused key IDs or key
-material across the recipient, receipt, and issuer roles. Updating keys on an
-existing destination changes its revision and invalidates old approval and
-receipt pins. The versioned rotation procedure preserves the old destination
-record until its outstanding operations are reconciled. OpenCode, Codex, and the
-FI Gateway credential manager have recipient adapters for `api_key` slots.
-The gateway adapter sends the key over its peer-UID-authenticated local Unix
-socket into the gateway's live managed credential store; the gateway updates
-the exact provider/account pair and reports only metadata. The OpenCode v1 adapter maintains the legacy
-`auth.json`; v2 uses OpenCode's supported credential import/export commands
-and requires an explicit recipient-local executable path. Codex uses its
-supported `login --with-api-key` command and a recipient-pinned `CODEX_HOME`;
-enrollment requires an explicit recipient-local Codex executable path. Run
-their opt-in real-app qualifications with synthetic keys and local mock
-providers via `SEQPASS_QUAL_OPENCODE=1 go test ./qual -run '^TestQualOpenCodeHandoff$' -count=1`
-and `SEQPASS_QUAL_CODEX=1 go test ./qual -run '^TestQualCodexHandoff$' -count=1`.
-Register a gateway target with `--app fi-gateway --app-provider openrouter
---account staging --slot api_key --update-method
-fi-gateway-credential-manager-v1`, and pin its local socket in recipient trust
-with `--fi-gateway-socket /run/fi-gateway/credentials.sock`.
-When the gateway service uses a separate Unix UID and its socket permissions
-allow the recipient to connect, pin it with
-`--fi-gateway-peer-uid <gateway-service-uid>` during recipient registration
-(or on `recipient handoff`). Without this option SeqPass requires the peer UID
-to match the recipient process UID. The socket inode must still be
-recipient-owned and owner-only under SeqPass's path checks; the UID pin does
-not relax filesystem permissions. A UID pin authenticates the service account
-boundary, not a particular executable or an uncompromised process.
-Offline capsules cannot be revoked
-after issuance; credentials revoked afterward may remain usable in an issued
-capsule until it expires. Expiry does not erase a copied ciphertext. Separate
-agent, issuer and recipient identities are required; same-UID deployments do
-not isolate the recipient private key from the agent.
+The MCP adapter never opens a native elicitation form and never handles plaintext. A grant binds exact agent, recipient, live config, purpose, deadline, and delivery budget without creating a permanent policy. Single-use values admit exactly one delivery; concurrent racers converge with the loser failing closed. Payloads are memory-only, so expiry, revocation, and restart all read truthfully and cannot start a new dispatch. Receipts, audit, status, and the SQLite file never contain plaintext.
+
+Optional native host presentation (`--host-socket`) is display-only. A trusted host adapter receives a broker-minted session token and can call only `host.event`, `host.notice`, `host.review`, and `host.cancel_prompt`. Capability flags describe UI support, not security; a native secure-input mode requires a separate qualification record.
+
+## Sealed application handoff
+
+The recipient generates its HPKE key under its own service identity. The issuer Ed25519 key stays under the broker identity; only the issuer public key is copied to the recipient through a separately trusted enrollment channel. After approval the agent writes only an opaque envelope, and the recipient imports it through its application adapter.
+
+Capsules expire within five minutes by default (30 seconds minimum, 15 minutes maximum). The recipient signs a receipt bound to its registered receipt key, destination revision, handoff ID, operation ID, capsule digest, and result; the issuer marks completion only after verifying that signature. Offline recipients courier the signed receipt back. Receipt signing uses a key separate from the HPKE decryption key, the issuer key, and the AegisKeys attestation key. For key replacement, follow the versioned, create-only procedure in [handoff key rotation](docs/handoff-key-rotation.md).
+
+Recipient adapters exist for OpenCode, Codex, and the FI Gateway credential manager. The FI Gateway adapter sends the key over its peer-UID-authenticated local Unix socket into the gateway's managed credential store and reports only metadata.
+
+Offline capsules cannot be revoked after issuance; a credential revoked later may remain usable in an issued capsule until it expires. Expiry does not erase a copied ciphertext. Separate agent, issuer, and recipient identities are required: same-UID deployments do not isolate the recipient private key from the agent.
 
 ## Security model
 
-- Default-deny policy; DB errors deny; unknown ops/destinations deny.
-- Principals come from socket peer credentials, never request fields.
-- Admin methods require explicit admin-UID membership, not just reaching
-  the admin socket. Filesystem 0600 sockets are a second control.
-- Global authorization epoch: any policy/destination/binding change bumps
-  it; approvals and claims are bound to principal + binding + op + params
-  digest + destination digest + epoch. Revocation races fail closed.
-- Atomic claim (`authorized` → `executing`, one winner); `uncertain` on lost ack.
-- Submission validates the driver's typed contract (unknown ops/params
-  never reach approval). Execution replays the persisted canonical envelope
-  and re-evaluates current policy before credential release.
-- Transfers go only to authenticated recipient sockets: the endpoint path is
-  validated (socket, no symlink, expected owner), the peer UID/GID is
-  verified before any payload byte is sent, and the ack must bind the exact
-  operation ID + payload digest. File/network destinations are rejected.
-- Delivery receipts carry no secret-derived fingerprint: the payload digest
-  lives only inside the trusted delivery protocol and the broker-private
-  dispatch record, so low-entropy secrets gain no offline guessing oracle.
-- Reconciliation consults the original dispatch record (endpoint, identity,
-  payload digest), never the destination's current configuration; a dead
-  original reports unavailable instead of substituting a new recipient.
-- One broker owns each database (lock file held for life); expiry is a
-  visible lifecycle transition; authorized work is listed in `admin pending`
-  under READY so preauthorized ops never strand.
-- Credential-resolution helper (P0-1): the long-lived broker is
-  non-dumpable (`PR_SET_DUMPABLE=0`, §11), and AegisKeys authenticates
-  Unix-socket peers by reading `/proc/<pid>/exe` — which the kernel
-  refuses for a non-dumpable process even to the same UID. In-broker
-  resolves therefore fail at the peer-identity layer by design. The fix
-  keeps the broker's posture and moves each resolve into a short-lived
-  helper process (`seqpass resolve-helper`, configured via
-  `--aegiskeys-resolve-helper` and its required
-  `--aegiskeys-resolve-helper-sha256` pin in isolated AegisKeys mode):
-  startup rejects a missing, replaced, non-executable, or untrusted-path
-  helper before the broker accepts work. The canonical path and digest are
-  also checked by AegisKeys against its executable grant at resolve time.
-  The helper is spawned only by the broker's approved
-  execution path, one request over a private CLOEXEC socketpair
-  inherited as fd 3, credential material returns only on that
-  descriptor (stdout/stderr are /dev/null), `RLIMIT_CORE=0` blocks core
-  files while dumpability stays at the default so AegisKeys can verify
-  the helper's executable identity. The helper is the grant target —
-  an agent-spawned helper authenticates with the agent UID and is
-  denied; the helper path is operator configuration, never
-  agent-supplied. Attestation closes the courier hole: the broker
-  signs every resolve with an in-memory ed25519 key (`admin
-  attest_public` retrieves the hex public half for the AegisKeys
-  grant's `attest_key` pin); the dumpable helper only carries
-  nonce+signature over the socketpair, so a same-UID process that
-  execs the helper directly still cannot produce a signature the
-  grant accepts (the private key lives in non-dumpable memory, the
-  one same-UID-unreadable store). A grant pinning an attest key never
-  matches an unattested or invalidly signed request. Residual: a
-  same-UID process could ptrace the millisecond-lived helper. AegisKeys
-  binds signatures to the binding, operation, operation ID, and nonce but
-  does not keep a nonce replay cache: a captured signed request could be
-  replayed as that same request while its grant remains valid. The helper
-  socketpair is private to the executor and helper; attestation authenticates
-  the executor and does not itself provide one-time request semantics.
+- Default-deny policy; database errors deny; unknown operations and destinations deny.
+- Principals come from socket peer credentials, never from request fields.
+- Admin methods require explicit admin-UID membership, not merely reaching the admin socket.
+- A global authorization epoch is bumped by any policy, destination, or binding change. Approvals and claims bind principal, binding, operation, parameters digest, destination digest, and epoch; revocation races fail closed.
+- Claiming is atomic (`authorized` to `executing`, one winner); a lost acknowledgement produces `uncertain`.
+- Execution replays the persisted canonical envelope and re-evaluates current policy before credential release.
+- Transfers go only to authenticated recipient sockets: path and owner are validated, peer UID/GID is verified before any payload byte, and the acknowledgement must bind the exact operation ID and payload digest.
+- Delivery receipts carry no secret-derived fingerprint, so low-entropy secrets gain no offline guessing oracle.
+- The long-lived broker is non-dumpable; AegisKeys resolves move into a short-lived, digest-pinned helper launched only by the approved execution path, with attestation signed by an in-memory key.
+- One broker owns each database. Credentialed operations use fd injection so the secret never appears in argv, environment, URL, or DTO.
 
-## Recipient wire protocol (v1)
+Residual caveats are documented in [attestation closeout](docs/attestation-doctor-closeout.md) and [FI Gateway remediation](docs/fi-gateway-remediation-plan.md). Real-app qualification runs are recorded in [Codex CLI](docs/qualification-codex-cli-0.165.0.md) and [OpenCode](docs/qualification-opencode-v2.1.4.md).
 
-Broker → recipient: 4-byte big-endian length + JSON envelope
-`{"v":1,"op_id":"...","digest":"sha256-hex","payload":"..."}`.
-Recipient → broker: 4-byte big-endian length + JSON ack
-`{"accepted":true,"op_id":"...","digest":"sha256-hex","bytes":N}`.
-
-The recipient must persist the payload under `(op_id, digest)` and only then
-ack quoting both back; byte counts alone are rejected as `uncertain`.
-Recipients must reject unknown envelope versions. Recipient processes run
-under the UID pinned at registration (`--expect-uid`); a substituted process
-receives nothing.
-
-Recipient obligations (SC-06):
-
-- Run as a DEDICATED service UID shared with no other process. UID pinning
-  authenticates the OS principal, not one application binary — a same-UID
-  hostile process can otherwise impersonate the recipient.
-- Serve the socket from a directory owned by the recipient UID (or root)
-  with no group/other write permission; the broker verifies this before
-  connecting and refuses otherwise. No symlinks in the socket path.
-- Treat `(op_id, digest)` as an idempotency key: a lost ack may cause the
-  broker to redeliver the identical envelope, which must be acked WITHOUT
-  re-applying side effects.
-- An ack attests durable acceptance (persisted), not downstream application
-  of the payload. "Applied" state needs independent outcome verification.
-- Memory vault is a test fixture; production credentials live in AegisKeys.
-- `Vault.Get` exists only inside the trusted executor.
-
-### Running a recipient
-
-```bash
-seqpass recipient --socket /run/seqpass/recipient/cred.sock \
-  --journal /var/lib/seqpass-recipient/journal \
-  --consumer file --consumer-dir /var/lib/seqpass-recipient/destination \
-  --trust-broker-uid $(id -u seqpass) --socket-mode 0600
-```
-
-`--consumer file` writes the credential as plaintext into `--consumer-dir`,
-then reads it back before reporting that the file commit succeeded. This is a
-recipient-side trusted-storage integration, not encrypted-at-rest storage and
-not equivalent to the AegisKeys vault. The directory must be private and owned
-by the recipient; the file consumer rejects symlinks, replacement directories,
-and existing operation files with different contents.
-`--consumer reference` is the metadata-only fixture: it journals durable
-acceptance but applies nothing, and is for wire tests and development only.
-There is no default consumer, and no mode prints the secret to stdout.
-
-`--trust-broker-uid` is the server-side allowlist: the recipient verifies the
-connecting peer's OS identity BEFORE reading any frame, with
-`SO_PEERCRED`, and refuses any unlisted caller. Omitting it allows only the
-recipient's own UID.
-
-## Deployment requirements (isolation must be proven, not assumed)
-
-Supported identity topology (C02):
+## Deployment and isolation
 
 | Component | OS identity | Access |
-| --------- | ----------- | ------ |
+|---|---|---|
 | AegisKeys broker | Dedicated service UID (`seqpass`) | Vault, key, private broker socket |
-| SeqPass broker (trusted executor) | Same service UID (`seqpass`) | AegisKeys `resolve`, private state, both SeqPass sockets |
-| Agent identities | Separate unprivileged UIDs in group `seqpass-agents` | Agent-request socket only |
-| Operator admin client | Explicitly authorized UID (normally `seqpass` itself) | Admin socket only |
+| SeqPass broker | Same service UID (`seqpass`) | AegisKeys resolve, private state, broker sockets |
+| Agent identities | Separate unprivileged UIDs in `seqpass-agents` | Agent socket only |
+| Operator admin | Explicitly authorized UID | Admin socket only |
 
-Setup:
+`isolated` refuses broker/agent and trusted/agent UID overlap, requires an explicit agent socket group containing every configured agent, and requires distinct agent versus admin/intake socket directories. Same-user deployments do not satisfy the secrecy claim. A `systemd` unit in `deploy/seqpass-broker.service` runs the broker under the service identity with restrictive filesystem privileges and no credential-bearing environment variables; its two-stage gate checks topology before start and live isolation after start.
 
-```bash
-# Dedicated service user + agent group (agents are never seqpass, never root)
-useradd -r -s /usr/sbin/nologin seqpass
-groupadd --system seqpass-agents
-for a in agent1 agent2; do useradd -m -s /bin/bash $a; usermod -aG seqpass-agents $a; done
-
-# Agent socket dir: service-owned, group-traverse so approved agents connect.
-# Admin socket dir: separate, owner-only, invisible to agents.
-mkdir -p /run/seqpass/agents /run/seqpass/admin /run/seqpass/intake
-chown seqpass:seqpass-agents /run/seqpass/agents; chmod 0710 /run/seqpass/agents
-chown seqpass:seqpass /run/seqpass/admin; chmod 0700 /run/seqpass/admin
-chown seqpass:seqpass /run/seqpass/intake; chmod 0700 /run/seqpass/intake
-
-# Broker: agent socket 0660 (group), admin socket 0600 (owner-only).
-# --agent-uid lists EVERY approved agent UID; anything else is denied even
-# with a valid peer credential. --admin-uid gates the admin socket.
-sudo -u seqpass ./seqpass broker --vault aegiskeys --assurance isolated \
-  --socket /run/seqpass/agents/broker.sock \
-  --admin-socket /run/seqpass/admin/broker.sock.admin \
-  --intake-socket /run/seqpass/intake/broker.sock.intake \
-  --socket-group seqpass-agents \
-  --agent-uid "$(id -u agent1),$(id -u agent2)" \
-  --admin-uid "$(id -u seqpass)" --intake-uid "$(id -u seqpass)"
-# --socket-group is what makes the documented permissions real: the broker
-# chowns the agent socket (and its directory) to that group and verifies
-# the result at startup, failing closed on mismatch.
-# Legacy destinations without a pinned recipient UID fail closed at delivery
-# until re-pinned via `update-dest --expect-uid`.
-
-# MCP adapter runs AS THE AGENT user (never as seqpass):
-sudo -u agent1 SEQ_PASS_SOCKET=/run/seqpass/agents/broker.sock ./seqpass mcp
-```
-
-Rules:
-
-- Broker + admin CLI run as the dedicated service user; agents run as
-  separate users with no write access to the broker's executable, DB,
-  socket dirs, or AegisKeys grant config.
-- `resolve` in AegisKeys is granted only to the trusted executor identity.
-  The existing AegisKeys same-UID constraint is preserved: SeqPass's broker
-  and AegisKeys run under the same service UID. Agents must have no access
-  to the AegisKeys socket (do not add agents to AegisKeys' UID or group).
-- Same-user agent + broker deployments do NOT satisfy the secrecy claim.
-- `relay_request` only creates a request and returns an opaque ID. The MCP
-  adapter never calls native elicitation and never receives the value. A
-  trusted operator reviews and fulfills it from a terminal running under the
-  broker service UID with `seqpass relay inbox` and `seqpass relay fulfill
-  <request-id>`; the owner-only intake socket must remain inaccessible to
-  agent UIDs.
-- Packaging warning: `seqpass` is one binary with `broker`, `mcp` and
-  `admin` subcommands. AegisKeys' executable grant identifies the binary,
-  not the subcommand, so subcommands do NOT establish different grant
-  identities. Isolate by OS user (above), never by subcommand. For stronger
-  executable-level separation, ship distinct `seqpass-broker` / `seqpass-mcp`
-  binaries or prevent agent UIDs from executing the privileged binary as the
-  service user (no sudo, no setuid).
-
-### systemd service (recommended for the isolated topology)
-
-`deploy/seqpass-broker.service` runs the broker under the dedicated
-service identity with restart-on-failure (bounded by the `[Unit]`
-restart window), restrictive filesystem privileges
-(`ProtectSystem=strict`, `PrivateTmp`, `NoNewPrivileges`, writes
-confined to `/run/seqpass` + `/var/lib/seqpass`), and **no
-credential-bearing environment variables**. Topology configuration
-(paths, UIDs, socket groups, AegisKeys endpoint) comes from the
-mandatory `/etc/default/seqpass` — never credentials.
-
-The unit enforces a two-stage gate:
-
-1. `ExecStartPre` — `seqpass doctor --topology` preflight: validates the
-   expanded configuration and filesystem topology before the broker
-   exists. It deliberately does **not** pass `--require-verified`: a
-   preflight cannot prove the isolation of a broker that has not
-   started, and doctor refuses to claim otherwise.
-2. `ExecStartPost` — bounded readiness gate: verifies the **running**
-   broker's live isolation boundary (`doctor --require-verified`) with
-   retries; the unit fails if the boundary never reports verified.
-
-Install with:
-
-```bash
-sudo cp deploy/seqpass-broker.service /etc/systemd/system/
-sudo editor /etc/default/seqpass   # required topology keys (see unit header)
-sudo systemctl daemon-reload
-sudo systemctl enable --now seqpass-broker
-```
-
-Override site-specific settings with a drop-in unit. Directive
-placements and the two-stage gate contract are pinned by
-`deploy/deploy_test.go` (including `systemd-analyze verify` where the
-host has it), so a unit regression fails `go test ./...` rather than
-being silently ignored by systemd.
-
-## Sandbox note
-
-Some sandboxed environments expose `/home` as `nobody:nogroup` even when the
-test runtime directory itself is correctly owned. The broker refuses such
-ancestors by design. In those environments, socket-based tests will skip
-automatically; use a normal host or container where `/home` is broker-owned
-to exercise the full Unix-socket coverage.
+A strict AI-blind claim still requires a passing multi-process qualification run and review of filesystem ACLs, supplementary groups, executable permissions, and AegisKeys grants on the deployment host. See [privileged qualification](qual/PRIVILEGED.md).
 
 ## Testing
 
 ```bash
-go test ./...                                  # portable; socket suites skip
-SEQPASS_TEST_RUNTIME_DIR=/tmp go test ./...    # full socket coverage
-SEQPASS_TEST_RUNTIME_DIR=/tmp SEQPASS_REQUIRE_RUNTIME=1 go test ./...  # as CI
+go test ./...                                   # portable; socket suites skip
+SEQPASS_TEST_RUNTIME_DIR=/tmp go test ./...     # full socket coverage
+SEQPASS_TEST_RUNTIME_DIR=/tmp SEQPASS_REQUIRE_RUNTIME=1 go test ./...  # CI
 ```
 
-`SEQPASS_TEST_RUNTIME_DIR` names a directory with trusted ancestors (owned by
-the test identity, not group- or world-writable) under which the Unix-socket
-suites create their fixtures. It must be set to exercise the socket-based
-coverage. Without it those suites skip, which keeps `go test ./...` portable
-but silently reduces coverage.
+`SEQPASS_TEST_RUNTIME_DIR` must point at a directory with trusted ancestors or socket suites skip. `SEQPASS_REQUIRE_RUNTIME=1` turns a blocked prerequisite into a failure instead of a skip.
 
-`SEQPASS_REQUIRE_RUNTIME=1` turns a blocked prerequisite into a test failure
-instead of a skip, so a coverage run cannot pass while omitting the socket
-suites. Use it in CI and release verification.
+## Project status
 
-Some tests do not need a trusted ancestor and instead create their own
-owner-only directory under `/tmp` (which is world-traversable and therefore a
-valid ancestor for a socket fixture). Those run everywhere.
+Experimental and maintained intermittently. Several security-critical capabilities remain **not production-qualified** until live multi-UID, AegisKeys, and recipient-socket evidence is independently verified. Same-user `best-effort` mode is development-only, and a production AegisKeys vault refuses it. No `LICENSE` file is published yet; all rights are reserved until one is added.
 
-## Relay request contract
+## Contributing
 
-`relay_request` returns:
+Issues and focused pull requests are welcome. Security-sensitive changes should include the relevant tests and an explicit statement of which isolation assumptions they rely on.
 
-```json
-{
-  "request_id": "req-...",
-  "status": "awaiting_user",
-  "input_required": true,
-  "input_kind": "api_key",
-  "next_action": "secure_input"
-}
-```
+## Disclaimer
 
-`input_kind` mirrors the requested data kind (for example `api_key` or
-`password`). The harness should display a pending-input notice; the actual
-value is never collected by the MCP form, the chat surface, or the agent.
+This project is an independent, experimental work by the repository author. It is not affiliated with, directed, endorsed, or approved by FreeInference.org ("FI"). FI has no involvement in this project's design, development, or publication, and bears no responsibility for it. Every decision to create, modify, and publish this work was made by me, at my own discretion.
 
-## Standalone relay-only deployment
-
-SeqPass can run as a production multi-UID relay service without AegisKeys:
-select `--vault relay-only` and keep `--assurance isolated` (the default for
-this production mode). It retains the separate agent, trusted-intake, and
-administrator identities and sockets. Agents can request a handoff to a
-registered recipient; an authorized human supplies the payload, and the
-broker keeps it only in memory for a single dispatch. Agent-facing status and
-receipts contain outcome metadata, never the payload.
-
-`relay-only` has no persistent credential store. It refuses credential
-references, AegisKeys resolution, credential provisioning, generic staged
-secret use, and protected credential operations. Use `--vault aegiskeys` for
-persistent API-key storage and scoped protected operations. `memory-test
---dev` remains a development fixture and is not a production alternative.
+If you find this project useful or helpful, please consider sponsoring or otherwise supporting FreeInference.org. FI provides a useful and valuable service to people who might not otherwise have the opportunity to access this kind of tooling.
