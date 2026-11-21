@@ -1,0 +1,58 @@
+{
+  "artifact_copies": "Original container-copied files remain unchanged; mode-0600 repository-user-owned byte-identical copies are retained under capsule-preserved-* names because the container UID mapping made the originals owned by nobody.",
+  "corrections": [
+    {
+      "correction": "qual buildBinary now passes -buildvcs=false, and the isolated run marks /workspace as a safe Git directory",
+      "finding": "container go build used default VCS stamping and failed in the checkout; the manifest consequently could not resolve a safe revision"
+    },
+    {
+      "correction": "the helper build now runs from the repository root",
+      "finding": "the test-only issuer helper was built relative to the qual package and resolved to a nonexistent qual/qual path"
+    },
+    {
+      "correction": "the recipient journal now lives beneath the pre-created owner-only registration directory",
+      "finding": "recipient capsule import chose a journal path whose intermediate state directories did not exist; secure journal initialization correctly refused to follow/create that chain"
+    }
+  ],
+  "passing_artifact": "capsule-preserved-qual-TestQualPrivilegedCapsuleBoundary-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793252966935837554.json",
+  "passing_run": {
+    "checks": "agent package inspection; agent denial reading recipient HPKE private key and issuer seed; tamper, wrong destination, wrong target, retired key ID, stale destination revision, expiry and attempted import-trust override rejection; no writes for invalid packages; concurrent identical imports yielded one application-file replacement and two idempotent receipts",
+    "environment": "official golang:1.25.9-alpine base sha256:5caaf1cca9dc351e13deafbc3879fd4754801acba8653fa9540cea125d01a71f; network disabled; 3 GiB memory, 2 CPUs, 256 PID limit; SeqPass checkout and module cache read-only",
+    "independent_review": "unavailable",
+    "manifest": "capsule-preserved-qual-TestQualPrivilegedCapsuleBoundary-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793252966935837554.json",
+    "raw_credentials_retained": false,
+    "result": "15 passed, 0 failed; 8 host/native-UI scenarios not_exercised",
+    "scope": "synthetic cross-UID capsule issuance/import boundary with test-only issuer helper and local receipt sink; service-level capsule issuance is separately covered by TestSealedCapsuleIssueIsOpaqueAndLeavesOperationUncertain; real application acceptance is a separate opt-in qualification",
+    "topology": "service/issuer UID 2001, agent UID 2002, recipient UID 2003; recipient home under a disposable /tmp home root"
+  },
+  "prior_attempts": [
+    {
+      "case_status_counts": {
+        "passed": 1
+      },
+      "original_manifest": "qual-TestQualPrivilegedCapsuleBoundary-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793252674813920971.json",
+      "preserved_copy": "capsule-preserved-qual-TestQualPrivilegedCapsuleBoundary-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793252674813920971.json",
+      "sha256": "5ff8234454abf35bdb8f46cce3e4a04bb0d8e9252fbe2ed9f0c4f0ceefbef436"
+    },
+    {
+      "case_status_counts": {
+        "failed": 1,
+        "passed": 10
+      },
+      "original_manifest": "qual-TestQualPrivilegedCapsuleBoundary-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793252839817303734.json",
+      "preserved_copy": "capsule-preserved-qual-TestQualPrivilegedCapsuleBoundary-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793252839817303734.json",
+      "sha256": "2a9648291d7bcc1bb912c212ee8cc9cd92f8871d03da1caba812db2d0c7ef2d4"
+    },
+    {
+      "case_status_counts": {
+        "passed": 13
+      },
+      "original_manifest": "qual-TestQualPrivilegedCapsuleBoundary-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793252882906095352.json",
+      "preserved_copy": "capsule-preserved-qual-TestQualPrivilegedCapsuleBoundary-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793252882906095352.json",
+      "sha256": "a688ddf247729655eff07408a25f76d4f286e7de9dfe188e9da2d70b36ba8284"
+    }
+  ],
+  "record_type": "qualification-correction",
+  "schema_version": 1,
+  "supported_source_revision": "90710d55be7cb64c6ca78277d3a4a07a4c2a7487"
+}

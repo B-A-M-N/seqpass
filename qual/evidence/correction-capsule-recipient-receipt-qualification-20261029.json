@@ -1,0 +1,28 @@
+{
+  "record_type": "qualification-correction",
+  "schema_version": 1,
+  "supported_source_revision": "90710d55be7cb64c6ca78277d3a4a07a4c2a7487",
+  "source_snapshot_sha256": "8f9e86fde73a7c2078c45b8f4d8c8d97338a02afb7ba7580f7115c18cdfa0018",
+  "source_snapshot_note": "The test ran against the current uncommitted SeqPass worktree mounted read-only. The snapshot digest covers all files except .git, .tmp, and qual/evidence.",
+  "prior_failing_artifacts": [
+    {
+      "artifact": "qual-TestQualPrivilegedCapsuleBoundary-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793259152719956900.json",
+      "finding": "The cross-UID test still invoked recipient key generation without the now-required separate receipt key pair.",
+      "correction": "The qualification generates and pins recipient receipt keys, and each import writes to a unique recipient-owned receipt path."
+    },
+    {
+      "artifact": "qual-TestQualPrivilegedCapsuleBoundary-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793259299436381403.json",
+      "finding": "The test-only capsule issuer helper build attempted VCS stamping in the read-only, minimal test image.",
+      "correction": "The helper build now passes -buildvcs=false, matching the main qualification binary build."
+    }
+  ],
+  "passing_artifact": "qual-TestQualPrivilegedCapsuleBoundary-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793259359269490250.json",
+  "passing_run": {
+    "result": "15 passed, 0 failed; 8 host/UI cases not_exercised",
+    "topology": "issuer UID 2001, courier UID 2002, recipient UID 2003; disposable recipient home under /tmp",
+    "environment": "golang:1.25.9-alpine image sha256:5caaf1cca9dc351e13deafbc3879fd4754801acba8653fa9540cea125d01a71f; network disabled; 3 GiB memory, 2 CPUs, 256 PID limit; source checkout and Go module cache read-only",
+    "binary_sha256": "31f156b67a4d88b4124f7e0f276edeabf81c1523095edfdcc4467aa13ab3ed38",
+    "raw_credentials_retained": false,
+    "independent_review": "unavailable"
+  }
+}

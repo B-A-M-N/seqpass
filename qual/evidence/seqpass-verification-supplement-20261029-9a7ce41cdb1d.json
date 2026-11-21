@@ -1,0 +1,290 @@
+{
+  "schema": "seqpass-verification-supplement/1",
+  "verified_at_utc": "2026-10-29T16:23:04+00:00",
+  "source_revision": "90710d55be7cb64c6ca78277d3a4a07a4c2a7487",
+  "source_snapshot_sha256": "9a7ce41cdb1d774d87a6e07a537f0e1f0f1abb576dade0a1e6d43f398ea67e3e",
+  "source_manifest": "qual/evidence/seqpass-worktree-source-20261029-9a7ce41cdb1d.json",
+  "source_manifest_sha256": "64a96da7fbd975eb87067236f4e5824517e85b077ba52cbc94d532e08c8380a8",
+  "worktree_dirty": true,
+  "toolchain": {
+    "go_version": "go1.25.9",
+    "goos": "linux",
+    "goarch": "amd64",
+    "cgo_enabled": true
+  },
+  "build": {
+    "command": "go build -buildvcs=false -o /tmp/seqpass-audit-review-final2 ./cmd/seqpass",
+    "flags": [
+      "-buildvcs=false"
+    ],
+    "binary_sha256": "ed23305f70dac044e3a0f6c75d1b230d4e23cbd4a0a37a071368e75d2eefb989"
+  },
+  "dependency_checksums": {
+    "go_sum_sha256": "b2abbfb7da82acfcbfa4f20954ca8da772bb66ec7f6783340f5eba007c8a3e64",
+    "modules": [
+      {
+        "Path": "github.com/secretbridge/secretbridge"
+      },
+      {
+        "Path": "github.com/c2sp/wycheproof",
+        "Version": "v0.0.0-20260105152342-fca0d3ba9f12",
+        "Sum": "h1:C34LW7dhWgjAaAOdNB8z2UCyJsXDjC6UTILljHuqOlI=",
+        "GoModSum": "h1:U1QjrC6KepOmtVmJn3QsKOTd9HliGr/da5afPEhLRnk="
+      },
+      {
+        "Path": "github.com/davecgh/go-spew",
+        "Version": "v1.1.1",
+        "Sum": "h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=",
+        "GoModSum": "h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38="
+      },
+      {
+        "Path": "github.com/dlclark/regexp2",
+        "Version": "v1.11.0",
+        "Sum": "h1:G/nrcoOa7ZXlpoa/91N3X7mM3r8eIlMBBJZvsz/mxKI=",
+        "GoModSum": "h1:DHkYz0B9wPfa6wondMfaivmHpzrQ3v9q8cnmRbL6yW8="
+      },
+      {
+        "Path": "github.com/frankban/quicktest",
+        "Version": "v1.14.6",
+        "Sum": "h1:7Xjx+VpznH+oBnejlPUj8oUpdxnVs4f8XU8WnHkI4W8=",
+        "GoModSum": "h1:4ptaffx2x8+WTWXmUCuVU6aPUX1/Mz7zb5vbUoiM6w0="
+      },
+      {
+        "Path": "github.com/golang/protobuf",
+        "Version": "v1.5.0"
+      },
+      {
+        "Path": "github.com/google/go-cmp",
+        "Version": "v0.7.0",
+        "Sum": "h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=",
+        "GoModSum": "h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU="
+      },
+      {
+        "Path": "github.com/google/jsonschema-go",
+        "Version": "v0.4.2",
+        "Sum": "h1:tmrUohrwoLZZS/P3x7ex0WAVknEkBZM46iALbcqoRA8=",
+        "GoModSum": "h1:r5quNTdLOYEz95Ru18zA0ydNbBuYoo9tgaYcxEYhJVE="
+      },
+      {
+        "Path": "github.com/google/uuid",
+        "Version": "v1.6.0",
+        "Sum": "h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=",
+        "GoModSum": "h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo="
+      },
+      {
+        "Path": "github.com/kr/pretty",
+        "Version": "v0.3.1",
+        "Sum": "h1:flRD4NNwYAUpkphVc1HcthR4KEIFJ65n8Mw5qdRn3LE=",
+        "GoModSum": "h1:hoEshYVHaxMs3cyo3Yncou5ZscifuDolrwPKZanG3xk="
+      },
+      {
+        "Path": "github.com/kr/text",
+        "Version": "v0.2.0",
+        "Sum": "h1:5Nx0Ya0ZqY2ygV366QzturHI13Jq95ApcVaJBhpS+AY=",
+        "GoModSum": "h1:eLer722TekiGuMkidMxC/pM04lWEeraHUUmBw8l2grE="
+      },
+      {
+        "Path": "github.com/mark3labs/mcp-go",
+        "Version": "v1.2.0",
+        "Sum": "h1:ivQVs9Eb6Cs1ufChpfMCF9+dPrDC6ZxFBKqLwcxp1a4=",
+        "GoModSum": "h1:r2fW4o3wsoJ7IMsx1Wuq5xeP8PRGXPDfNveoGAYbb/s="
+      },
+      {
+        "Path": "github.com/mattn/go-sqlite3",
+        "Version": "v1.14.22",
+        "Sum": "h1:2gZY6PC6kBnID23Tichd1K+Z0oS6nE/XwU+Vz/5o4kU=",
+        "GoModSum": "h1:Uh1q+B4BYcTPb+yiD3kU8Ct7aC0hY9fxUwlHK0RXw+Y="
+      },
+      {
+        "Path": "github.com/pmezard/go-difflib",
+        "Version": "v1.0.0",
+        "Sum": "h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=",
+        "GoModSum": "h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4="
+      },
+      {
+        "Path": "github.com/rogpeppe/go-internal",
+        "Version": "v1.14.1",
+        "Sum": "h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0tI/otEQ=",
+        "GoModSum": "h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc="
+      },
+      {
+        "Path": "github.com/santhosh-tekuri/jsonschema/v6",
+        "Version": "v6.0.2",
+        "Sum": "h1:KRzFb2m7YtdldCEkzs6KqmJw4nqEVZGK7IN2kJkjTuQ=",
+        "GoModSum": "h1:JXeL+ps8p7/KNMjDQk3TCwPpBy0wYklyWTfbkIzdIFU="
+      },
+      {
+        "Path": "github.com/spf13/cast",
+        "Version": "v1.7.1",
+        "Sum": "h1:cuNEagBQEHWN1FnbGEjCXL2szYEXqfJPbP2HNUaca9Y=",
+        "GoModSum": "h1:ancEpBxwJDODSW/UG4rDrAqiKolqNNh2DX3mk86cAdo="
+      },
+      {
+        "Path": "github.com/stretchr/testify",
+        "Version": "v1.11.1",
+        "Sum": "h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=",
+        "GoModSum": "h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U="
+      },
+      {
+        "Path": "github.com/tink-crypto/tink-go/v2",
+        "Version": "v2.8.0",
+        "Sum": "h1:1zODq1bZDqOQdNPjhvwGYLDw9On7mDWPnQf+4xXlpAc=",
+        "GoModSum": "h1:aNXZeyxjQU9iqAeARRNmbESXUW6Mao1HRCCTY8B1TFM="
+      },
+      {
+        "Path": "github.com/yosida95/uritemplate/v3",
+        "Version": "v3.0.2",
+        "Sum": "h1:Ed3Oyj9yrmi9087+NczuL5BwkIc4wvTb5zIM+UJPGz4=",
+        "GoModSum": "h1:ILOh0sOhIJR3+L/8afwt/kE++YT040gmv5BQTMR2HP4="
+      },
+      {
+        "Path": "golang.org/x/crypto",
+        "Version": "v0.53.0",
+        "Sum": "h1:QZ4Muo8THX6CizN2vPPd5fBGHyogrdK9fG4wLPFUsto=",
+        "GoModSum": "h1:DNLU434OwVakk9PzuwV8w62mAJpRJL3vsgcfp4Qnsio="
+      },
+      {
+        "Path": "golang.org/x/mod",
+        "Version": "v0.36.0"
+      },
+      {
+        "Path": "golang.org/x/net",
+        "Version": "v0.55.0"
+      },
+      {
+        "Path": "golang.org/x/sync",
+        "Version": "v0.21.0"
+      },
+      {
+        "Path": "golang.org/x/sys",
+        "Version": "v0.47.0",
+        "Sum": "h1:o7XGOvZQCADBQQ4Y7VNq2dRWQR7JmOUW8Kxx4ZsNgWs=",
+        "GoModSum": "h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw="
+      },
+      {
+        "Path": "golang.org/x/term",
+        "Version": "v0.45.0",
+        "Sum": "h1:NwWyBmoJCbfTHpxrWoZ9C6/VxOf7ic219I8xZZFdrf0=",
+        "GoModSum": "h1:9aqxs0blBcrm/n0L9QW0aRVD+ktan8ssZromtqJC43w="
+      },
+      {
+        "Path": "golang.org/x/text",
+        "Version": "v0.38.0",
+        "Sum": "h1:sXmwo9DwP3OK9EZ7PqAdaooSGozfl/3a6/xJcbzPRhE=",
+        "GoModSum": "h1:YXZt3QhHUKYT53r2lLKFIVi6Ao1jdzrTR/KQ09qyxF4="
+      },
+      {
+        "Path": "golang.org/x/tools",
+        "Version": "v0.45.0",
+        "Sum": "h1:18qN3FAooORvApf5XjCXgsuayZOEtXf6JK18I3+ONa8=",
+        "GoModSum": "h1:LuUGqqaXcXMEFEruIVJVm5mgDD8vww/z/SR1gQ4uE/0="
+      },
+      {
+        "Path": "google.golang.org/protobuf",
+        "Version": "v1.36.11",
+        "Sum": "h1:fV6ZwhNocDyBLK0dj+fg8ektcVegBBuEolpbTQyBNVE=",
+        "GoModSum": "h1:HTf+CrKn2C3g5S8VImy6tdcUvCska2kB7j23XfzDpco="
+      },
+      {
+        "Path": "gopkg.in/check.v1",
+        "Version": "v1.0.0-20201130134442-10cb98267c6c"
+      },
+      {
+        "Path": "gopkg.in/yaml.v3",
+        "Version": "v3.0.1",
+        "Sum": "h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=",
+        "GoModSum": "h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM="
+      }
+    ]
+  },
+  "checks": [
+    {
+      "command": "go test ./...",
+      "result": "passed"
+    },
+    {
+      "command": "go test -count=1 ./internal/metadata ./internal/service",
+      "result": "passed"
+    },
+    {
+      "command": "go test -count=1 ./qual -run '^(TestQualSealedCapsuleProductionProcessRestart|TestQualRecipientPullProductionRestart)$' -v",
+      "result": "passed; both detailed manifests retained in qualification_artifacts"
+    },
+    {
+      "command": "go vet ./...",
+      "result": "passed"
+    },
+    {
+      "command": "gofmt -l <all Go files outside .tmp and qual/evidence>",
+      "result": "passed; no paths returned"
+    },
+    {
+      "command": "git diff --check",
+      "result": "passed"
+    },
+    {
+      "command": "go build -buildvcs=false -o /tmp/seqpass-audit-review-final2 ./cmd/seqpass",
+      "result": "passed; binary sha256 ed23305f70dac044e3a0f6c75d1b230d4e23cbd4a0a37a071368e75d2eefb989"
+    },
+    {
+      "command": "python3 -B qual/source_snapshot.py --output /tmp/seqpass-source-run3.json",
+      "result": "passed; snapshot 9a7ce41cdb1d774d87a6e07a537f0e1f0f1abb576dade0a1e6d43f398ea67e3e"
+    }
+  ],
+  "qualification_artifacts": [
+    {
+      "path": "qual/evidence/qual-TestQualSealedCapsuleProductionProcessRestart-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793290960757079675.json",
+      "sha256": "c58730eb18ba0ab615a15d2e92dad2c0a41fc08941257440d8dff72ef4f5c9c5",
+      "mode": "0o600",
+      "cases": [
+        {
+          "name": "sealed-capsule-production-issuer-restart",
+          "status": "passed",
+          "observed_postcondition": "exact=true digest=ba823623bc32678aa2515c2a76ac7b533dd013698070cbcc9019e771e9aea82c handoff=Cq0kif4Irb1H3RB1QSRnav3isKag7GVH3o--oOESyao expiry=2026-10-29T16:27:40.505927015Z"
+        },
+        {
+          "name": "sealed-capsule-lost-receipt-production-restart",
+          "status": "passed",
+          "observed_postcondition": "completed after fresh production broker startup"
+        },
+        {
+          "name": "sealed-capsule-final-retention-production-restart",
+          "status": "passed",
+          "observed_postcondition": "status=completed capsule_bytes=0 digest_preserved=true length_preserved=true"
+        }
+      ]
+    },
+    {
+      "path": "qual/evidence/qual-TestQualRecipientPullProductionRestart-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793290962955166412.json",
+      "sha256": "6b707a8f3350f7477735eca2dbbb08ba340c281945ccc665ac94671d2ec33d40",
+      "mode": "0o600",
+      "cases": [
+        {
+          "name": "recipient-pull-production-lost-receipt",
+          "status": "passed",
+          "observed_postcondition": "operation=559d72cddb5010618675546d7188307b status=uncertain recipient_output_secret_free=true"
+        },
+        {
+          "name": "recipient-pull-production-recipient-restart",
+          "status": "passed",
+          "observed_postcondition": "completed after retry; installed synthetic value remains present"
+        }
+      ]
+    }
+  ],
+  "qualification_updates": [
+    "Production capsule restart: exact persisted bytes and original expiry verified after restart; signed late receipt reconciled after another restart; a subsequent startup removed cached ciphertext and preserved digest/length metadata.",
+    "Production recipient-pull restart with lost-ack injection: rebuilt broker restarted before ticket redemption; shipped recipient CLI applied a synthetic credential; a temporary IPC proxy dropped completion; restarted broker reported uncertain; a fresh recipient CLI process retried from its journal and settled without replaying the credential write.",
+    "Recipient-pull qualification re-stages the synthetic value after broker restart because the test uses an explicitly ephemeral memory-test vault; this does not qualify persistent AegisKeys source storage.",
+    "SourceRevision is the configured source-binding revision. AegisKeys v1/v2 resolve response types contain binding/value/components but no authenticated live credential-generation metadata; no generation is claimed.",
+    "FI Gateway remediation plan is based only on the supplied rereview; its repository was not inspected or modified."
+  ],
+  "not_exercised": [
+    "isolated three-identity capsule qualification: dedicated distinct non-root issuer, courier, and recipient identities plus protected evidence directory unavailable",
+    "gateway recipient authorization, durable cross-process operation ordering, persistent-store restart/routing, mock-upstream and gateway suite qualification: gateway repository excluded by operator instruction",
+    "authenticated live AegisKeys credential-generation attribution: the current resolve protocol exposes no such metadata",
+    "independent review: unavailable"
+  ],
+  "integrated_release_qualification": "incomplete; gateway P0/P1/P2 controls, isolated three-identity qualification, and live source-generation semantics remain unqualified",
+  "raw_credentials_retained": false
+}

@@ -1,0 +1,45 @@
+{
+  "suite": "seqpass-qual/2",
+  "source_rev": "90710d55be7cb64c6ca78277d3a4a07a4c2a7487",
+  "binary_sha256": "2ae277d88a2b23e1ff8624bde48290c753d6795bcca6564871305323fc827c4a",
+  "uid": 0,
+  "gid": 0,
+  "agent_principal": "capsule-boundary",
+  "environment": {
+    "os": "linux",
+    "arch": "amd64",
+    "go_version": "go1.25.9",
+    "kernel": "Linux 7.0.11-76070011-generic x86_64 Linux"
+  },
+  "protocol_versions": {
+    "mcp": "2024-11-05",
+    "recipient-envelope": "v1"
+  },
+  "vault_mode": "sealed-capsule-synthetic",
+  "topology": {
+    "agent_uid": "2002",
+    "go_version": "go1.25.9",
+    "recipient_home": "/tmp/seqpass-qual-homes/recipient",
+    "recipient_uid": "2003",
+    "seqpass_binary_sha256": "2ae277d88a2b23e1ff8624bde48290c753d6795bcca6564871305323fc827c4a",
+    "seqpass_source_revision": "90710d55be7cb64c6ca78277d3a4a07a4c2a7487",
+    "service_uid": "2001"
+  },
+  "cases": [
+    {
+      "name": "capsule-three-identity-boundary",
+      "tier": "cross-broker-system",
+      "intent": "issuer, courier, and recipient execute as distinct OS identities",
+      "expected_postcondition": "all three UIDs are distinct and non-root",
+      "observed_postcondition": "issuer=2001 agent=2002 recipient=2003",
+      "status": "passed",
+      "pass": true
+    }
+  ],
+  "residual_risks": [
+    "real AegisKeys credential resolution, grant policy, and rotation not exercised",
+    "provider and recipient side effects are independently observed only in the full cross-broker qualification",
+    "recipient application identity beyond UID pinning not proven"
+  ],
+  "unresolved_contradictions": null
+}

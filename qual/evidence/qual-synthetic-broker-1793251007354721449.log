@@ -1,0 +1,1 @@
+seqpass broker uid=2001 assurance=isolated (verified) on /tmp/test-runtime/seqpass-test-privileged-synthetic-qua-340196467/agent/agent.sock (admin /tmp/test-runtime/seqpass-test-privileged-synthetic-qua-340196467/admin/admin.sock admin-uids=[2001] agent-uids=[2002] op-ttl=0s max-concurrent-ops=0)

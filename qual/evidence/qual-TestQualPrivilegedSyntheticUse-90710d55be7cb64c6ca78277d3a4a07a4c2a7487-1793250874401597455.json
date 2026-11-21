@@ -1,0 +1,197 @@
+{
+  "suite": "seqpass-qual/2",
+  "source_rev": "90710d55be7cb64c6ca78277d3a4a07a4c2a7487",
+  "binary_sha256": "8b4582ceb96501f05448fa78abf3a24697c1b97306efe36f606119d8db3d60f7",
+  "uid": 0,
+  "gid": 0,
+  "agent_principal": "2002",
+  "environment": {
+    "os": "linux",
+    "arch": "amd64",
+    "go_version": "go1.25.9",
+    "kernel": "Linux 7.0.11-76070011-generic x86_64 Linux"
+  },
+  "protocol_versions": {
+    "mcp": "2024-11-05",
+    "recipient-envelope": "v1"
+  },
+  "vault_mode": "aegiskeys-synthetic",
+  "topology": {
+    "aegiskeys_mock_socket": "/tmp/test-runtime/seqpass-test-privileged-synthetic-qua-4014652559/aegis/aegis.sock",
+    "aegiskeys_mock_socket_owner_mode": "uid=0,gid=2001,mode=0660",
+    "agent_socket_group": "seqpass-agents",
+    "agent_uid": "2002",
+    "go_version": "go1.25.9",
+    "mock_provider_origin": "http://127.0.0.1:33595",
+    "seqpass_binary_sha256": "8b4582ceb96501f05448fa78abf3a24697c1b97306efe36f606119d8db3d60f7",
+    "seqpass_db": "/tmp/test-runtime/seqpass-test-privileged-synthetic-qua-4014652559/state/seqpass.db",
+    "seqpass_source_revision": "90710d55be7cb64c6ca78277d3a4a07a4c2a7487",
+    "service_uid": "2001",
+    "synthetic_binding": "qual/synthetic",
+    "synthetic_credential1_sha256": "291308474520c4286e795244707084a168e0e566ae4268bb352d1036d6951caa",
+    "synthetic_credential2_sha256": "67b4dd5847bd2ab1359c51664352ff37d8408d649381e74da2279ae420b10931"
+  },
+  "cases": [
+    {
+      "name": "service-can-reach-mock-aegiskeys-socket",
+      "tier": "cross-broker-system",
+      "intent": "broker service identity has access to the group-isolated mock AegisKeys socket",
+      "expected_postcondition": "service UID connects to the mock listener",
+      "observed_postcondition": "uid=2001 connected=true",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "synthetic-broker-start",
+      "tier": "cross-broker-system",
+      "intent": "launch the real broker as the dedicated service UID against the mock AegisKeys socket",
+      "expected_postcondition": "broker sockets become live",
+      "observed_postcondition": "broker exited: exit status 1 log=broker failed: isolated AegisKeys requires --aegiskeys-resolve-helper and its SHA-256 pin; configure the trusted dumpable helper so AegisKeys can authenticate the resolving executable",
+      "status": "failed",
+      "pass": false
+    },
+    {
+      "name": "adversarial-credential-echo",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "literal and JSON-escaped credential echoes are rejected before persistence/publication",
+      "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+      "status": "not_exercised",
+      "pass": false
+    },
+    {
+      "name": "unauthorized-operation",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "no provider request and no AegisKeys resolve",
+      "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+      "status": "not_exercised",
+      "pass": false
+    },
+    {
+      "name": "credential-rotation",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "next resolution uses new binding and old value is rejected",
+      "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+      "status": "not_exercised",
+      "pass": false
+    },
+    {
+      "name": "revocation-barrier",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "revocation before dispatch prevents provider request; post-dispatch revocation remains in-flight",
+      "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+      "status": "not_exercised",
+      "pass": false
+    },
+    {
+      "name": "authorized-credentialed-read",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "controlled credential reaches mock provider while absent from every agent-visible surface",
+      "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+      "status": "not_exercised",
+      "pass": false
+    },
+    {
+      "name": "concurrent-consumers",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "independent operations complete without credential mix-up or deadlock",
+      "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+      "status": "not_exercised",
+      "pass": false
+    },
+    {
+      "name": "protected-relay",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "trusted terminal fulfills and recipient durably accepts while agent sees opaque status",
+      "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+      "status": "not_exercised",
+      "pass": false
+    },
+    {
+      "name": "lost-ack-reconciliation",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "uncertain result is reconciled independently without replay",
+      "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+      "status": "not_exercised",
+      "pass": false
+    },
+    {
+      "name": "restart-and-ephemeral-payload",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "durable evidence remains truthful and in-memory payload is unavailable after restart",
+      "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+      "status": "not_exercised",
+      "pass": false
+    },
+    {
+      "name": "config-overlay-concurrency",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "overlapping launches restore baseline or preserve/report external edits",
+      "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+      "status": "not_exercised",
+      "pass": false
+    },
+    {
+      "name": "host-native-ui",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "qualified host adapter renders broker-verified review, collects input directly to trusted intake, and no secret reaches model-visible data",
+      "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+      "status": "not_exercised",
+      "pass": false
+    },
+    {
+      "name": "host-log-attack",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "agent transcripts, MCP recordings, replay logs and debug output contain no synthetic credential",
+      "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+      "status": "not_exercised",
+      "pass": false
+    },
+    {
+      "name": "fake-prompt-attack",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "agent-produced fake SeqPass text cannot activate trusted protected input",
+      "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+      "status": "not_exercised",
+      "pass": false
+    },
+    {
+      "name": "host-upgrade-qualification",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "changed host behavior invalidates the existing qualification until retested",
+      "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+      "status": "not_exercised",
+      "pass": false
+    },
+    {
+      "name": "remote-session-trust",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "protected input remains on the trusted user side rather than the untrusted remote agent side",
+      "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+      "status": "not_exercised",
+      "pass": false
+    }
+  ],
+  "residual_risks": [
+    "real AegisKeys credential resolution, grant policy, and rotation not exercised",
+    "provider and recipient side effects are independently observed only in the full cross-broker qualification",
+    "recipient application identity beyond UID pinning not proven"
+  ],
+  "unresolved_contradictions": [
+    "synthetic-broker-start: expected=broker sockets become live observed=broker exited: exit status 1 log=broker failed: isolated AegisKeys requires --aegiskeys-resolve-helper and its SHA-256 pin; configure the trusted dumpable helper so AegisKeys can authenticate the resolving executable"
+  ]
+}

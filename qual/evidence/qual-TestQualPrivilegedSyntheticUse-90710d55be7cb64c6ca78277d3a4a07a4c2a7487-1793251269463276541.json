@@ -1,0 +1,472 @@
+{
+  "suite": "seqpass-qual/2",
+  "source_rev": "90710d55be7cb64c6ca78277d3a4a07a4c2a7487",
+  "binary_sha256": "8b4582ceb96501f05448fa78abf3a24697c1b97306efe36f606119d8db3d60f7",
+  "uid": 0,
+  "gid": 0,
+  "agent_principal": "2002",
+  "environment": {
+    "os": "linux",
+    "arch": "amd64",
+    "go_version": "go1.25.9",
+    "kernel": "Linux 7.0.11-76070011-generic x86_64 Linux"
+  },
+  "protocol_versions": {
+    "mcp": "2024-11-05",
+    "recipient-envelope": "v1"
+  },
+  "vault_mode": "aegiskeys-synthetic",
+  "topology": {
+    "aegiskeys_mock_socket": "/tmp/test-runtime/seqpass-test-privileged-synthetic-qua-593986925/aegis/aegis.sock",
+    "aegiskeys_mock_socket_owner_mode": "uid=0,gid=2001,mode=0660",
+    "aegiskeys_resolve_helper": "/tmp/test-runtime/seqpass-test-privileged-synthetic-qua-593986925/seqpass",
+    "aegiskeys_resolve_helper_sha256": "8b4582ceb96501f05448fa78abf3a24697c1b97306efe36f606119d8db3d60f7",
+    "agent_socket_group": "seqpass-agents",
+    "agent_uid": "2002",
+    "broker_log": "qual-synthetic-broker-1793251269419713119.log",
+    "go_version": "go1.25.9",
+    "mock_provider_origin": "http://127.0.0.1:34969",
+    "seqpass_binary_sha256": "8b4582ceb96501f05448fa78abf3a24697c1b97306efe36f606119d8db3d60f7",
+    "seqpass_db": "/tmp/test-runtime/seqpass-test-privileged-synthetic-qua-593986925/state/seqpass.db",
+    "seqpass_source_revision": "90710d55be7cb64c6ca78277d3a4a07a4c2a7487",
+    "service_uid": "2001",
+    "synthetic_binding": "qual/synthetic",
+    "synthetic_credential1_sha256": "a98fed890ecf0de7e2e29972a7666667c3dd8737c12b554ee41bd18f55986dc1",
+    "synthetic_credential2_sha256": "04720216d90402936049f801d01eb5e6725e1e69676b2132e35642d986f89af2",
+    "synthetic_dest_id": "310d74bd66ee8163e5f4cf30e4985e59",
+    "synthetic_policy_id": "7934e8245ecca46f66461e1e638b67f4"
+  },
+  "cases": [
+    {
+      "name": "service-can-reach-mock-aegiskeys-socket",
+      "tier": "cross-broker-system",
+      "intent": "broker service identity has access to the group-isolated mock AegisKeys socket",
+      "expected_postcondition": "service UID connects to the mock listener",
+      "observed_postcondition": "uid=2001 connected=true",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "synthetic-broker-start",
+      "tier": "cross-broker-system",
+      "intent": "launch the real broker as the dedicated service UID against the mock AegisKeys socket",
+      "expected_postcondition": "isolated broker serves agent, admin, and intake sockets",
+      "observed_postcondition": "all three sockets live",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "synthetic-agent-health-over-allowed-socket",
+      "tier": "cross-broker-system",
+      "intent": "agent reaches the real SeqPass agent socket",
+      "expected_postcondition": "health response declares isolated assurance",
+      "observed_postcondition": "uid=2002 health=true assurance=isolated",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "agent-cannot-connect-admin-socket",
+      "tier": "cross-broker-system",
+      "intent": "agent UID cannot connect directly to a live trusted socket",
+      "expected_postcondition": "kernel denies socket connection with EACCES or EPERM",
+      "observed_postcondition": "socket=admin denied=true error=EACCES",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "agent-cannot-connect-intake-socket",
+      "tier": "cross-broker-system",
+      "intent": "agent UID cannot connect directly to a live trusted socket",
+      "expected_postcondition": "kernel denies socket connection with EACCES or EPERM",
+      "observed_postcondition": "socket=intake denied=true error=EACCES",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "agent-cannot-connect-aegiskeys-socket",
+      "tier": "cross-broker-system",
+      "intent": "agent UID cannot connect directly to a live trusted socket",
+      "expected_postcondition": "kernel denies socket connection with EACCES or EPERM",
+      "observed_postcondition": "socket=aegiskeys denied=true error=EACCES",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "agent-cannot-read-aegiskeys_vault",
+      "tier": "cross-broker-system",
+      "intent": "agent UID cannot read protected credential or broker state",
+      "expected_postcondition": "kernel denies file open with EACCES or EPERM",
+      "observed_postcondition": "file=aegiskeys_vault unreadable=true error=EACCES",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "agent-cannot-read-aegiskeys_metadata",
+      "tier": "cross-broker-system",
+      "intent": "agent UID cannot read protected credential or broker state",
+      "expected_postcondition": "kernel denies file open with EACCES or EPERM",
+      "observed_postcondition": "file=aegiskeys_metadata unreadable=true error=EACCES",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "agent-cannot-read-seqpass_db",
+      "tier": "cross-broker-system",
+      "intent": "agent UID cannot read protected credential or broker state",
+      "expected_postcondition": "kernel denies file open with EACCES or EPERM",
+      "observed_postcondition": "file=seqpass_db unreadable=true error=EACCES",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "synthetic-registration",
+      "tier": "cross-broker-system",
+      "intent": "register the synthetic secret, pinned provider origin, and scoped allow policy through the trusted admin socket",
+      "expected_postcondition": "service UID receives ref, destination, and policy IDs",
+      "observed_postcondition": "ref=16252e2894a87dc97624428b8fe7fe72 dest=310d74bd66ee8163e5f4cf30e4985e59 policy=7934e8245ecca46f66461e1e638b67f4",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "synthetic-agent-mcp-start",
+      "tier": "cross-broker-system",
+      "intent": "initialize the real MCP adapter under the agent UID",
+      "expected_postcondition": "MCP handshake completes",
+      "observed_postcondition": "initialized",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "use-catalog-discloses-scoped-operation",
+      "tier": "cross-broker-system",
+      "intent": "discover the authorized operation through secret_catalog under the agent UID",
+      "expected_postcondition": "catalog lists the ref with http.request and no credential material",
+      "observed_postcondition": "mcp=\u003cnil\u003e parse=\u003cnil\u003e",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "use-submit-returns-opaque-id",
+      "tier": "cross-broker-system",
+      "intent": "submit the authorized credentialed read through the untrusted MCP adapter",
+      "expected_postcondition": "agent receives an opaque op id and authorized status, never secret material",
+      "observed_postcondition": "mcp=\u003cnil\u003e parse=\u003cnil\u003e status=authorized tool_error=",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "use-execution-completes",
+      "tier": "cross-broker-system",
+      "intent": "observe the operation reaching a terminal state through the agent's own status tool",
+      "expected_postcondition": "status reports completed with a receipt",
+      "observed_postcondition": "status=completed effective=unverified",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "provider-received-pinned-bearer",
+      "tier": "cross-broker-system",
+      "intent": "read the provider's independent request log after execution",
+      "expected_postcondition": "the consuming application received exactly the current synthetic credential as the pinned bearer",
+      "observed_postcondition": "requests=1 err=\u003cnil\u003e",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "aegis-resolved-exactly-once",
+      "tier": "cross-broker-system",
+      "intent": "read the mock AegisKeys resolve log after the first execution",
+      "expected_postcondition": "exactly one authorized resolve occurred for the binding",
+      "observed_postcondition": "resolves=1 err=\u003cnil\u003e",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "use-adversarial-echo-rejected",
+      "tier": "cross-broker-system",
+      "intent": "submit a provider response that echoes the credential literally and JSON-escaped",
+      "expected_postcondition": "the closed projection drops both echo fields entirely instead of masking them",
+      "observed_postcondition": "service=qual-mock-provider echo=\u003cnil\u003e escaped=\u003cnil\u003e",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "use-result-nondisclosure",
+      "tier": "cross-broker-system",
+      "intent": "inspect every MCP request and response byte in the session",
+      "expected_postcondition": "MCP traffic contains no synthetic credential in any encoding",
+      "observed_postcondition": "clean=true",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "agent-process-metadata-nondisclosure",
+      "tier": "cross-broker-system",
+      "intent": "inspect the live MCP child's argv and environment",
+      "expected_postcondition": "process metadata omits the synthetic values",
+      "observed_postcondition": "credential_absent=true",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "agent-process-memory-observation",
+      "tier": "cross-broker-system",
+      "intent": "independently scan readable agent process mappings for the synthetic values",
+      "expected_postcondition": "environment supports this qualification",
+      "observed_postcondition": "blocked: read agent memory mapping r--p 00000000 00:00 0 [vvar] at 0x730b17b2f000: read /proc/208/mem: input/output error",
+      "status": "blocked",
+      "pass": false
+    },
+    {
+      "name": "use-unauthorized-submit-denied",
+      "tier": "cross-broker-system",
+      "intent": "submit an operation outside the allow policy through the untrusted MCP adapter",
+      "expected_postcondition": "submission is denied",
+      "observed_postcondition": "denied=true",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "unauthorized-no-dispatch",
+      "tier": "cross-broker-system",
+      "intent": "verify no credential resolution and no provider request followed the denied submission",
+      "expected_postcondition": "resolve count and provider request count are unchanged",
+      "observed_postcondition": "resolves=1-\u003e1 provider=1",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "use-rotation-dispatches-new-value",
+      "tier": "cross-broker-system",
+      "intent": "execute a second authorized read after the AegisKeys value rotated",
+      "expected_postcondition": "the provider receives exactly the rotated value and never the prior one",
+      "observed_postcondition": "requests=2 err=\u003cnil\u003e",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "provider-rejects-rotated-value",
+      "tier": "cross-broker-system",
+      "intent": "replay the prior credential value directly against the mock provider after rotation",
+      "expected_postcondition": "the provider rejects the prior value with 401",
+      "observed_postcondition": "status=401",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "use-revoked-submit-denied",
+      "tier": "cross-broker-system",
+      "intent": "disable the allow policy and resubmit through the untrusted MCP adapter",
+      "expected_postcondition": "submission is denied after revocation",
+      "observed_postcondition": "denied=true",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "no-dispatch-after-revocation",
+      "tier": "cross-broker-system",
+      "intent": "verify no credential resolution and no provider request followed the revoked submission",
+      "expected_postcondition": "resolve and provider request counts are unchanged by the denied submission",
+      "observed_postcondition": "resolves=2-\u003e2 provider=3-\u003e3",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "agent-mcp-stderr-nondisclosure",
+      "tier": "cross-broker-system",
+      "intent": "inspect captured agent process stderr",
+      "expected_postcondition": "stderr omits the synthetic values",
+      "observed_postcondition": "credential_absent=true",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "agent-mcp-message-nondisclosure",
+      "tier": "cross-broker-system",
+      "intent": "inspect every MCP request/response byte and the independent probe output",
+      "expected_postcondition": "MCP input/output and the probe contain no synthetic value",
+      "observed_postcondition": "mcp_clean=true probe_clean=true",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "broker-receipt-nondisclosure",
+      "tier": "cross-broker-system",
+      "intent": "inspect durable SeqPass metadata and WAL after execution",
+      "expected_postcondition": "receipt and metadata omit the synthetic values",
+      "observed_postcondition": "credential_absent=true",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "agent-mcp-clean-exit",
+      "tier": "cross-broker-system",
+      "intent": "close the agent MCP process after the observation window",
+      "expected_postcondition": "process exits without error",
+      "observed_postcondition": "clean exit",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "synthetic-broker-clean-shutdown",
+      "tier": "cross-broker-system",
+      "intent": "stop the synthetic-tier broker after the credentialed scenarios",
+      "expected_postcondition": "broker exits cleanly on SIGINT",
+      "observed_postcondition": "clean=true",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "broker-log-nondisclosure",
+      "tier": "cross-broker-system",
+      "intent": "inspect real broker stdout/stderr after trusted execution and shutdown",
+      "expected_postcondition": "broker logs omit the synthetic values",
+      "observed_postcondition": "credential_absent=true",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "credential-rotation",
+      "tier": "cross-broker-system",
+      "intent": "aggregate of the synthetic tier subchecks",
+      "expected_postcondition": "next resolution uses new binding and old value is rejected",
+      "observed_postcondition": "all subchecks passed",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "revocation-barrier",
+      "tier": "cross-broker-system",
+      "intent": "aggregate of the synthetic tier subchecks",
+      "expected_postcondition": "revocation before dispatch prevents provider request; post-dispatch revocation remains in-flight",
+      "observed_postcondition": "all subchecks passed",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "authorized-credentialed-read",
+      "tier": "cross-broker-system",
+      "intent": "aggregate of the synthetic tier subchecks",
+      "expected_postcondition": "controlled credential reaches mock provider while absent from every agent-visible surface",
+      "observed_postcondition": "failed subchecks=agent-process-memory-excludes-payload(missing)",
+      "status": "failed",
+      "pass": false
+    },
+    {
+      "name": "adversarial-credential-echo",
+      "tier": "cross-broker-system",
+      "intent": "aggregate of the synthetic tier subchecks",
+      "expected_postcondition": "literal and JSON-escaped credential echoes are rejected before persistence/publication",
+      "observed_postcondition": "all subchecks passed",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "unauthorized-operation",
+      "tier": "cross-broker-system",
+      "intent": "aggregate of the synthetic tier subchecks",
+      "expected_postcondition": "no provider request and no AegisKeys resolve",
+      "observed_postcondition": "all subchecks passed",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "concurrent-consumers",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "independent operations complete without credential mix-up or deadlock",
+      "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+      "status": "not_exercised",
+      "pass": false
+    },
+    {
+      "name": "protected-relay",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "trusted terminal fulfills and recipient durably accepts while agent sees opaque status",
+      "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+      "status": "not_exercised",
+      "pass": false
+    },
+    {
+      "name": "lost-ack-reconciliation",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "uncertain result is reconciled independently without replay",
+      "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+      "status": "not_exercised",
+      "pass": false
+    },
+    {
+      "name": "restart-and-ephemeral-payload",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "durable evidence remains truthful and in-memory payload is unavailable after restart",
+      "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+      "status": "not_exercised",
+      "pass": false
+    },
+    {
+      "name": "config-overlay-concurrency",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "overlapping launches restore baseline or preserve/report external edits",
+      "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+      "status": "not_exercised",
+      "pass": false
+    },
+    {
+      "name": "host-native-ui",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "qualified host adapter renders broker-verified review, collects input directly to trusted intake, and no secret reaches model-visible data",
+      "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+      "status": "not_exercised",
+      "pass": false
+    },
+    {
+      "name": "host-log-attack",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "agent transcripts, MCP recordings, replay logs and debug output contain no synthetic credential",
+      "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+      "status": "not_exercised",
+      "pass": false
+    },
+    {
+      "name": "fake-prompt-attack",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "agent-produced fake SeqPass text cannot activate trusted protected input",
+      "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+      "status": "not_exercised",
+      "pass": false
+    },
+    {
+      "name": "host-upgrade-qualification",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "changed host behavior invalidates the existing qualification until retested",
+      "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+      "status": "not_exercised",
+      "pass": false
+    },
+    {
+      "name": "remote-session-trust",
+      "tier": "cross-broker-system",
+      "intent": "required audit acceptance scenario",
+      "expected_postcondition": "protected input remains on the trusted user side rather than the untrusted remote agent side",
+      "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+      "status": "not_exercised",
+      "pass": false
+    }
+  ],
+  "residual_risks": [
+    "real AegisKeys credential resolution, grant policy, and rotation not exercised",
+    "provider and recipient side effects are independently observed only in the full cross-broker qualification",
+    "recipient application identity beyond UID pinning not proven"
+  ],
+  "unresolved_contradictions": [
+    "authorized-credentialed-read: expected=controlled credential reaches mock provider while absent from every agent-visible surface observed=failed subchecks=agent-process-memory-excludes-payload(missing)"
+  ]
+}

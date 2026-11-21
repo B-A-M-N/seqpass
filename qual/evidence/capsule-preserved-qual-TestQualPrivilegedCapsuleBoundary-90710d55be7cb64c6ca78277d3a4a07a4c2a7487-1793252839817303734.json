@@ -1,0 +1,139 @@
+{
+  "suite": "seqpass-qual/2",
+  "source_rev": "90710d55be7cb64c6ca78277d3a4a07a4c2a7487",
+  "binary_sha256": "2ae277d88a2b23e1ff8624bde48290c753d6795bcca6564871305323fc827c4a",
+  "uid": 0,
+  "gid": 0,
+  "agent_principal": "capsule-boundary",
+  "environment": {
+    "os": "linux",
+    "arch": "amd64",
+    "go_version": "go1.25.9",
+    "kernel": "Linux 7.0.11-76070011-generic x86_64 Linux"
+  },
+  "protocol_versions": {
+    "mcp": "2024-11-05",
+    "recipient-envelope": "v1"
+  },
+  "vault_mode": "sealed-capsule-synthetic",
+  "topology": {
+    "agent_uid": "2002",
+    "capsule_sha256": "d153cc9fb2379cde1bc2c05cd1e6ec584a216ee02aaebd54102e157ee0cef133",
+    "go_version": "go1.25.9",
+    "recipient_home": "/tmp/seqpass-qual-homes/recipient",
+    "recipient_uid": "2003",
+    "seqpass_binary_sha256": "2ae277d88a2b23e1ff8624bde48290c753d6795bcca6564871305323fc827c4a",
+    "seqpass_source_revision": "90710d55be7cb64c6ca78277d3a4a07a4c2a7487",
+    "service_uid": "2001",
+    "synthetic_credential_sha256": "d646e41ab8dd4714a6c70eea3eabeb9284087e651971dc54b6c51f78a8a919e1"
+  },
+  "cases": [
+    {
+      "name": "capsule-three-identity-boundary",
+      "tier": "cross-broker-system",
+      "intent": "issuer, courier, and recipient execute as distinct OS identities",
+      "expected_postcondition": "all three UIDs are distinct and non-root",
+      "observed_postcondition": "issuer=2001 agent=2002 recipient=2003",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "capsule-agent-package-nondisclosure",
+      "tier": "cross-broker-system",
+      "intent": "agent inspects the complete signed capsule bytes",
+      "expected_postcondition": "no synthetic plaintext is recoverable from the package",
+      "observed_postcondition": "read=true plaintext_absent=true",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "capsule-agent-private-key-denial",
+      "tier": "cross-broker-system",
+      "intent": "agent attempts to read the recipient-only HPKE private key",
+      "expected_postcondition": "kernel denies the untrusted agent UID",
+      "observed_postcondition": "private key read denied",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "capsule-agent-issuer-key-denial",
+      "tier": "cross-broker-system",
+      "intent": "agent attempts to read the issuer signing seed",
+      "expected_postcondition": "kernel denies the untrusted agent UID",
+      "observed_postcondition": "issuer seed read denied",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "capsule-ciphertext-tamper-rejected",
+      "tier": "cross-broker-system",
+      "intent": "recipient processes an agent-modified capsule",
+      "expected_postcondition": "signature or HPKE authentication fails before application write",
+      "observed_postcondition": "process failed: exit status 1 (error: invalid handoff capsule)",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "capsule-wrong-destination-rejected",
+      "tier": "cross-broker-system",
+      "intent": "recipient receives a valid issuer capsule addressed to another logical destination",
+      "expected_postcondition": "no local registration matches the signed destination",
+      "observed_postcondition": "process failed: exit status 1 (capsule destination has no valid recipient-local trust registration)",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "capsule-wrong-target-rejected",
+      "tier": "cross-broker-system",
+      "intent": "issuer-signed capsule names a target different from recipient registration",
+      "expected_postcondition": "recipient rejects before application write",
+      "observed_postcondition": "process failed: exit status 1 (capsule rejected by recipient-local identity or issuer trust)",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "capsule-expiry-rejected",
+      "tier": "cross-broker-system",
+      "intent": "recipient receives an already expired signed capsule",
+      "expected_postcondition": "recipient rejects before application write",
+      "observed_postcondition": "process failed: exit status 1 (capsule rejected by recipient-local identity or issuer trust)",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "capsule-agent-cannot-substitute-trust-flags",
+      "tier": "cross-broker-system",
+      "intent": "courier attempts to override recipient trust through import arguments",
+      "expected_postcondition": "recipient import accepts no trust or target flags",
+      "observed_postcondition": "process failed: exit status 2 (flag provided but not defined: -issuer-key-id\nUsage of recipient capsule import:)",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "capsule-negative-controls-no-write",
+      "tier": "cross-broker-system",
+      "intent": "inspect application state after invalid capsules",
+      "expected_postcondition": "invalid packages made no application write",
+      "observed_postcondition": "application auth file absent",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "capsule-qualification-run",
+      "tier": "cross-broker-system",
+      "intent": "complete the three-identity sealed-capsule qualification",
+      "expected_postcondition": "test exits successfully",
+      "observed_postcondition": "test failed before every qualification case completed",
+      "status": "failed",
+      "pass": false
+    }
+  ],
+  "residual_risks": [
+    "real AegisKeys credential resolution, grant policy, and rotation not exercised",
+    "provider and recipient side effects are independently observed only in the full cross-broker qualification",
+    "recipient application identity beyond UID pinning not proven"
+  ],
+  "unresolved_contradictions": [
+    "capsule-qualification-run: expected=test exits successfully observed=test failed before every qualification case completed"
+  ]
+}

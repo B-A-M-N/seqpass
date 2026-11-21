@@ -1,0 +1,21 @@
+{
+  "container_cleanup": {
+    "base_image": "removed: golang:1.25.9-alpine (sha256:5caaf1cca9dc351e13deafbc3879fd4754801acba8653fa9540cea125d01a71f)",
+    "qualification_container": "none remaining",
+    "qualification_image": "removed: seqpass-qual-go:local (sha256:30cdd425640ccc8e7aac73359bc4f604c7c95e142b83126df0e8cdf9f3ccfd95)",
+    "temporary_evidence_volume": "removed: seqpass-qual-evidence-20261029"
+  },
+  "correction_record": "correction-synthetic-container-20261029.json",
+  "passing_artifact": "qual-TestQualPrivilegedSyntheticUse-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793251326232352718.json",
+  "raw_credentials_retained": false,
+  "record_type": "qualification-verification-supplement",
+  "repository_checks": {
+    "git_diff_check": "passed",
+    "go_build_all_buildvcs_false": "passed",
+    "go_test_all": "passed",
+    "go_vet_all": "passed",
+    "gofmt_touched_go_files": "passed"
+  },
+  "review": "independent review unavailable",
+  "schema_version": 1
+}

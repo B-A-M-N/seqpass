@@ -1,0 +1,62 @@
+{
+  "suite": "seqpass-qual/2",
+  "source_rev": "90710d55be7cb64c6ca78277d3a4a07a4c2a7487",
+  "binary_sha256": "ed23305f70dac044e3a0f6c75d1b230d4e23cbd4a0a37a071368e75d2eefb989",
+  "uid": 1000,
+  "gid": 1000,
+  "agent_principal": "uid:1000",
+  "environment": {
+    "os": "linux",
+    "arch": "amd64",
+    "go_version": "go1.25.9",
+    "kernel": "Linux 7.0.11-76070011-generic x86_64 GNU/Linux"
+  },
+  "protocol_versions": {
+    "mcp": "2024-11-05",
+    "recipient-envelope": "v1"
+  },
+  "vault_mode": "memory-test-synthetic-sealed-capsule-process-restart",
+  "topology": {
+    "capsule_sha256": "ba823623bc32678aa2515c2a76ac7b533dd013698070cbcc9019e771e9aea82c",
+    "destination_id": "1b91a21af74cc40106d0e80a489221ac",
+    "go_version": "go1.25.9",
+    "production_binary_sha256": "ed23305f70dac044e3a0f6c75d1b230d4e23cbd4a0a37a071368e75d2eefb989",
+    "seqpass_binary_sha256": "ed23305f70dac044e3a0f6c75d1b230d4e23cbd4a0a37a071368e75d2eefb989",
+    "seqpass_source_revision": "90710d55be7cb64c6ca78277d3a4a07a4c2a7487"
+  },
+  "cases": [
+    {
+      "name": "sealed-capsule-production-issuer-restart",
+      "tier": "cross-broker-system",
+      "intent": "retrieve the exact persisted recipient-encrypted package after killing and restarting the built SeqPass CLI broker",
+      "expected_postcondition": "identical ciphertext digest and handoff expiry; no replacement package",
+      "observed_postcondition": "exact=true digest=ba823623bc32678aa2515c2a76ac7b533dd013698070cbcc9019e771e9aea82c handoff=Cq0kif4Irb1H3RB1QSRnav3isKag7GVH3o--oOESyao expiry=2026-10-29T16:27:40.505927015Z",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "sealed-capsule-lost-receipt-production-restart",
+      "tier": "cross-broker-system",
+      "intent": "reconcile a signed recipient receipt after issuer restart and lost acknowledgment",
+      "expected_postcondition": "operation completes without replaying or reissuing the capsule",
+      "observed_postcondition": "completed after fresh production broker startup",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "sealed-capsule-final-retention-production-restart",
+      "tier": "cross-broker-system",
+      "intent": "verify startup cleanup clears settled capsule bytes while retaining receipt-reconciliation metadata",
+      "expected_postcondition": "capsule bytes are absent; digest and original byte count remain",
+      "observed_postcondition": "status=completed capsule_bytes=0 digest_preserved=true length_preserved=true",
+      "status": "passed",
+      "pass": true
+    }
+  ],
+  "residual_risks": [
+    "real AegisKeys credential resolution, grant policy, and rotation not exercised",
+    "provider and recipient side effects are independently observed only in the full cross-broker qualification",
+    "recipient application identity beyond UID pinning not proven"
+  ],
+  "unresolved_contradictions": null
+}

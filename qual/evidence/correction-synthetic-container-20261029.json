@@ -1,0 +1,750 @@
+{
+  "findings_and_corrections": [
+    {
+      "correction": "fixture passes the built SeqPass binary as --aegiskeys-resolve-helper and its computed SHA-256 pin",
+      "finding": "isolated synthetic broker startup correctly refused AegisKeys mode without the trusted helper path and exact binary hash pin"
+    },
+    {
+      "correction": "fixture policy explicitly grants the synthetic resource wildcard; MCP tool failures retain a sanitized error detail",
+      "finding": "synthetic no-approval policy omitted its required resource scope, so the intended operation was denied before dispatch"
+    },
+    {
+      "correction": "observer skips [vvar*] pseudo-mappings and pauses the agent during memory capture",
+      "finding": "the process-memory observer treated [vvar] pseudo-mappings as readable even though /proc/<pid>/mem returns EIO for them"
+    }
+  ],
+  "passing_artifact": "qual-TestQualPrivilegedSyntheticUse-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793251326232352718.json",
+  "prior_attempts": [
+    {
+      "artifact": "qual-TestQualPrivilegedSyntheticUse-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793250874401597455.json",
+      "nonpassed_cases": [
+        {
+          "name": "synthetic-broker-start",
+          "observed_postcondition": "broker exited: exit status 1 log=broker failed: isolated AegisKeys requires --aegiskeys-resolve-helper and its SHA-256 pin; configure the trusted dumpable helper so AegisKeys can authenticate the resolving executable",
+          "status": "failed"
+        },
+        {
+          "name": "adversarial-credential-echo",
+          "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+          "status": "not_exercised"
+        },
+        {
+          "name": "unauthorized-operation",
+          "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+          "status": "not_exercised"
+        },
+        {
+          "name": "credential-rotation",
+          "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+          "status": "not_exercised"
+        },
+        {
+          "name": "revocation-barrier",
+          "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+          "status": "not_exercised"
+        },
+        {
+          "name": "authorized-credentialed-read",
+          "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+          "status": "not_exercised"
+        },
+        {
+          "name": "concurrent-consumers",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "protected-relay",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "lost-ack-reconciliation",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "restart-and-ephemeral-payload",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "config-overlay-concurrency",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-native-ui",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-log-attack",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "fake-prompt-attack",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-upgrade-qualification",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "remote-session-trust",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        }
+      ]
+    },
+    {
+      "artifact": "qual-TestQualPrivilegedSyntheticUse-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793250975726117547.json",
+      "nonpassed_cases": [
+        {
+          "name": "synthetic-broker-start",
+          "observed_postcondition": "broker exited: exit status 1 log=broker failed: broker IPC failed: agent socket: socket group assignment failed: chown /tmp/test-runtime/seqpass-test-privileged-synthetic-qua-2190827461/agent/agent.sock: operation not permitted",
+          "status": "failed"
+        },
+        {
+          "name": "adversarial-credential-echo",
+          "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+          "status": "not_exercised"
+        },
+        {
+          "name": "unauthorized-operation",
+          "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+          "status": "not_exercised"
+        },
+        {
+          "name": "credential-rotation",
+          "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+          "status": "not_exercised"
+        },
+        {
+          "name": "revocation-barrier",
+          "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+          "status": "not_exercised"
+        },
+        {
+          "name": "authorized-credentialed-read",
+          "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+          "status": "not_exercised"
+        },
+        {
+          "name": "concurrent-consumers",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "protected-relay",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "lost-ack-reconciliation",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "restart-and-ephemeral-payload",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "config-overlay-concurrency",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-native-ui",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-log-attack",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "fake-prompt-attack",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-upgrade-qualification",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "remote-session-trust",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        }
+      ]
+    },
+    {
+      "artifact": "qual-TestQualPrivilegedSyntheticUse-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793251007400136816.json",
+      "nonpassed_cases": [
+        {
+          "name": "use-submit-returns-opaque-id",
+          "observed_postcondition": "mcp=<nil> parse=MCP tool returned an error status=",
+          "status": "failed"
+        },
+        {
+          "name": "authorized-credentialed-read",
+          "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+          "status": "not_exercised"
+        },
+        {
+          "name": "adversarial-credential-echo",
+          "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+          "status": "not_exercised"
+        },
+        {
+          "name": "unauthorized-operation",
+          "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+          "status": "not_exercised"
+        },
+        {
+          "name": "credential-rotation",
+          "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+          "status": "not_exercised"
+        },
+        {
+          "name": "revocation-barrier",
+          "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+          "status": "not_exercised"
+        },
+        {
+          "name": "concurrent-consumers",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "protected-relay",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "lost-ack-reconciliation",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "restart-and-ephemeral-payload",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "config-overlay-concurrency",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-native-ui",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-log-attack",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "fake-prompt-attack",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-upgrade-qualification",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "remote-session-trust",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        }
+      ]
+    },
+    {
+      "artifact": "qual-TestQualPrivilegedSyntheticUse-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793251109540810913.json",
+      "nonpassed_cases": [
+        {
+          "name": "use-submit-returns-opaque-id",
+          "observed_postcondition": "mcp=<nil> parse=MCP tool returned an error status= tool_error=access denied",
+          "status": "failed"
+        },
+        {
+          "name": "authorized-credentialed-read",
+          "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+          "status": "not_exercised"
+        },
+        {
+          "name": "adversarial-credential-echo",
+          "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+          "status": "not_exercised"
+        },
+        {
+          "name": "unauthorized-operation",
+          "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+          "status": "not_exercised"
+        },
+        {
+          "name": "credential-rotation",
+          "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+          "status": "not_exercised"
+        },
+        {
+          "name": "revocation-barrier",
+          "observed_postcondition": "not exercised: the synthetic tier did not reach this scenario",
+          "status": "not_exercised"
+        },
+        {
+          "name": "concurrent-consumers",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "protected-relay",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "lost-ack-reconciliation",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "restart-and-ephemeral-payload",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "config-overlay-concurrency",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-native-ui",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-log-attack",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "fake-prompt-attack",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-upgrade-qualification",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "remote-session-trust",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        }
+      ]
+    },
+    {
+      "artifact": "qual-TestQualPrivilegedSyntheticUse-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793251141979237074.json",
+      "nonpassed_cases": [
+        {
+          "name": "agent-process-memory-observation",
+          "observed_postcondition": "blocked: read agent memory mapping: read /proc/208/mem: input/output error",
+          "status": "blocked"
+        },
+        {
+          "name": "authorized-credentialed-read",
+          "observed_postcondition": "failed subchecks=agent-process-memory-excludes-payload(missing)",
+          "status": "failed"
+        },
+        {
+          "name": "concurrent-consumers",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "protected-relay",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "lost-ack-reconciliation",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "restart-and-ephemeral-payload",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "config-overlay-concurrency",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-native-ui",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-log-attack",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "fake-prompt-attack",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-upgrade-qualification",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "remote-session-trust",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        }
+      ]
+    },
+    {
+      "artifact": "qual-TestQualPrivilegedSyntheticUse-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793251202387543522.json",
+      "nonpassed_cases": [
+        {
+          "name": "agent-process-memory-observation",
+          "observed_postcondition": "blocked: read agent memory mapping: read /proc/209/mem: input/output error",
+          "status": "blocked"
+        },
+        {
+          "name": "authorized-credentialed-read",
+          "observed_postcondition": "failed subchecks=agent-process-memory-excludes-payload(missing)",
+          "status": "failed"
+        },
+        {
+          "name": "concurrent-consumers",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "protected-relay",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "lost-ack-reconciliation",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "restart-and-ephemeral-payload",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "config-overlay-concurrency",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-native-ui",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-log-attack",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "fake-prompt-attack",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-upgrade-qualification",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "remote-session-trust",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        }
+      ]
+    },
+    {
+      "artifact": "qual-TestQualPrivilegedSyntheticUse-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793251230658641772.json",
+      "nonpassed_cases": [
+        {
+          "name": "agent-process-memory-observation",
+          "observed_postcondition": "blocked: read agent memory mapping: read /proc/199/mem: input/output error",
+          "status": "blocked"
+        },
+        {
+          "name": "authorized-credentialed-read",
+          "observed_postcondition": "failed subchecks=agent-process-memory-excludes-payload(missing)",
+          "status": "failed"
+        },
+        {
+          "name": "concurrent-consumers",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "protected-relay",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "lost-ack-reconciliation",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "restart-and-ephemeral-payload",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "config-overlay-concurrency",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-native-ui",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-log-attack",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "fake-prompt-attack",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-upgrade-qualification",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "remote-session-trust",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        }
+      ]
+    },
+    {
+      "artifact": "qual-TestQualPrivilegedSyntheticUse-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793251269463276541.json",
+      "nonpassed_cases": [
+        {
+          "name": "agent-process-memory-observation",
+          "observed_postcondition": "blocked: read agent memory mapping r--p 00000000 00:00 0 [vvar] at 0x730b17b2f000: read /proc/208/mem: input/output error",
+          "status": "blocked"
+        },
+        {
+          "name": "authorized-credentialed-read",
+          "observed_postcondition": "failed subchecks=agent-process-memory-excludes-payload(missing)",
+          "status": "failed"
+        },
+        {
+          "name": "concurrent-consumers",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "protected-relay",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "lost-ack-reconciliation",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "restart-and-ephemeral-payload",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "config-overlay-concurrency",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-native-ui",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-log-attack",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "fake-prompt-attack",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-upgrade-qualification",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "remote-session-trust",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        }
+      ]
+    },
+    {
+      "artifact": "qual-TestQualPrivilegedSyntheticUse-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793251300361733103.json",
+      "nonpassed_cases": [
+        {
+          "name": "agent-process-memory-observation",
+          "observed_postcondition": "blocked: read agent memory mapping r--p 00000000 00:00 0 [vvar_vclock] at 0x7f2f85b64000: read /proc/209/mem: input/output error",
+          "status": "blocked"
+        },
+        {
+          "name": "authorized-credentialed-read",
+          "observed_postcondition": "failed subchecks=agent-process-memory-excludes-payload(missing)",
+          "status": "failed"
+        },
+        {
+          "name": "concurrent-consumers",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "protected-relay",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "lost-ack-reconciliation",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "restart-and-ephemeral-payload",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "config-overlay-concurrency",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-native-ui",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-log-attack",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "fake-prompt-attack",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-upgrade-qualification",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "remote-session-trust",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        }
+      ]
+    },
+    {
+      "artifact": "qual-TestQualPrivilegedSyntheticUse-90710d55be7cb64c6ca78277d3a4a07a4c2a7487-1793251326232352718.json",
+      "nonpassed_cases": [
+        {
+          "name": "concurrent-consumers",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "protected-relay",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "lost-ack-reconciliation",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "restart-and-ephemeral-payload",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "config-overlay-concurrency",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-native-ui",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-log-attack",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "fake-prompt-attack",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "host-upgrade-qualification",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        },
+        {
+          "name": "remote-session-trust",
+          "observed_postcondition": "not exercised: the synthetic tier covers only the scenarios its cases exercised; the remaining ones still require a live deployment run",
+          "status": "not_exercised"
+        }
+      ]
+    }
+  ],
+  "raw_credentials_retained": false,
+  "record_type": "qualification-correction",
+  "schema_version": 1,
+  "supported_source_revision": "90710d55be7cb64c6ca78277d3a4a07a4c2a7487",
+  "verification": {
+    "collateral_checks": "pending in this record; repository checks will be appended after completion",
+    "environment": "rootful disposable Linux Alpine container; network disabled; source and Go module cache read-only; service UID 2001 and agent UID 2002; synthetic AegisKeys and provider only",
+    "independent_review": "unavailable",
+    "result": "37 passed, 0 failed; ten scenarios remain not_exercised",
+    "scope": "synthetic credentialed process-boundary qualification only; not live AegisKeys and not full Mode C three-identity capsule qualification"
+  }
+}

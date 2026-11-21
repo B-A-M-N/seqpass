@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "goalID": "d64838a6-1a81-4aea-92ab-a95d8872051d",
+  "sessionID": "ses_eaf8a3ecbffe6PITLFaz5xF8N5",
+  "reason": "cleared",
+  "archivedAt": 1792508083947,
+  "goal": {
+    "schemaVersion": 1,
+    "id": "d64838a6-1a81-4aea-92ab-a95d8872051d",
+    "sessionID": "ses_eaf8a3ecbffe6PITLFaz5xF8N5",
+    "objective": "# SeqPass — External Qualification P0 Remediation\n\nRead the independent external qualification findings. Verify against the current branch and preserve concurrent work, including `git.push`.\n\nThe tested baseline was `e4af93d`, but inspect the actual HEAD before making changes.\n\n## P0-1 — Resolve authenticated interoperability\n\nSeqPass sets `PR_SET_DUMPABLE=0`, while AegisKeys reads `/proc/<pid>/exe` to verify the caller. The external lab reproduced authentication failure at the peer-identity layer before credential authorization.\n\nDo not disable non-dumpability on the long-lived SeqPass broker merely to make a request pass.\n\nCoordinate with AegisKeys on a minimal compatible mechanism.\n\nEvaluate a short-lived trusted credential-resolution helper executable that:\n\n- Has its own explicitly pinned executable identity.\n- Is invoked only through the trusted broker's authorized execution path.\n- Communicates over private inherited file descriptors or equivalent protected IPC.\n- Never accepts direct agent connections.\n- Carries binding identity, authorized operation, and operation ID.\n- Never receives or returns secrets through argv, environment, logs, or model-facing data.\n- Has core dumps disabled and a minimal process lifetime.\n- Returns credential material only into the trusted execution boundary.\n\nTreat the helper as an additional sensitive process, not a security-free workaround. Review same-UID process-memory exposure and whether its invocation permits bypassing SeqPass approvals.\n\nReject implementations that merely trust an agent-supplied path or UID.\n\nBefore finalizing, prove the helper works with AegisKeys executable grants and that an agent UID cannot impersonate it.\n\n## P0-2 — Operation-scoped resolve\n\nFix `internal/aegiskeys/client.go` and `internal/service/execute.go`.\n\nThe JSON request must contain:\n\n```json\n{\n  \"binding\": \"seqpass/example\",\n  \"operation\": \"http.request\",\n  \"operation_id\": \"authorized-operation-id\"\n}\n```\n\nUse the actual authorized `ur.Operation` for use operations and `\"transfer\"` for protected transfers.\n\nDo not derive the operation from arbitrary model input.\n\nAdd regressions proving:\n\n- Correct scope resolves.\n- Missing scope denies.\n- Incorrect scope denies.\n- Operation correlation appears correctly in audit metadata.\n- Missing binding does not cause an unsafe or misleading protocol downgrade.\n\n## P0-3 — Save and retrieve lifecycle\n\nIntegrate the AegisKeys provisioning API once its contract is agreed.\n\nTrusted intake must support:\n\n- Use once.\n- Save only.\n- Save and use.\n\nOnly the trusted operator can authorize persistence.\n\nPersist the credential exclusively in AegisKeys. SeqPass stores opaque identities, operation state, approvals, and receipts—not a second credential copy.\n\nHandle retries by durable request ID. If the provisioning response is lost, reconcile before attempting another creation.\n\nFor save-and-use, report storage and execution as separate outcomes.\n\nAdd restart, rotation, revocation, duplicate-request, and binding-drift tests.\n\n## P1 — systemd\n\nCorrect `deploy/seqpass-broker.service`.\n\nMove `ExecStartPre` into `[Service]` and `StartLimitIntervalSec` into `[Unit]`.\n\nThe preflight must not use `--require-verified`; the running broker must establish the verified posture separately.\n\nUse the complete isolated configuration: agent UID, intake UID, socket group, intake group, AegisKeys socket, assurance setting, and separate agent socket directory.\n\nEnsure systemd sandbox and filesystem settings permit exactly the required trusted accesses.\n\nAdd automated `systemd-analyze verify` validation.\n\n## Acceptance\n\nAn authorized operation must pass through the real AegisKeys broker. A forbidden operation must be denied. A credential entered once through trusted intake must be saved, survive restart, and be reused without exposing plaintext to an agent.\n\nImplement small, reviewable changes. Do not rewrite secureops drivers unrelated to the integration defect.\n\nReturn exact commits, tests, remaining blockers, and the external qualification scenarios ready to rerun.",
+    "completionMode": "verified",
+    "constraints": [],
+    "revision": 1,
+    "status": "active",
+    "requirements": [
+      {
+        "id": "d5df15af-c1b5-46b1-96a9-c9c63ab9eacc",
+        "text": "Objective achieved: # SeqPass — External Qualification P0 Remediation\n\nRead the independent external qualification findings. Verify against the current branch and preserve concurrent work, including `git.push`.\n\nThe tested baseline was `e4af93d`, but inspect the actual HEAD before making changes.\n\n## P0-1 — Resolve authenticated interoperability\n\nSeqPass sets `PR_SET_DUMPABLE=0`, while AegisKeys reads `/proc/<pid>/exe` to verify the caller. The external lab reproduced authentication failure at the peer-identity layer before credential authorization.\n\nDo not disable non-dumpability on the long-lived SeqPass broker merely to make a request pass.\n\nCoordinate with AegisKeys on a minimal compatible mechanism.\n\nEvaluate a short-lived trusted credential-resolution helper executable that:\n\n- Has its own explicitly pinned executable identity.\n- Is invoked only through the trusted broker's authorized execution path.\n- Communicates over private inherited file descriptors or equivalent protected IPC.\n- Never accepts direct agent connections.\n- Carries binding identity, authorized operation, and operation ID.\n- Never receives or returns secrets through argv, environment, logs, or model-facing data.\n- Has core dumps disabled and a minimal process lifetime.\n- Returns credential material only into the trusted execution boundary.\n\nTreat the helper as an additional sensitive process, not a security-free workaround. Review same-UID process-memory exposure and whether its invocation permits bypassing SeqPass approvals.\n\nReject implementations that merely trust an agent-supplied path or UID.\n\nBefore finalizing, prove the helper works with AegisKeys executable grants and that an agent UID cannot impersonate it.\n\n## P0-2 — Operation-scoped resolve\n\nFix `internal/aegiskeys/client.go` and `internal/service/execute.go`.\n\nThe JSON request must contain:\n\n```json\n{\n  \"binding\": \"seqpass/example\",\n  \"operation\": \"http.request\",\n  \"operation_id\": \"authorized-operation-id\"\n}\n```\n\nUse the actual authorized `ur.Operation` for use operations and `\"transfer\"` for protected transfers.\n\nDo not derive the operation from arbitrary model input.\n\nAdd regressions proving:\n\n- Correct scope resolves.\n- Missing scope denies.\n- Incorrect scope denies.\n- Operation correlation appears correctly in audit metadata.\n- Missing binding does not cause an unsafe or misleading protocol downgrade.\n\n## P0-3 — Save and retrieve lifecycle\n\nIntegrate the AegisKeys provisioning API once its contract is agreed.\n\nTrusted intake must support:\n\n- Use once.\n- Save only.\n- Save and use.\n\nOnly the trusted operator can authorize persistence.\n\nPersist the credential exclusively in AegisKeys. SeqPass stores opaque identities, operation state, approvals, and receipts—not a second credential copy.\n\nHandle retries by durable request ID. If the provisioning response is lost, reconcile before attempting another creation.\n\nFor save-and-use, report storage and execution as separate outcomes.\n\nAdd restart, rotation, revocation, duplicate-request, and binding-drift tests.\n\n## P1 — systemd\n\nCorrect `deploy/seqpass-broker.service`.\n\nMove `ExecStartPre` into `[Service]` and `StartLimitIntervalSec` into `[Unit]`.\n\nThe preflight must not use `--require-verified`; the running broker must establish the verified posture separately.\n\nUse the complete isolated configuration: agent UID, intake UID, socket group, intake group, AegisKeys socket, assurance setting, and separate agent socket directory.\n\nEnsure systemd sandbox and filesystem settings permit exactly the required trusted accesses.\n\nAdd automated `systemd-analyze verify` validation.\n\n## Acceptance\n\nAn authorized operation must pass through the real AegisKeys broker. A forbidden operation must be denied. A credential entered once through trusted intake must be saved, survive restart, and be reused without exposing plaintext to an agent.\n\nImplement small, reviewable changes. Do not rewrite secureops drivers unrelated to the integration defect.\n\nReturn exact commits, tests, remaining blockers, and the external qualification scenarios ready to rerun.",
+        "required": true,
+        "status": "pending",
+        "evidenceIDs": [],
+        "verification": "semantic",
+        "source": "objective",
+        "updatedAt": 1792442036428
+      }
+    ],
+    "evidence": [],
+    "checks": [],
+    "runtimeFingerprint": {
+      "goalVersion": "1.3.49",
+      "goalBuild": "sha256:a72d561847a1ee3c5fc12a6e9df552390e24f6d9cd8c9476963df1799f040cc2",
+      "opencodeVersion": "1.18.2",
+      "pluginApiVersion": "1.19.1"
+    },
+    "usage": {
+      "turns": 0,
+      "tokens": 0,
+      "cost": 0,
+      "runtimeMs": 0,
+      "seenMessageIDs": []
+    },
+    "revisionTurnBaseline": 0,
+    "budget": {
+      "maxTurns": 0,
+      "maxTokens": 0,
+      "maxCost": 0,
+      "maxRuntimeMs": 0
+    },
+    "progressRevision": 0,
+    "observedProgressRevision": 0,
+    "progressFingerprints": [],
+    "stalledTurns": 0,
+    "progressNotes": [],
+    "storageGeneration": 1,
+    "createdAt": 1792442036428,
+    "updatedAt": 1792442036428
+  }
+}

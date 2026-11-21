@@ -1,0 +1,37 @@
+{
+  "schema": "seqpass-verification-supplement/1",
+  "verified_at_utc": "2026-10-29T14:59:40.310454+00:00",
+  "source_revision": "90710d55be7cb64c6ca78277d3a4a07a4c2a7487",
+  "source_snapshot_sha256": "a02269b52d6cb8139f655937324961e906fd352cf31a75821bbdcccfc38b198f",
+  "source_manifest": "qual/evidence/seqpass-worktree-source-20261029-a02269b52d6c.json",
+  "source_manifest_sha256": "048802462963b7a25ef4035ddc46dd59574f0549f0bb2e346e22f3c6be3ceb4e",
+  "worktree_dirty": true,
+  "checks": [
+    {
+      "command": "go test -count=1 ./...",
+      "result": "passed"
+    },
+    {
+      "command": "go vet ./...",
+      "result": "passed"
+    },
+    {
+      "command": "gofmt -l <touched Go files>",
+      "result": "passed; no paths returned"
+    },
+    {
+      "command": "git diff --check",
+      "result": "passed"
+    },
+    {
+      "command": "python3 -B qual/source_snapshot.py --help",
+      "result": "passed"
+    }
+  ],
+  "not_exercised": [
+    "three-identity capsule qualification: dedicated non-root UIDs 2001, 2002, and 2003 are not configured in this environment",
+    "FI Gateway integration, durable store restart, and routing qualification: gateway repository intentionally excluded from this work"
+  ],
+  "independent_review": "unavailable",
+  "raw_credentials_retained": false
+}

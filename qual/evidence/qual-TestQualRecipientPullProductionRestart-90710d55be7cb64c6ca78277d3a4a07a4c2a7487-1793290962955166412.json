@@ -1,0 +1,50 @@
+{
+  "suite": "seqpass-qual/2",
+  "source_rev": "90710d55be7cb64c6ca78277d3a4a07a4c2a7487",
+  "binary_sha256": "ed23305f70dac044e3a0f6c75d1b230d4e23cbd4a0a37a071368e75d2eefb989",
+  "uid": 1000,
+  "gid": 1000,
+  "agent_principal": "uid:1000",
+  "environment": {
+    "os": "linux",
+    "arch": "amd64",
+    "go_version": "go1.25.9",
+    "kernel": "Linux 7.0.11-76070011-generic x86_64 GNU/Linux"
+  },
+  "protocol_versions": {
+    "mcp": "2024-11-05",
+    "recipient-envelope": "v1"
+  },
+  "vault_mode": "memory-test-synthetic-recipient-pull-process-restart",
+  "topology": {
+    "go_version": "go1.25.9",
+    "seqpass_binary_sha256": "ed23305f70dac044e3a0f6c75d1b230d4e23cbd4a0a37a071368e75d2eefb989",
+    "seqpass_source_revision": "90710d55be7cb64c6ca78277d3a4a07a4c2a7487"
+  },
+  "cases": [
+    {
+      "name": "recipient-pull-production-lost-receipt",
+      "tier": "cross-broker-system",
+      "intent": "drop the shipped recipient's completion request after applying a synthetic credential",
+      "expected_postcondition": "recipient application persists, broker retains uncertain status, and CLI output discloses no credential",
+      "observed_postcondition": "operation=559d72cddb5010618675546d7188307b status=uncertain recipient_output_secret_free=true",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "recipient-pull-production-recipient-restart",
+      "tier": "cross-broker-system",
+      "intent": "restart the shipped recipient from its persistent operation journal and retry lost completion against a restarted broker",
+      "expected_postcondition": "idempotent receipt retry reconciles uncertainty without replaying the credential write",
+      "observed_postcondition": "completed after retry; installed synthetic value remains present",
+      "status": "passed",
+      "pass": true
+    }
+  ],
+  "residual_risks": [
+    "real AegisKeys credential resolution, grant policy, and rotation not exercised",
+    "provider and recipient side effects are independently observed only in the full cross-broker qualification",
+    "recipient application identity beyond UID pinning not proven"
+  ],
+  "unresolved_contradictions": null
+}

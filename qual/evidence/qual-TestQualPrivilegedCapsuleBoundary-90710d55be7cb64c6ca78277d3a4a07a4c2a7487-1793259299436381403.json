@@ -1,0 +1,66 @@
+{
+  "suite": "seqpass-qual/2",
+  "source_rev": "90710d55be7cb64c6ca78277d3a4a07a4c2a7487",
+  "binary_sha256": "31f156b67a4d88b4124f7e0f276edeabf81c1523095edfdcc4467aa13ab3ed38",
+  "uid": 0,
+  "gid": 0,
+  "agent_principal": "capsule-boundary",
+  "environment": {
+    "os": "linux",
+    "arch": "amd64",
+    "go_version": "go1.25.9",
+    "kernel": "Linux 7.0.11-76070011-generic x86_64 Linux"
+  },
+  "protocol_versions": {
+    "mcp": "2024-11-05",
+    "recipient-envelope": "v1"
+  },
+  "vault_mode": "sealed-capsule-synthetic",
+  "topology": {
+    "agent_uid": "2002",
+    "go_version": "go1.25.9",
+    "recipient_home": "/tmp/seqpass-capsule-homes/recipient",
+    "recipient_uid": "2003",
+    "seqpass_binary_sha256": "31f156b67a4d88b4124f7e0f276edeabf81c1523095edfdcc4467aa13ab3ed38",
+    "seqpass_source_revision": "90710d55be7cb64c6ca78277d3a4a07a4c2a7487",
+    "service_uid": "2001"
+  },
+  "cases": [
+    {
+      "name": "capsule-three-identity-boundary",
+      "tier": "cross-broker-system",
+      "intent": "issuer, courier, and recipient execute as distinct OS identities",
+      "expected_postcondition": "all three UIDs are distinct and non-root",
+      "observed_postcondition": "issuer=2001 agent=2002 recipient=2003",
+      "status": "passed",
+      "pass": true
+    },
+    {
+      "name": "capsule-issuer-helper-build",
+      "tier": "cross-broker-system",
+      "intent": "build the test-only signed-capsule issuer",
+      "expected_postcondition": "helper builds from the actual SeqPass repository",
+      "observed_postcondition": "error obtaining VCS status: exit status 1\n\tUse -buildvcs=false to disable VCS stamping.",
+      "status": "failed",
+      "pass": false
+    },
+    {
+      "name": "capsule-qualification-run",
+      "tier": "cross-broker-system",
+      "intent": "complete the three-identity sealed-capsule qualification",
+      "expected_postcondition": "test exits successfully",
+      "observed_postcondition": "test failed before every qualification case completed",
+      "status": "failed",
+      "pass": false
+    }
+  ],
+  "residual_risks": [
+    "real AegisKeys credential resolution, grant policy, and rotation not exercised",
+    "provider and recipient side effects are independently observed only in the full cross-broker qualification",
+    "recipient application identity beyond UID pinning not proven"
+  ],
+  "unresolved_contradictions": [
+    "capsule-issuer-helper-build: expected=helper builds from the actual SeqPass repository observed=error obtaining VCS status: exit status 1\n\tUse -buildvcs=false to disable VCS stamping.",
+    "capsule-qualification-run: expected=test exits successfully observed=test failed before every qualification case completed"
+  ]
+}
